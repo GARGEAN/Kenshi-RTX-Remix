@@ -27,6 +27,8 @@ Alt+X > Developer Settings Menu > Game Setup > Step 2: Parameter Tuning > Kenshi
 
 Delete the files extracted from the archive, the `usd` folder and the `rtx-remix` folder.
 
+Or just reinstall the game on clear.
+
 ## Crash reports
 
 After a crash, a file named `remix-dx11-crash-<number>.dmp` is written to `%TEMP%`. Attach it when reporting the crash.
@@ -53,5 +55,6 @@ Modified version of [DXVK-Remix DX11](https://github.com/Murray2k6/dxvk-remix-DX
 - DXVK: zlib license, see `LICENSE`.
 - NVIDIA RTX Remix: MIT license, see `LICENSE-MIT`.
 - Third-party components, including NVIDIA DLSS: see `ThirdPartyLicenses.txt`.
+- Remix Plus is a community-maintained fork of NVIDIA's dxvk-remix, created and led by Kim2091.
 
 This project is not affiliated with or endorsed by NVIDIA or Lo-Fi Games.
