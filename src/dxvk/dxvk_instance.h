@@ -1,0 +1,182 @@
+/*
+* Copyright (c) 2021-2026, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+
+#include "../util/config/config.h"
+
+#include <memory>
+
+#include "dxvk_adapter.h"
+#include "dxvk_device_filter.h"
+#include "dxvk_extension_provider.h"
+#include "dxvk_options.h"
+
+namespace dxvk {
+
+  struct DxvkDebugUtilsContext;
+  
+  /**
+   * \brief DXVK instance
+   * 
+   * Manages a Vulkan instance and stores a list
+   * of adapters. This also provides methods for
+   * device creation.
+   */
+  class DxvkInstance : public RcObject {
+
+  public:
+
+    DxvkInstance();
+    ~DxvkInstance();
+
+    // DX11_V283_SHARED_VK_INSTANCE: process-wide shared instance. D3D11 games
+    // reach instance creation from several entry points on different threads
+    // (DXGI factory creation, D3D11CreateDevice with a foreign adapter);
+    // creating separate DxvkInstances CONCURRENTLY parks multiple threads
+    // inside vkCreateInstance, where implicit layers / ICDs can deadlock
+    // under the Vulkan loader's global lock (observed in the field: two
+    // instance creations 400ms apart, both logs ending at the line printed
+    // immediately before vkCreateInstance). All entry points share ONE
+    // instance behind a mutex: the second caller waits - holding no loader
+    // or Vulkan locks - instead of racing, and gets the same adapters.
+    // DXVK_REMIX_SHARED_INSTANCE=0 reverts to per-call instances.
+    static Rc<DxvkInstance> getOrCreateSharedInstance();
+
+    // True while either dxgi.dll or d3d11.dll in this process is constructing
+    // its shared Vulkan instance and enumerating physical devices. This state
+    // is backed by a named kernel event because dxvk is statically linked into
+    // both DLLs and ordinary C++ statics are not shared between them.
+    static bool isCrossDllInstanceConstructionInProgress();
+
+    /**
+     * \brief Vulkan instance functions
+     * \returns Vulkan instance functions
+     */
+    Rc<vk::InstanceFn> vki() const {
+      return m_vki;
+    }
+    
+    /**
+     * \brief Vulkan instance handle
+     * \returns The instance handle
+     */
+    VkInstance handle() {
+      return m_vki->instance();
+    }
+
+     /**
+     * \brief Number of adapters
+     * 
+     * \returns The number of adapters
+     */
+    size_t adapterCount() {
+      return m_adapters.size();
+    }
+    
+    /**
+     * \brief Retrieves an adapter
+     * 
+     * Note that the adapter does not hold
+     * a hard reference to the instance.
+     * \param [in] index Adapter index
+     * \returns The adapter, or \c nullptr.
+     */
+    Rc<DxvkAdapter> enumAdapters(
+            uint32_t      index) const;
+    
+    /**
+     * \brief Finds adapter by LUID
+     * 
+     * \param [in] luid Pointer to LUID
+     * \returns Matching adapter, if any
+     */
+    Rc<DxvkAdapter> findAdapterByLuid(
+      const void*         luid) const;
+    
+    /**
+     * \brief Finds adapter by device IDs
+     * 
+     * \param [in] vendorId Vendor ID
+     * \param [in] deviceId Device ID
+     * \returns Matching adapter, if any
+     */
+    Rc<DxvkAdapter> findAdapterByDeviceId(
+            uint16_t      vendorId,
+            uint16_t      deviceId) const;
+    
+    /**
+     * \brief Retrieves configuration options
+     * 
+     * The configuration set contains user-defined
+     * options as well as app-specific options.
+     * \returns Configuration options
+     */
+    const Config& config() const {
+      return m_config;
+    }
+
+    /**
+     * \brief DXVK options
+     * \returns DXVK options
+     */
+    const DxvkOptions& options() const {
+      return m_options;
+    }
+
+    /**
+     * \brief Enabled instance extensions
+     * \returns Enabled instance extensions
+     */
+    const DxvkInstanceExtensions& extensions() const {
+      return m_extensions;
+    }
+
+  private:
+    Config              m_config;
+    DxvkOptions         m_options;
+    // NV-DXVK start: Integrate Aftermath
+    bool                m_aftermathEnabled = false;
+    // NV-DXVK end
+
+    Rc<vk::LibraryFn>       m_vkl;
+    Rc<vk::InstanceFn>      m_vki;
+    DxvkInstanceExtensions  m_extensions;
+    // NV-DXVK start: use EXT_debug_utils
+    VkDebugUtilsMessengerEXT m_debugUtilsMessenger = nullptr;
+    // NV-DXVK end
+
+    // NV-DXVK start: debug callback context (stack trace + duplicate filtering)
+    std::unique_ptr<DxvkDebugUtilsContext> m_debugUtilsContext;
+    // NV-DXVK end
+
+    std::vector<DxvkExtensionProvider*> m_extProviders;
+    std::vector<Rc<DxvkAdapter>> m_adapters;
+    
+    VkInstance createInstance();
+
+    std::vector<Rc<DxvkAdapter>> queryAdapters();
+    
+    static void logNameList(const DxvkNameList& names);
+    
+  };
+  
+}

@@ -1,0 +1,415 @@
+/*
+* Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+
+#include "rtx/external/NRD.slangh"
+#include "rtx/utility/color.slangh"
+
+#define D3DFOG_NONE   0
+#define D3DFOG_EXP    1
+#define D3DFOG_EXP2   2
+#define D3DFOG_LINEAR 3
+
+vec4 calculateFog(float viewDistance)
+{
+  if (cb.fogMode == D3DFOG_NONE)
+  {
+    return vec4(0.0);
+  }
+
+  // Hack: Lets the current fog system look fine on maps with a skybox, to be removed once we read fog parameters
+  // properly from the game as they will specify how exactly the fog should look (if its even enabled rather than having
+  // it enabled by default).
+  if (viewDistance > cb.maxFogDistance)
+  {
+    return vec4(0.0);
+  }
+
+  // https://docs.microsoft.com/en-us/windows/win32/direct3d11/fog-formulas
+
+  float f = 0;
+
+  if (cb.fogMode == D3DFOG_LINEAR)
+  {
+    // Note: Clamp the view distance to the range of the fog effect.
+    // Todo: Add in the min fog distance too potentially as this is currently missing.
+    viewDistance = clamp(viewDistance, 0.0f, cb.maxFogDistance);
+
+    f = (cb.fogEnd - viewDistance) * cb.fogScale;
+  }
+  else if (cb.fogMode == D3DFOG_EXP)
+  {
+    float d = viewDistance * cb.fogDensity;
+    f = exp(-d);
+  }
+  else if (cb.fogMode == D3DFOG_EXP2)
+  {
+    float d = viewDistance * cb.fogDensity;
+    f = exp(-d * d);
+  }
+
+  f = clamp(f, 0.0, 1.0);
+
+  return vec4(cb.fogColor, 1.0 - f);
+}
+
+
+// DX11_V503: Kenshi's own atmospheric scattering, ported from
+// `Kenshi Base/data/materials/post/atmospherefog.hlsl`.
+//
+// Optical-depth approximation used by SkyX. Kept byte-for-byte with the game's
+// polynomial so the curve matches rather than merely resembles.
+float kenshiSkyXScaleFn(float coss, float scaleDepth)
+{
+  const float x = 1.0f - coss;
+  return scaleDepth * exp(-0.00287f + x * (0.459f + x * (3.83f + x * (-6.80f + x * 5.25f))));
+}
+
+// calculateAtmosphereFog, minus the parts that only apply to sky pixels (which
+// this never runs for) and minus the horizonClouds lerp, which is applied by the
+// caller so it stays visible next to the rest of the colour handling.
+vec3 calculateKenshiScattering(vec3 cameraPos, vec3 worldPos, vec3 lightDir)
+{
+  vec3 v3Pos = (worldPos - cameraPos) / cb.kenshiSkyXSkydomeRadius;
+  v3Pos.y += cb.kenshiSkyXInnerRadius;
+
+  const float l = v3Pos.x * v3Pos.x + v3Pos.z * v3Pos.z;
+  v3Pos.y = lerp(max(v3Pos.y, cb.kenshiSkyXInnerRadius), v3Pos.y, saturate(l));
+
+  vec3 v3Ray = v3Pos - cb.kenshiSkyXCameraPos;
+  float fFar = length(v3Ray);
+  if (fFar <= 0.0f)
+  {
+    return vec3(0.0f);
+  }
+  v3Ray /= fFar;
+  fFar = saturate(fFar);
+
+  // The game's own guard against rays pointing steeply down, which the
+  // approximation does not model.
+  if (v3Ray.y < -0.3f)
+  {
+    v3Ray = vec3(0.0f, -0.3f, 0.953f);
+  }
+
+  const vec3 v3Start = cb.kenshiSkyXCameraPos;
+  const float fHeight = cb.kenshiSkyXCameraPos.y;
+  const float fStartAngle = dot(v3Ray, v3Start) / fHeight;
+  const float fStartDepth = exp(cb.kenshiSkyXScaleParams.z * (cb.kenshiSkyXInnerRadius - cb.kenshiSkyXCameraPos.y));
+  const float fStartOffset = fStartDepth * kenshiSkyXScaleFn(fStartAngle, cb.kenshiSkyXScaleParams.y);
+
+  const int kSamples = 4;
+  const float fSampleLength = fFar / float(kSamples);
+  const float fScaledLength = fSampleLength * cb.kenshiSkyXScaleParams.x;
+  const vec3 v3SampleRay = v3Ray * fSampleLength;
+  vec3 v3SamplePoint = v3Start + v3SampleRay * 0.5f;
+
+  vec3 colour = vec3(0.0f);
+
+  for (int i = 0; i < kSamples; ++i)
+  {
+    const float sampleHeight = length(v3SamplePoint);
+    const float fDepth = exp(cb.kenshiSkyXScaleParams.z * (cb.kenshiSkyXInnerRadius - sampleHeight));
+
+    const float fLightAngle = dot(lightDir, v3SamplePoint) / sampleHeight;
+    const float fCameraAngle = dot(v3Ray, v3SamplePoint) / sampleHeight;
+
+    const float lightScale = kenshiSkyXScaleFn(fLightAngle, cb.kenshiSkyXScaleParams.y);
+    const float camScale = kenshiSkyXScaleFn(fCameraAngle, cb.kenshiSkyXScaleParams.y);
+
+    const float fScatter = fStartOffset + fDepth * (lightScale - camScale);
+    vec3 v3Attenuate = exp(-fScatter * (cb.kenshiSkyXInvWaveLength * cb.kenshiSkyXScatter.y + cb.kenshiSkyXScatter.z));
+
+    v3Attenuate *= (fDepth * fScaledLength);
+    colour += v3Attenuate;
+
+    v3SamplePoint += v3SampleRay;
+  }
+
+  const vec3 rayleighColour = colour * (cb.kenshiSkyXInvWaveLength * cb.kenshiSkyXScatter.x);
+
+  const vec3 direction = cb.kenshiSkyXCameraPos - v3Pos;
+  const float dirLength = length(direction);
+  const float coss = dirLength > 0.0f ? (-dot(lightDir, direction) / dirLength) : 0.0f;
+  const float rayleighPhase = 0.75f * (1.0f + 0.5f * coss * coss);
+
+  return rayleighPhase * rayleighColour * cb.kenshiSkyXExposure;
+}
+
+// DX11_V496_KENSHI_DISTANT_FOG, rewritten in V501 and V503.
+//
+// Kenshi's own `atmosphere_fog_fs` (Kenshi Base/data/materials/post/fog.hlsl):
+//
+//   atmosphere = scattering colour, alpha ramped atmoStart..atmoEnd
+//   if (distance == farClip) atmosphere = 0            // sky: atmospheric half off
+//   global     = fogValue(distance, fogDensity, fogColour, sunColour.w)
+//   result     = lerp(atmosphere, global, global.a)
+//   result.a   = saturate(atmosphere.a + global.a)
+//
+// Two things V496 got wrong, both visible:
+//
+// 1. IT SKIPPED THE SKY ENTIRELY. Vanilla zeroes only the ATMOSPHERIC half at
+//    farClip - the global half still evaluates AT farClip, where `amount`
+//    saturates to 1 and the sky is fogged at full `fogColour.a`. Skipping both
+//    left fogged land against an unfogged sky.
+//
+// 2. IT USED THE SKY IMAGE as the atmospheric colour, sampled at the pixel's own
+//    screen UV, with an alpha ramp that reaches 1.0 by atmoEnd. Distant geometry
+//    was therefore REPLACED by whatever the sky matte held at that pixel -
+//    stars, sun glints, and below the horizon the skybox's bright green. That is
+//    both the "green glow in low areas" and the "stars visible through
+//    mountains".
+//
+// The atmospheric colour now comes from the game's own `horizonClouds`, which is
+// the last thing calculateAtmosphereFog does to its scattering result
+// (`color.rgb = lerp(color.rgb, horizonClouds.rgb, horizonClouds.a)`) and is what
+// makes vanilla's fog read grey and overcast. It is a constant, so it is smooth,
+// carries no image features, has no view-direction artefacts - and costs one
+// fewer texture fetch than the version it replaces.
+//
+// Remaining known gap: vanilla's scattering varies with view direction relative
+// to the sun and this does not. Porting the four-sample SkyX scattering is the
+// fix if that difference matters; every uniform it needs is a named constant on
+// the SkyX draws the sun harvest already reads.
+vec4 calculateKenshiFog(float viewDistance, bool primaryMiss, vec3 worldDirection)
+{
+  if (cb.kenshiFogActive == 0)
+  {
+    return vec4(0.0);
+  }
+
+  // Sky pixels take the global term evaluated at the far clip, exactly as vanilla
+  // does, and take no atmospheric term.
+  const float globalDistance = primaryMiss ? cb.kenshiFogFarClip : viewDistance;
+
+  const float amount = saturate(globalDistance * cb.kenshiFogDensity);
+  const float curve = amount < 0.5f
+    ? 2.0f * amount * amount
+    : (-2.0f * (amount - 1.0f) * (amount - 1.0f) + 1.0f);
+  const float globalAlpha = saturate(curve * cb.kenshiFogOpacity);
+
+  float atmosphereAlpha = 0.0f;
+  vec3 atmosphereColour = cb.kenshiFogColour;
+
+  if (!primaryMiss
+   && cb.kenshiFogAtmoEnd > cb.kenshiFogAtmoStart
+   && cb.kenshiFogSkyBlend > 0.0f)
+  {
+    atmosphereAlpha = saturate(
+      (viewDistance - cb.kenshiFogAtmoStart)
+      / (cb.kenshiFogAtmoEnd - cb.kenshiFogAtmoStart)) * cb.kenshiFogSkyBlend;
+
+    // V503: the atmospheric colour is now Kenshi's own scattering, evaluated per
+    // pixel, finished with the game's horizonClouds lerp exactly as
+    // calculateAtmosphereFog does. That lerp is why the constant-colour version
+    // looked correct where it was first measured: `horizonA` was 1.0 in that
+    // hazy biome, which collapses the scattering away entirely. Where the sky is
+    // clear `horizonA` is low, the scattering dominates, and a constant flattens
+    // every distant pixel to one grey.
+    if (cb.kenshiFogScatterValid != 0)
+    {
+      const vec3 cameraPos = cameraGetWorldPosition(cb.camera);
+      const vec3 worldPos = cameraPos + worldDirection * viewDistance;
+
+      const vec3 scattering =
+        calculateKenshiScattering(cameraPos, worldPos, cb.kenshiFogSunDir)
+        * cb.kenshiFogScatterScale;
+
+      atmosphereColour = lerp(scattering,
+                              cb.kenshiFogHorizonColour,
+                              saturate(cb.kenshiFogHorizonBlend));
+    }
+    else
+    {
+      atmosphereColour = lerp(cb.kenshiFogColour,
+                              cb.kenshiFogHorizonColour,
+                              saturate(cb.kenshiFogHorizonBlend));
+    }
+  }
+
+  const vec3 colour = lerp(atmosphereColour, cb.kenshiFogColour, globalAlpha);
+  return vec4(colour, saturate(atmosphereAlpha + globalAlpha));
+}
+
+
+// DX11_V505: Kenshi's local fog volumes, ported from fog_planes_fs and
+// fog_sphere_fs in `Kenshi Base/data/materials/post/fog.hlsl`.
+//
+// Both integrate `amount = far - near` - the path length THROUGH the medium -
+// and then run it through the same fogValue S-curve the distance fog uses. That
+// is why standing inside a volume needs no special case: `near` simply becomes 0.
+//
+// Returns premultiplied-style (rgb, alpha) to be blended over the radiance, and
+// is evaluated BEFORE the distance fog so distant volumes get washed by it, which
+// is what the game's own "fog the fog" blend achieves in fog_planes_fs.
+vec4 calculateKenshiFogVolume(
+  uint volumeIndex, vec3 cameraPos, vec3 viewRay, float viewDistance)
+{
+  const vec4 params0 = cb.kenshiFogVolumeParams0[volumeIndex];
+  const float density = params0.x;
+  const uint type = uint(params0.z);
+  const float sunLight = params0.w;
+  const vec4 colour = cb.kenshiFogVolumeColour[volumeIndex];
+
+  float nearT = 0.0f;
+  float farT = viewDistance;
+  float edge = 1.0f;
+
+  if (type == 1u)
+  {
+    // Block: intersect the convex hull of seven half-spaces dot(n, p) <= w.
+    // fog_planes_fs offsets the CAMERA, not the planes.
+    const vec3 origin = cameraPos + cb.kenshiFogVolumeParams1[volumeIndex].xyz;
+
+    for (uint i = 0; i < 7u; ++i)
+    {
+      const vec4 plane = cb.kenshiFogVolumePlanes[volumeIndex * 7u + i];
+      const float dn = dot(plane.xyz, viewRay);
+      if (abs(dn) < 1e-8f)
+      {
+        continue;
+      }
+      const float d = (plane.w - dot(plane.xyz, origin)) / dn;
+      if (dn < 0.0f)
+      {
+        nearT = max(nearT, d);
+      }
+      else
+      {
+        farT = min(farT, d);
+      }
+    }
+
+    nearT = min(nearT, viewDistance);
+    if (farT <= nearT)
+    {
+      return vec4(0.0f);
+    }
+
+    // Edge softening, with the game's own far fade and its grazing-angle term.
+    float edgeBlur = cb.kenshiFogVolumeParams0[volumeIndex].y;
+    edgeBlur *= saturate(1.0f / (farT * 0.00006f));
+
+    const vec3 ctr = origin + viewRay * (farT + nearT) * 0.5f;
+    for (uint i = 0; i < 7u; ++i)
+    {
+      const vec4 plane = cb.kenshiFogVolumePlanes[volumeIndex * 7u + i];
+      edge *= saturate((plane.w - dot(plane.xyz, ctr)) * edgeBlur);
+    }
+    edge *= 1.0f + abs(viewRay.y) * 0.9f;
+  }
+  else if (type == 2u)
+  {
+    // Sphere. The game solves this in view space off worldViewMatrix; the same
+    // intersection in world space is equivalent and camera-independent.
+    const vec4 sphere = cb.kenshiFogVolumePlanes[volumeIndex * 7u];
+    const vec3 m = cameraPos - sphere.xyz;
+    const float b = dot(m, viewRay);
+    const float c = dot(m, m) - sphere.w * sphere.w;
+    const float disc = b * b - c;
+    if (disc <= 0.0f)
+    {
+      return vec4(0.0f);
+    }
+
+    const float root = sqrt(disc);
+    nearT = clamp(-b - root, 0.0f, viewDistance);
+    farT = clamp(-b + root, 0.0f, viewDistance);
+
+    // The game's break-up term, which dissolves the silhouette with distance so
+    // the dome does not read as a hard ball. It samples the hull's world
+    // position; the entry point is the closest thing available without the hull.
+    const vec3 entry = cameraPos + viewRay * nearT;
+    float ss = sin(entry.y * 0.004f) + 1.0f;
+    ss -= cos(entry.z * 0.0008f) * cos(entry.x * 0.0008f) - 1.0f;
+    ss *= saturate(nearT * 0.0001f - 1.0f) * 1000.0f;
+    farT -= ss;
+
+    if (farT <= nearT)
+    {
+      return vec4(0.0f);
+    }
+  }
+  else
+  {
+    return vec4(0.0f);
+  }
+
+  // fogValue(amount, density * edge, colour, light)
+  const float amount = farT - nearT;
+  const float lightTerm = type == 1u
+    ? max(0.08f, sunLight * 1.6f * saturate(cb.kenshiFogSunDir.y * 3.0f + 0.2f))
+    : sunLight;
+
+  const float t = saturate(amount * density * edge);
+  const float curve = t < 0.5f
+    ? 2.0f * t * t
+    : (-2.0f * (t - 1.0f) * (t - 1.0f) + 1.0f);
+
+  return vec4(colour.rgb * lightTerm, saturate(curve * colour.a));
+}
+
+void unpackDenoiserRadiance(inout float3 radiance, uint denoiserMode)
+{
+  switch (denoiserMode)
+  {
+    case DENOISER_MODE_RELAX:
+      radiance = RELAX_BackEnd_UnpackRadiance(float4(radiance, 0)).xyz;
+      break;
+    case DENOISER_MODE_REBLUR:
+      radiance = REBLUR_BackEnd_UnpackRadianceAndNormHitDist(float4(radiance, 0)).xyz;
+      break;
+  }
+}
+
+vec3 applyPostFilter(Texture2D<float4> texture, uint2 pixel, uint denoiserMode)
+{
+  vec3 centerColor = texture[pixel].xyz;
+  unpackDenoiserRadiance(centerColor, denoiserMode);
+  vec3 totalColor = vec3(0);
+  uint count = 0;
+  for (int i = -1; i <= 1; ++i)
+  {
+    for (int j = -1; j <= 1; ++j)
+    {
+      if (i != 0 && j != 0)
+      {
+        vec3 color = texture[pixel + int2(i, j)].xyz;
+        unpackDenoiserRadiance(color, denoiserMode);
+        count += any(color > vec3(0)) ? 1 : 0;
+        totalColor += color;
+      }
+    }
+  }
+
+  vec3 avgColor = totalColor / max(1, count);
+  if (calcBt709Luminance(centerColor) > calcBt709Luminance(avgColor) * cb.postFilterThreshold)
+  {
+    centerColor = avgColor;
+  }
+  return centerColor;
+}
+
+// Clamp to the nearest valid texel so edge pixels do not get biased darker by missing neighbors.
+int2 clampPixelCoordinate(int2 pixelCoordinate, int2 offset)
+{
+  return clamp(pixelCoordinate + offset, 0, cb.camera.resolution - 1);
+}

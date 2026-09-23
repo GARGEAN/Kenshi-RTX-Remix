@@ -1,0 +1,455 @@
+/*
+* Copyright (c) 2021-2026, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#include "rtx_asset_exporter.h"
+#include "rtx_types.h"
+#include "rtx_context.h"
+#include "../../util/sync/sync_signal.h"
+#include "../../util/util_threadpool.h"
+#include "../dxvk_device.h"
+#include "../dxvk_context.h"
+#include "../dxvk_buffer.h"
+#include <gli/gli.hpp>
+#include <gli/convert.hpp>
+#include <gli/save.hpp>
+#include <string>
+#include <charconv>
+#include <functional>
+
+namespace {
+  VkFormat normalizeTargetFormat(VkFormat format) {
+    switch (format) {
+
+    case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
+    case VK_FORMAT_B4G4R4A4_UNORM_PACK16:
+    case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
+    case VK_FORMAT_R5G5B5A1_UNORM_PACK16:
+    case VK_FORMAT_B5G5R5A1_UNORM_PACK16:
+    case VK_FORMAT_B8G8R8A8_UNORM:
+      return VK_FORMAT_R8G8B8A8_UNORM;
+
+    case VK_FORMAT_B8G8R8A8_SRGB:
+      return VK_FORMAT_R8G8B8A8_SRGB;
+
+    default:
+      return format;
+    }
+  }
+
+  VkFormat gliFormatToVk(gli::format format) {
+    return static_cast<VkFormat>(format);
+  }
+
+  VkExtent3D gliExtentToVk(gli::extent2d ext) {
+    return VkExtent3D {
+      static_cast<uint32_t>(ext.x),
+      static_cast<uint32_t>(ext.y),
+      1
+    };
+  }
+
+  VkDeviceSize computeAlignedPitch(VkDeviceSize pitch, VkDeviceSize alignment) {
+    if (alignment == 0 || pitch == 0)
+      return pitch;
+
+    if (pitch <= alignment)
+      return alignment;
+
+    const VkDeviceSize remainder = pitch % alignment;
+    return remainder == 0 ? pitch : (pitch + alignment - remainder);
+  }
+}
+
+namespace dxvk {
+
+  void AssetExporter::waitForAllExportsToComplete(const float numSecsToWait) {
+
+    if (m_numExportsInFlight > 0) {
+      Logger::info(str::format("RTX: Waiting for ", m_numExportsInFlight, " asset exports to complete"));
+
+      auto startTime = std::chrono::system_clock::now();
+      while (m_numExportsInFlight > 0 &&
+             std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - startTime).count() < numSecsToWait) {
+        Sleep(1);
+      }
+
+      if (m_numExportsInFlight > 0) {
+        Logger::err(str::format("RTX: Timed-out waiting on all asset exports to complete"));
+      }
+    }
+  }
+
+  std::unique_ptr<AssetExporter::ThreadPool>& AssetExporter::getExporterThread() {
+    if (m_exporterThread == nullptr) {
+      m_exporterThread = std::make_unique<ThreadPool>(1, "rtx-asset-exporter");
+    }
+    return m_exporterThread;
+  }
+
+  void AssetExporter::exportImage(Rc<DxvkContext> ctx, const std::string& filename, Rc<DxvkImage> image, bool thumbnail/* = false*/) {
+    ScopedCpuProfileZone();
+    // NOTE: Should use a mutex here...
+    {
+      std::lock_guard lock(m_readbackSignalMutex);
+      if (m_readbackSignal == nullptr) {
+        m_readbackSignal = new sync::Fence(m_signalValue);
+      }
+    }
+
+    m_numExportsInFlight++;
+
+    // We want to retain most of the src image state
+    DxvkImageCreateInfo srcDesc = image->info();
+    DxvkImageCreateInfo dstDesc = image->info();
+
+    // NOTE: Some image formats arent well supported by DDS tools, like B8G8R8A8...  So we might want to blit rather than copy for such formats.
+
+    // TODO: Just use blit for swizzle conversion?
+    gli::swizzles swizzle = gli::swizzles(gli::SWIZZLE_RED, gli::SWIZZLE_GREEN, gli::SWIZZLE_BLUE, gli::SWIZZLE_ALPHA);
+    if (dstDesc.format == VK_FORMAT_A4R4G4B4_UNORM_PACK16_EXT) {
+      dstDesc.format = VK_FORMAT_B4G4R4A4_UNORM_PACK16;
+      swizzle = gli::swizzles(gli::SWIZZLE_BLUE, gli::SWIZZLE_GREEN, gli::SWIZZLE_RED, gli::SWIZZLE_ALPHA);
+    }
+
+    dstDesc.format = normalizeTargetFormat(dstDesc.format);
+
+    const bool useBlit = srcDesc.format != dstDesc.format;
+
+    // Detect changes in GLI since we're casting the VK format to GLI
+    assert(gli::format::FORMAT_LAST >= (gli::format) dstDesc.format);
+    const gli::format outFormat = (gli::format) dstDesc.format;
+    const DxvkFormatInfo* dstFormatInfo = imageFormatInfo(dstDesc.format);
+    constexpr VkDeviceSize kReadbackRowAlignment = 4;
+
+    if (thumbnail) {
+      constexpr uint16_t kDefaultExtentSize = 512;
+      uint16_t extentSize = kDefaultExtentSize;
+      // For games with a resolution dimension < 512, we need to make
+      // the thumbnail smaller
+      while ((srcDesc.extent.width < extentSize) ||
+             (srcDesc.extent.height < extentSize)) {
+        extentSize >>= 1;
+      }
+      // Some default parameters for thumbnails
+      dstDesc.extent.width = extentSize;
+      dstDesc.extent.height = extentSize;
+      dstDesc.extent.depth = 1;
+      dstDesc.mipLevels = 1;
+      assert(!gli::is_compressed(outFormat));
+    }
+
+    // NOTE: Only non-array textures are fully supported. For array/cube images (e.g.
+    // reflection/sky cubemaps captured as a material's primary texture), export layer 0 only -
+    // every copy below already addresses baseArrayLayer 0 with a single layer.
+    if (dstDesc.numLayers != 1) {
+      Logger::warn(str::format("RTX: Exporting only layer 0 of a ", dstDesc.numLayers,
+                               "-layer image (cube/array textures are not fully supported) for \"", filename, "\""));
+      dstDesc.numLayers = 1;
+    }
+
+    const uint32_t numMipLevels = dstDesc.mipLevels;
+
+    bool useBufferReadback = dstFormatInfo->flags.test(DxvkFormatFlag::BlockCompressed);
+    if (!useBufferReadback) {
+      VkImageFormatProperties linearProps = { };
+      useBufferReadback =
+        ctx->getDevice()->adapter()->imageFormatProperties(
+          dstDesc.format,
+          dstDesc.type,
+          VK_IMAGE_TILING_LINEAR,
+          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+          dstDesc.flags,
+          linearProps) != VK_SUCCESS;
+    }
+
+    Rc<DxvkImage>* pBlitTemps = useBlit ? new Rc<DxvkImage>[numMipLevels] : nullptr;
+    Rc<DxvkImage>* pBlitDests = useBufferReadback ? nullptr : new Rc<DxvkImage>[numMipLevels];
+    Rc<DxvkBuffer>* pReadbackBuffers = useBufferReadback ? new Rc<DxvkBuffer>[numMipLevels] : nullptr;
+
+    // Push a copy operation to the GPU; get that GPU data in CPU addressable space
+    for (uint32_t level = 0; level < numMipLevels; ++level) {
+      const VkImageSubresourceLayers srcSubresourceLayers = { imageFormatInfo(srcDesc.format)->aspectMask, level, 0, 1 };
+      const VkImageSubresourceLayers dstSubresourceLayers = { imageFormatInfo(dstDesc.format)->aspectMask, 0,     0, 1 };
+
+      const VkExtent3D srcExtent = srcDesc.extent;
+      const VkExtent3D dstExtent = thumbnail ? dstDesc.extent : image->mipLevelExtent(level);
+
+      if (useBlit) {
+        DxvkImageCreateInfo desc = dstDesc;
+        desc.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        // Drop source-image flags (e.g. VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT, which requires 6+ layers)
+        desc.flags = 0;
+        desc.viewFormatCount = 0;
+        desc.viewFormats = nullptr;
+        desc.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        desc.access = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        desc.tiling = VK_IMAGE_TILING_OPTIMAL;
+        desc.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        desc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        desc.mipLevels = 1;
+        desc.numLayers = 1;
+        desc.extent = dstExtent;
+
+        // Temp image to blit into (pBlitDests is linear, so we can only copy into)
+        pBlitTemps[level] = ctx->getDevice()->createImage(desc, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DxvkMemoryStats::Category::RTXMaterialTexture, "exportImage blit temp");
+      }
+
+      if (useBufferReadback) {
+        DxvkBufferCreateInfo readbackBufferDesc = { };
+        readbackBufferDesc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        readbackBufferDesc.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        readbackBufferDesc.access = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+        const VkExtent3D blockCount = util::computeBlockCount(dstExtent, dstFormatInfo->blockSize);
+        const VkDeviceSize rowPitch =
+          computeAlignedPitch(VkDeviceSize(blockCount.width) * dstFormatInfo->elementSize, kReadbackRowAlignment);
+        const VkDeviceSize slicePitch = VkDeviceSize(blockCount.height) * rowPitch;
+        readbackBufferDesc.size = VkDeviceSize(blockCount.depth) * slicePitch;
+
+        pReadbackBuffers[level] = ctx->getDevice()->createBuffer(
+          readbackBufferDesc,
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+          DxvkMemoryStats::Category::RTXMaterialTexture,
+          "exportimage readback buffer");
+      } else {
+        // Modify the state we need for reading on the CPU
+        DxvkImageCreateInfo desc = dstDesc;
+        desc.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        desc.flags = 0;
+        desc.viewFormatCount = 0;
+        desc.viewFormats = nullptr;
+        desc.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        desc.access = VK_ACCESS_TRANSFER_WRITE_BIT;
+        desc.tiling = VK_IMAGE_TILING_LINEAR;
+        desc.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        desc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        desc.mipLevels = 1; // Can only export 1 mip level at a time.
+        desc.numLayers = 1; // Can only export 1 layer at a time.
+        desc.extent = dstExtent;
+
+        // Make the image where we'll copy the GPU resource to CPU accessible mem
+        pBlitDests[level] = ctx->getDevice()->createImage(desc, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, DxvkMemoryStats::Category::RTXMaterialTexture, "exportimage blit dest");
+      }
+
+      VkOffset3D srcOffset = VkOffset3D { 0,0,0 };
+      if (thumbnail) {
+        // Center the thumbail on the image
+        srcOffset = VkOffset3D { int32_t(srcExtent.width) / 2 - int32_t(dstExtent.width) / 2,
+                                 int32_t(srcExtent.height) / 2 - int32_t(dstExtent.height) / 2,
+                                 0 };
+      }
+
+      if (useBlit) {
+        VkComponentMapping identityMap = { VK_COMPONENT_SWIZZLE_IDENTITY,VK_COMPONENT_SWIZZLE_IDENTITY,VK_COMPONENT_SWIZZLE_IDENTITY,VK_COMPONENT_SWIZZLE_IDENTITY };
+
+        VkImageBlit region = {};
+        region.srcSubresource = srcSubresourceLayers;
+        region.srcOffsets[0] = srcOffset;
+        region.srcOffsets[1] = { srcOffset.x + int32_t(dstExtent.width),
+                                 srcOffset.y + int32_t(dstExtent.height),
+                                 srcOffset.z + int32_t(dstExtent.depth) };
+        region.dstSubresource = dstSubresourceLayers;
+        region.dstOffsets[0] = { 0,0,0 };
+        region.dstOffsets[1] = { int32_t(dstExtent.width), int32_t(dstExtent.height), int32_t(dstExtent.depth) };
+
+        ctx->changeImageLayout(pBlitTemps[level], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+        // Blit src to temp
+        ctx->blitImage(pBlitTemps[level], identityMap, image, identityMap, region, VK_FILTER_NEAREST);
+
+        ctx->changeImageLayout(pBlitTemps[level], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        if (useBufferReadback) {
+          ctx->copyImageToBuffer(pReadbackBuffers[level], 0, kReadbackRowAlignment, 0,
+            pBlitTemps[level], dstSubresourceLayers, VkOffset3D { 0, 0, 0 }, dstExtent);
+        } else {
+          ctx->changeImageLayout(pBlitDests[level], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+          // Copy temp to system memory
+          ctx->copyImage(pBlitDests[level], dstSubresourceLayers, VkOffset3D { 0,0,0 }, pBlitTemps[level], dstSubresourceLayers, VkOffset3D { 0,0,0 }, dstExtent);
+        }
+      } else {
+        if (useBufferReadback) {
+          ctx->copyImageToBuffer(pReadbackBuffers[level], 0, kReadbackRowAlignment, 0,
+            image, srcSubresourceLayers, srcOffset, dstExtent);
+        } else {
+          ctx->changeImageLayout(pBlitDests[level], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+          // Blit src to system memory
+          ctx->copyImage(pBlitDests[level], dstSubresourceLayers, VkOffset3D { 0,0,0 }, image, srcSubresourceLayers, srcOffset, dstExtent);
+        }
+      }
+    }
+
+    ctx->emitMemoryBarrier(0,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_PIPELINE_STAGE_HOST_BIT,
+      VK_ACCESS_HOST_READ_BIT);
+
+    // Sync point, before writing to disk, we must wait on GPU
+    const uint64_t syncValue = ++m_signalValue;
+    ctx->signal(m_readbackSignal, syncValue);
+
+    // Spawn a thread so we dont sync with the GPU here (GPU runs async with CPU)
+    Future<void> result = getExporterThread()->Schedule([this, device = ctx->getDevice(), pBlitDests, pBlitTemps, pReadbackBuffers, useBufferReadback, kReadbackRowAlignment, syncValue, filename, outFormat, dstDesc, swizzle] {
+      ScopedCpuProfileZoneN("Export Image Finalize");
+      // Stall until the GPU has completed its copy to system memory (GPU->CPU)
+      this->m_readbackSignal->wait(syncValue);
+
+      // Push texture header to the GLI container
+      const gli::extent3d outExtent = { dstDesc.extent.width, dstDesc.extent.height, 1 };
+      gli::texture2d exportTex(outFormat, outExtent, dstDesc.mipLevels, swizzle);
+
+      const DxvkFormatInfo* formatInfo = imageFormatInfo(gliFormatToVk(exportTex.format()));
+
+      for (uint32_t level = 0; level < exportTex.levels(); ++level) {
+        // Calculate the Subresource Layout for the Image
+
+        VkImageSubresource subresource;
+        subresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        subresource.mipLevel = 0; // the arrays are implicitly separated by mip level, indexing into them selects the level
+        subresource.arrayLayer = 0;
+
+        // Get destination and source pointers for writing/reading
+
+        void* pDst = (void*)exportTex.data(exportTex.base_layer(), exportTex.base_face(), level);
+        const void* pSrc = nullptr;
+        VkDeviceSize srcRowPitch = 0;
+        VkDeviceSize srcSlicePitch = 0;
+
+        const VkExtent3D levelExtent = gliExtentToVk(exportTex.extent(level));
+        const VkExtent3D elementCount = util::computeBlockCount(levelExtent, formatInfo->blockSize);
+        const uint32_t rowPitch = elementCount.width * formatInfo->elementSize;
+        const uint32_t layerPitch = rowPitch * elementCount.height;
+
+        if (useBufferReadback) {
+          const Rc<DxvkBuffer>& buffer = pReadbackBuffers[level];
+          pSrc = buffer->mapPtr(0);
+          srcRowPitch = computeAlignedPitch(VkDeviceSize(elementCount.width) * formatInfo->elementSize, kReadbackRowAlignment);
+          srcSlicePitch = VkDeviceSize(elementCount.height) * srcRowPitch;
+        } else {
+          const Rc<DxvkImage>& readbackImage = pBlitDests[level];
+          const VkSubresourceLayout subresourceLayout = readbackImage->querySubresourceLayout(subresource);
+          pSrc = readbackImage->mapPtr(0);
+          srcRowPitch = subresourceLayout.rowPitch;
+          srcSlicePitch = subresourceLayout.arrayPitch;
+        }
+
+        util::packImageData(pDst, pSrc, srcRowPitch, srcSlicePitch,
+                            rowPitch, layerPitch, VK_IMAGE_TYPE_2D, levelExtent, 1, formatInfo,
+                            subresource.aspectMask);
+      }
+
+      // Write our file, converting its format first if nessecary
+      const bool success = gli::save(exportTex, filename);
+      if (!success) {
+        Logger::err(str::format("RTX: Failed to write texture \"", filename, "\""));
+      }
+
+      delete[] pBlitTemps;
+      delete[] pBlitDests;
+      delete[] pReadbackBuffers;
+      m_numExportsInFlight--;
+    });
+
+    if (!result.valid()) {
+      Logger::err(str::format("RTX: Failed to write texture \"", filename, "\".  Coding error, kMaxConcurrentExports, may be too low (currently: ", kMaxConcurrentExports, ")."));
+    }
+  }
+
+  void AssetExporter::exportBuffer(Rc<DxvkContext> ctx, const DxvkBufferSlice& buffer, BufferCallback bufferCallback) {
+    ScopedCpuProfileZone();
+    // NOTE: Should use a mutex here...
+    {
+      std::lock_guard lock(m_readbackSignalMutex);
+      if (m_readbackSignal == nullptr) {
+        m_readbackSignal = new sync::Fence(m_signalValue);
+      }
+    }
+
+    m_numExportsInFlight++;
+
+    // We want to retain most of the src image state
+    // NOTE: Some image formats arent well supported by DDS tools, like B8G8R8A8...  So we might want to blit rather than copy for such formats.
+    DxvkBufferCreateInfo desc = buffer.bufferInfo();
+
+    // Modify the state we need for reading on the CPU
+    desc.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    desc.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    desc.access = VK_ACCESS_TRANSFER_WRITE_BIT;
+    desc.size = buffer.length();
+
+    // Make the image where we'll copy the GPU resource to CPU accessible mem
+    Rc<DxvkBuffer> bufferDest = ctx->getDevice()->createBuffer(desc, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, DxvkMemoryStats::Category::RTXBuffer, "Remix Data Export Buffer");
+
+    ctx->copyBuffer(bufferDest, VkDeviceSize { 0 }, buffer.buffer(), buffer.offset(), desc.size);
+
+    ctx->emitMemoryBarrier(0,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT,
+      VK_PIPELINE_STAGE_HOST_BIT,
+      VK_ACCESS_HOST_READ_BIT);
+
+    // Sync point, before writing to disk, we must wait on GPU
+    const uint64_t syncValue = ++m_signalValue;
+    ctx->signal(m_readbackSignal, syncValue);
+
+    Future<void> result = getExporterThread()->Schedule([this, cDestBuffer = bufferDest, syncValue, bufferCallback] {
+      ScopedCpuProfileZoneN("Export Buffer Finalize");
+      // Stall until the GPU has completed its copy to system memory (GPU->CPU)
+      this->m_readbackSignal->wait(syncValue);
+      bufferCallback(cDestBuffer);
+      m_numExportsInFlight--;
+    });
+
+    if (!result.valid()) {
+      Logger::err(str::format("RTX: Failed to dump buffer.  Coding error, kMaxConcurrentExports, may be too low (currently: ", kMaxConcurrentExports, ")."));
+    }
+  }
+
+  void AssetExporter::generateSceneThumbnail(Rc<DxvkContext> ctx, const std::string& dir, const std::string& filename) {
+    auto& resourceManager = ctx->getCommonObjects()->getResources();
+    auto finalOutput = resourceManager.getRaytracingOutput().m_finalOutput.image(Resources::AccessType::Read);
+
+    env::createDirectory(dir);
+
+    exportImage(ctx, str::format(dir, filename, ".dds"), finalOutput, true);
+  }
+
+  void AssetExporter::bakeSkyProbe(Rc<DxvkContext> ctx, const std::string& dir, const std::string& filename) {
+    auto& resourceManager = ctx->getCommonObjects()->getResources();
+
+    auto skyprobeView = resourceManager.getSkyProbe(ctx);
+
+    const auto skyprobeExt = skyprobeView.image->info().extent;
+    const uint32_t equatorLength = std::min(skyprobeExt.width * 4, 16384u);
+    const VkExtent3D latlongExt { equatorLength, equatorLength / 2, 1 };
+
+    auto latlong = resourceManager.createImageResource(ctx, "sky probe latlong", latlongExt, VK_FORMAT_R16G16B16A16_SFLOAT);
+
+    const auto transform = RtxOptions::zUp() ? RtxImageUtils::LatLongTransform::ZUp2OpenEXR : RtxImageUtils::LatLongTransform::None;
+
+    ctx->getCommonObjects()->metaImageUtils().cubemapToLatLong(ctx, skyprobeView.view, latlong.view, transform);
+
+    dumpImageToFile(ctx, dir, filename, latlong.image);
+  }
+
+} // namespace dxvk

@@ -1,0 +1,409 @@
+/*
+* Copyright (c) 2021-2024, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+#include "../../util/util_kenshi_telemetry.h"
+#include "rtx/dx11/dx11_light_state.h"
+#include "../dxvk_context.h"
+#include "rtx_resources.h"
+#include "rtx_asset_exporter.h"
+#include "rtx_camera_manager.h"
+#include "rtx_atmosphere.h"
+#include "rtx/pass/nrd_args.h"
+
+#include <atomic>
+#include <cstdint>
+#include <chrono>
+#include <memory>
+#include <array>
+#include "rtx_options.h"
+
+struct VolumeArgs;
+struct RaytraceArgs;
+
+namespace dxvk {
+  class DxvkContext;
+  class AssetExporter;
+  class SceneManager;
+  class TerrainBaker;
+  struct KenshiSignOverlay;
+  struct ExternalDrawState;
+
+  struct D3D11RtxVertexCaptureData;
+  struct D3D11SharedPS;
+  
+  struct DrawParameters {
+    uint32_t vertexCount = 0;
+    uint32_t indexCount = 0;
+    uint32_t instanceCount = 0;
+    uint32_t firstIndex = 0;
+    uint32_t vertexOffset = 0;
+  };
+  /** 
+   * \brief RTX context
+   * 
+   * Tracks pipeline state and records command lists.
+   * This is where the actual rendering commands are
+   * recorded.
+   */
+
+  // Forward declarations of fork_hooks functions that require friend access to
+  // RtxContext private members, so the friend declarations inside the class body
+  // can name them. See rtx_fork_hooks.h for the full hook catalogue.
+  class RtxContext;
+  namespace fork_weather {
+    class WeatherBlender;
+  } // namespace fork_weather
+  namespace fork_hooks {
+    void initAtmosphere(RtxContext&);
+    void updateAtmosphereConstants(RtxContext&, RaytraceArgs&);
+    // DX11_V463: injects/updates/drops the sun distant light. Declared here as
+    // well as in rtx_fork_hooks.h because rtx_context.cpp resolves fork_hooks
+    // through this header.
+    void syncAtmosphereDistantLights(RtxContext&, const AtmosphereArgs&);
+    void bindAtmosphereLuts(RtxContext&);
+    void dispatchScreenOverlay(RtxContext&, Resources::RaytracingOutput&);
+    void updateWeatherBlender(RtxContext& ctx, float deltaTimeSeconds);
+    Resources::Resource getCloudSkyTransmittanceLut(RtxContext& ctx);
+    Resources::Resource getCloudDSun(RtxContext& ctx);
+    Resources::Resource getCloudDAmbient(RtxContext& ctx);
+    Resources::Resource getCloudRenderRT(RtxContext& ctx);
+  } // namespace fork_hooks
+
+  class RtxContext : public DxvkContext {
+
+  public:
+    
+    RtxContext(const Rc<DxvkDevice>& device);
+    ~RtxContext();
+
+    float getGpuIdleTimeSinceLastCall();
+
+    /**
+      * \brief Reset screen resolution, and resize all screen
+      *        buffers to specified resolution if required.
+      * 
+      * \param [in] upscaleExtent: New desired resolution.
+      */
+    void resetScreenResolution(const VkExtent3D& upscaleExtent);
+
+    /**
+      * \brief Triggers the RTX renderer.  Writes to targetImage (if specified) 
+      *        and the currently bound render target if not.
+      *        Will flush the scene and perform other non rendering tasks.
+      * 
+      * \param [in] cachedReflexFrameId: The Reflex frame ID at the time of calling, cached so Reflex can have
+      * consistent frame IDs throughout the dispatches of an application frame.
+      * \param [in] targetImage: Image to store raytraced result in
+      */
+    void injectRTX(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targetImage = nullptr);
+    void endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targetImage = nullptr, bool callInjectRtx = true);
+
+    void onPresent(Rc<DxvkImage> targetImage = nullptr);
+
+    /**
+      * \brief Set D3D11 specific constant buffers
+      *
+      * \param [in] vsFixedFunctionConstants: resource idx of the constant buffer for FF vertex shaders
+      * \param [in] psFixedFunctionConstants: resource idx of the constant buffer for FF pixel shaders
+      * \param [in] vertexCaptureCB: constant buffer for vertex capture
+      */
+    void setConstantBuffers(const uint32_t vsFixedFunctionConstants, const uint32_t psFixedFunctionConstants, Rc<DxvkBuffer> vertexCaptureCB);
+
+    /**
+      * \brief Adds a batch of lights to the scene context
+      *
+      * \param [in] pLights: array of light structures
+      * \param [in] numLights: number of lights
+      */
+    void addLights(const Dx11LightDesc* pLights, const uint32_t numLights);
+
+    void clearRenderTarget(const Rc<DxvkImageView>& imageView, VkImageAspectFlags clearAspects, VkClearValue clearValue);
+    void clearImageView(const Rc<DxvkImageView>& imageView, VkOffset3D offset, VkExtent3D extent, VkImageAspectFlags aspect, VkClearValue value);
+
+    void commitGeometryToRT(const DrawParameters& params, DrawCallState& drawCallState, bool geometryCacheOnlySceneSubmit = false,
+                           bool geometrySkyDisabledAtSubmission = false);
+    // V691 verification-only snapshot of logical native bindings, not GPU completion.
+    std::vector<uint8_t> snapshotTerrainNativeState() const;
+    void commitExternalGeometryToRT(ExternalDrawState&& state);
+
+    static void blitImageHelper(Rc<DxvkContext> ctx, const Rc<DxvkImage>& srcImage, const Rc<DxvkImage>& dstImage, VkFilter filter);
+
+    /**
+      * \brief DX11_V759. Write Remix's primary depth into Kenshi's deferred
+      * G-buffer target 2, in the encoding the game's heat-haze post process
+      * reads it with: distance / farClip, and 0 where nothing was hit.
+      *
+      * Called at the injection boundary, after injectRTX has placed the
+      * path-traced image. The game's compositor clears that target earlier in
+      * the frame and its heat-haze pass samples it later, so this is the one
+      * window in which the write is both safe and visible.
+      *
+      * \param [in] gameDepthImage: the game's R32_SFLOAT target 2, recognised
+      *   structurally at its consuming draw by the D3D11 bridge.
+      */
+    void kenshiWriteHeatHazeDepth(const Rc<DxvkImage>& gameDepthImage);
+    void captureKenshiSignOverlay(const DrawParameters& params, const Matrix4& projection);
+
+    virtual void flushCommandList() override;
+
+    SceneManager& getSceneManager();
+    Resources& getResourceManager();
+  
+    static void triggerScreenshot(bool captureDebugImages = false) {
+      if (!kenshi_telemetry::fileOutputEnabled()) return;
+      s_triggerScreenshot = true;
+      s_triggerDebugScreenshot |= kenshi_telemetry::enabled() && captureDebugImages;
+    }
+    static void triggerUsdCapture() { s_triggerUsdCapture = true; }
+
+    // DX11_V336_GBUFFER_BURST: dump primary linearZ for `frames` consecutive
+    // frames, so an alternation can be seen directly instead of inferred from
+    // single-frame samples that always fire at the same point in the frame.
+    static void triggerGBufferBurst(uint32_t frames) {
+      if (!kenshi_telemetry::fileOutputEnabled()) return;
+      if (!kenshi_telemetry::enabled()) return;
+      s_gbufferBurstFramesRemaining.store(frames, std::memory_order_relaxed);
+    }
+
+    // DX11_V388_PROBE_WINDOW: hold the GPU-print probe open, at the CURRENT mouse
+    // position, for `frames` frames - without CTRL being held.
+    //
+    // The probe normally samples only while CTRL is down, which makes it
+    // impossible to pair with the on-demand diagnostics window: that window is
+    // armed by a keypress and covers 8 frames, so lining a separate CTRL-hold up
+    // with it is a coordination problem the user should never have been asked to
+    // solve. One keypress now does both - Ctrl+Alt+O arms the trace AND probes
+    // wherever the cursor already is, so the probe reading and the draw trace
+    // describe the same frames by construction and the join always works.
+    static void triggerGpuPrintWindow(uint32_t frames) {
+      if (!kenshi_telemetry::enabled()) return;
+      s_gpuPrintWindowFramesRemaining.store(frames, std::memory_order_relaxed);
+    }
+
+    void bindCommonRayTracingResources(const Resources::RaytracingOutput& rtOutput);
+
+    void bindResourceView(const uint32_t slot, const Rc<DxvkImageView>& imageView, const Rc<DxvkBufferView>& bufferView);
+
+    void getDenoiseArgs(NrdArgs& outPrimaryDirectNrdArgs, NrdArgs& outPrimaryIndirectNrdArgs, NrdArgs& outSecondaryNrdArgs);
+    void updateRaytraceArgsConstantBuffer(Resources::RaytracingOutput& rtOutput, const VkExtent3D& downscaledExtent, const VkExtent3D& targetExtent);
+
+    D3D11RtxVertexCaptureData& allocAndMapVertexCaptureConstantBuffer();
+    D3D11FixedFunctionVS& allocAndMapFixedFunctionVSConstantBuffer();
+    D3D11SharedPS& allocAndMapPSSharedStateConstantBuffer();
+
+    static bool checkIsShaderExecutionReorderingSupported(DxvkDevice& device);
+
+    const DxvkScInfo& getSpecConstantsInfo(VkPipelineBindPoint pipeline) const;
+    void setSpecConstantsInfo(VkPipelineBindPoint pipeline, const DxvkScInfo& newSpecConstantInfo);
+
+    bool useRayReconstruction() const;
+
+    // On-demand pass diagnostics use the same timestamp/frame and export path.
+    void takeScreenshot(std::string imageName, Rc<DxvkImage> image);
+
+#ifdef REMIX_DEVELOPMENT
+    // Note: Cache image views for all resources that used by current frame, so we can do query for resource aliasing at the end of frame.
+    //       This is automatically called when binding resources for passes, RtxContext::bindCommonRayTracingResources
+    //       When we are not using the binding function in the passes such as DLSSRR, we need to manually cache the image views. Please reference the cache logic in DxvkRayReconstruction::dispatch
+    void cacheResourceAliasingImageView(const Rc<DxvkImageView>& imageView);
+#endif
+
+    inline void setFramePassStage(const RtxFramePassStage currentFramePassStage) {
+#ifdef REMIX_DEVELOPMENT
+      m_currentPassStage = currentFramePassStage;
+#endif
+    }
+
+  protected:
+    virtual void updateComputeShaderResources() override;
+    virtual void updateRaytracingShaderResources() override;
+
+  private:
+    // This enum is for internal use only.
+    // There is a mode called UpscalerType in RtxOptions, but it doesn't contain DLSS-RR because RR is considered as a special mode of DLSS.
+    enum class InternalUpscaler {
+      None = 0,
+      DLSS,
+      NIS,
+      TAAU,
+      XeSS,
+      DLSS_RR,
+    };
+
+    void reportCpuSimdSupport();
+
+    void checkOpacityMicromapSupport();
+    void checkShaderExecutionReorderingSupport();
+    void checkNeuralRadianceCacheSupport();
+
+    VkExtent3D setDownscaleExtent(const VkExtent3D& upscaleExtent);
+
+    VkExtent3D onInjectRtxFrameBegin(const VkExtent3D& upscaleExtent);
+    void onInjectRtxFrameEnd(bool raytracedThisFrame);
+
+    void dispatchVolumetrics(const Resources::RaytracingOutput& rtOutput);
+    void dispatchIntegrate(const Resources::RaytracingOutput& rtOutput);
+    void dispatchPathTracing(const Resources::RaytracingOutput& rtOutput);
+    void dispatchDemodulate(const Resources::RaytracingOutput& rtOutput);
+    void dispatchNeeCache(const Resources::RaytracingOutput& rtOutput);
+    void dispatchDLSS(const Resources::RaytracingOutput& rtOutput);
+    void dispatchRayReconstruction(const Resources::RaytracingOutput& rtOutput);
+    void dispatchDenoise(const Resources::RaytracingOutput& rtOutput);
+    void dispatchComposite(const Resources::RaytracingOutput& rtOutput, bool captureLighting);
+    void dispatchReplaceCompositeWithDebugView(const Resources::RaytracingOutput& rtOutput);
+    void dispatchNIS(const Resources::RaytracingOutput& rtOutput);
+    void dispatchXeSS(const Resources::RaytracingOutput& rtOutput);
+    void dispatchTemporalAA(const Resources::RaytracingOutput& rtOutput);
+    void dispatchToneMapping(const Resources::RaytracingOutput& rtOutput, bool performSRGBConversion);
+    void dispatchBloom(const Resources::RaytracingOutput& rtOutput);
+    void dispatchPostFx(Resources::RaytracingOutput& rtOutput);
+    void dispatchDebugView(Rc<DxvkImage>& srcImage, const Resources::RaytracingOutput& rtOutput, bool captureScreenImage);
+    void dispatchObjectPicking(Resources::RaytracingOutput& rtOutput, const VkExtent3D& srcExtent, const VkExtent3D& targetExtent);
+    void dispatchDLFG();
+    void updateMetrics(const float gpuIdleTimeMilliseconds) const;
+    void rasterizeToSkyMatte(const DrawParameters& params, const DrawCallState& drawCallState);
+    void initSkyProbe();
+    void rasterizeToSkyProbe(const DrawParameters& params, const DrawCallState& drawCallState);
+    void rasterizeSky(const DrawParameters& params, const DrawCallState& drawCallState);
+    enum class TryHandleSkyResult {
+      Default,
+      SkipSubmit,
+    };
+    TryHandleSkyResult tryHandleSky(const DrawParameters* originalParams, DrawCallState* originalDrawCallState /* can be std::move-d */);
+
+    void bakeTerrain(const DrawParameters& params, DrawCallState& drawCallState, const MaterialData** outOverrideMaterialData);
+
+    InternalUpscaler getCurrentFrameUpscaler();
+
+    InternalUpscaler m_currentUpscaler = InternalUpscaler::None;
+    InternalUpscaler m_previousUpscaler = InternalUpscaler::None;
+
+    uint32_t m_frameLastInjected = kInvalidFrameIndex;
+    bool m_captureStateForRTX = true;
+
+    // DX11_V759. Staging image for kenshiWriteHeatHazeDepth. The game's target
+    // carries no storage usage - a D3D11 texture without a UAV bind flag never
+    // gets VK_IMAGE_USAGE_STORAGE_BIT - so the compute pass writes here at
+    // render resolution and a blit scales the result into the game's texture.
+    Resources::Resource m_kenshiHeatHazeDepth;
+    std::unique_ptr<KenshiSignOverlay> m_kenshiSignOverlay;
+    void compositeKenshiSignOverlay(const Resources::RaytracingOutput& rtOutput, bool outputIsGammaEncoded);
+    VkExtent3D m_kenshiHeatHazeDepthExtent = { 0u, 0u, 0u };
+
+    Rc<DxvkImage> m_skyProbeImage;
+    Rc<DxvkImageView> m_skyProbeCubePlanes[6];
+    VkFormat m_skyColorFormat = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+    VkFormat m_skyRtColorFormat = VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+    VkClearValue m_skyClearValue;
+    bool m_skyClearDirty = false;
+    SkyMode m_lastSkyMode = SkyMode::SkyboxRasterization;
+
+    // Set when rasterizeToSkyProbe finds it cannot aim the six cube-face draws
+    // (no vertex-capture constant buffer; DXBC vertex shaders cannot be
+    // reprojected by Remix). While true, SkyboxRasterization can only produce a
+    // black cubemap wrapped around the camera, so the sky is served by the
+    // physical atmosphere instead. See DX11_V307_NO_DEGENERATE_SKY_PROBE.
+    bool m_skyProbeReprojectionUnavailable = false;
+
+    std::unique_ptr<RtxAtmosphere> m_atmosphere;
+    std::unique_ptr<fork_weather::WeatherBlender> m_weatherBlender;
+
+    friend void fork_hooks::initAtmosphere(RtxContext&);
+    friend void fork_hooks::updateAtmosphereConstants(RtxContext&, RaytraceArgs&);
+    friend void fork_hooks::bindAtmosphereLuts(RtxContext&);
+    friend void fork_hooks::dispatchScreenOverlay(RtxContext&, Resources::RaytracingOutput&);
+    friend void fork_hooks::updateWeatherBlender(RtxContext& ctx, float deltaTimeSeconds);
+    friend Resources::Resource fork_hooks::getCloudSkyTransmittanceLut(RtxContext& ctx);
+    friend Resources::Resource fork_hooks::getCloudDSun(RtxContext& ctx);
+    friend Resources::Resource fork_hooks::getCloudDAmbient(RtxContext& ctx);
+    friend Resources::Resource fork_hooks::getCloudRenderRT(RtxContext& ctx);
+
+    bool shouldUseDLSS() const;
+    bool shouldUseRayReconstruction() const;
+    bool shouldUseNIS() const;
+    bool shouldUseTAA() const;
+    bool shouldUseXeSS() const;
+    bool shouldUseUpscaler() const { return shouldUseDLSS() || shouldUseNIS() || shouldUseTAA() || shouldUseXeSS(); }
+
+    inline static std::atomic<uint32_t> s_gbufferBurstFramesRemaining { 0u };
+    inline static std::atomic<uint32_t> s_gpuPrintWindowFramesRemaining { 0u };
+    inline static bool s_triggerScreenshot = false;
+    inline static bool s_triggerDebugScreenshot = false;
+    inline static bool s_triggerUsdCapture = false;
+    inline static const bool s_capturePrePresentTestScreenshot = env::getEnvVar("RTX_TAKE_PRE_PRESENT_SCREENSHOT_FRAME") != "";
+
+    bool m_rayTracingSupported;
+    bool m_dlssSupported;
+    bool m_submitContainsInjectRtx = false;
+    uint64_t m_cachedReflexFrameId = 0;
+
+    bool m_resetHistory = true;    // Discards use of temporal data in passes
+
+    std::chrono::time_point<std::chrono::steady_clock> m_prevRunningTime;
+    uint64_t m_prevGpuIdleTicks = 0;
+    bool m_prevGpuIdleTicksInitialized = false;
+
+    bool m_screenshotFrameEnabled = false;
+    bool m_triggerDelayedTerminate = false;
+    uint32_t m_screenshotFrameNum = -1;
+    uint32_t m_terminateAppFrameNum = -1;
+    uint32_t m_framesWithoutValidScene = 0;
+    // DX11 black-frame diagnostics.  The logger is intentionally rate-limited:
+    // it records the complete ray-tracing pipeline state without turning a
+    // high-draw-count game into a logging workload of its own.
+    uint32_t m_lastRaytracerDiagnosticFrame = kInvalidFrameIndex;
+    IntegrateIndirectMode m_prevIntegrateIndirectMode = IntegrateIndirectMode::Count;
+
+    DxvkRaytracingInstanceState m_rtState;
+
+    struct {
+      std::atomic<uint64_t>           signalValue = 1;
+      Rc<sync::Fence>                 signal = new sync::Fence{};
+      std::vector<std::future<void>>  asyncTasks = {};
+    } m_objectPickingReadback {};
+
+    std::vector<DrawCallState> m_delayedRayTracedSky;
+    // Frame that produced the entries in m_delayedRayTracedSky. Entries hold
+    // live vertex/index snapshot references and are only valid for the frame
+    // that recorded them; anything older is dropped, never submitted.
+    uint32_t m_delayedRayTracedSkyFrameId = kInvalidFrameIndex;
+
+#ifdef REMIX_DEVELOPMENT
+    void queryAvailableResourceAliasing();
+    void clearResourceAliasingCache();
+    void analyzeResourceAliasing();
+
+    struct ResourceCache {
+      Rc<DxvkImageView> view;
+      RtxFramePassStage beginPassStage = RtxFramePassStage::FrameBegin;
+      RtxFramePassStage endPassStage = RtxFramePassStage::FrameEnd;
+      std::unordered_set<std::string> names;
+    };
+
+    // We only have 5 types of format categories and we won't expect this will exceed 10 in near future. So we hard code the category to 10 types for better performance and easier development.
+    std::vector<ResourceCache> m_resourceCacheTable[static_cast<uint32_t>(RtxTextureFormatCompatibilityCategory::Count)];
+    std::unordered_map<const DxvkImageView*, std::string> m_viewMap;
+
+    RtxFramePassStage m_currentPassStage = RtxFramePassStage::FrameBegin;
+#endif
+  };
+} // namespace dxvk

@@ -1,0 +1,95 @@
+/*
+* Copyright (c) 2023-2024, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+
+// Opaque Surface Material Functions
+
+OpaqueSurfaceMaterial opaqueSurfaceMaterialCreate(MemoryPolymorphicSurfaceMaterial memoryPolymorphicSurfaceMaterial, const bool visibilityCheckOnly = false)
+{
+  // If we're just doing a visibility check, force unneeded textures to invalid so they aren't accessed.
+  if (visibilityCheckOnly)
+  {
+    OpaqueSurfaceMaterial opaqueSurfaceMaterial = reinterpret<OpaqueSurfaceMaterial>(memoryPolymorphicSurfaceMaterial);
+    opaqueSurfaceMaterial.emissiveColorTextureIndex = BINDING_INDEX_INVALID;
+    opaqueSurfaceMaterial.roughnessTextureIndex = BINDING_INDEX_INVALID;
+    opaqueSurfaceMaterial.metallicTextureIndex = BINDING_INDEX_INVALID;
+    opaqueSurfaceMaterial.normalTextureIndex = BINDING_INDEX_INVALID;
+    opaqueSurfaceMaterial.tangentTextureIndex = BINDING_INDEX_INVALID;
+    // DX11_V529: unconditionally, not just in the reduced secondary-shading
+    // modes. A visibility ray reads opacity, and for a subsurface material also
+    // the shading normal; the Kenshi terrain block writes neither - it writes
+    // albedo, while opacity still comes from the albedo/opacity texture that
+    // this path deliberately keeps. So the compositor's fourteen-odd texture
+    // reads, and V528's biome selector on top of them, could not change a
+    // single visibility result. Kenshi terrain carries no subsurface material,
+    // so the shading-normal branch is unreachable for it as well.
+    opaqueSurfaceMaterial.flags &= ~OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_TERRAIN_BLEND;
+    opaqueSurfaceMaterial.roughnessConstant = 1.h;
+    opaqueSurfaceMaterial.metallicConstant = 0.h;
+    opaqueSurfaceMaterial.anisotropy = 0.h;
+    // DX11_V760/V761: emissiveColorConstant is deliberately NOT cleared here.
+    // An unfinished building's build progress, mesh height and scaffold tiling
+    // are aliased into it, and they decide the surface's OPACITY - which is
+    // precisely what a visibility ray reads. Zeroing it left the material with
+    // an invalid height range, disabled the cutout, and would have made a
+    // half-built wall cast the shadow of a finished one.
+    //
+    // Nothing is emitted by keeping it: emissive radiance is colour * intensity
+    // and the intensity below is still zeroed, which is what actually suppresses
+    // emission on this path.
+    opaqueSurfaceMaterial.emissiveIntensity = 0.h;
+    return opaqueSurfaceMaterial;
+  }
+  else
+  {
+    return reinterpret<OpaqueSurfaceMaterial>(memoryPolymorphicSurfaceMaterial);
+  }
+}
+
+// Subsurface Material Functions
+SubsurfaceMaterial subsurfaceMaterialCreate(MemoryPolymorphicSurfaceMaterial memoryPolymorphicSurfaceMaterial)
+{
+  return reinterpret<SubsurfaceMaterial>(memoryPolymorphicSurfaceMaterial);
+}
+
+SubsurfaceMaterial subsurfaceMaterialCreate(const SubsurfaceMaterialInteraction subsurfaceMaterialInteraction)
+{
+  SubsurfaceMaterial subsurfaceMaterial;
+
+  const f16vec3 transmittanceColor = r11g11b10ToColor(subsurfaceMaterialInteraction.packedTransmittanceColor);
+  subsurfaceMaterial.volumetricAttenuationCoefficient = subsurfaceMaterialInteraction.maxSampleRadius == 0.0f ?
+    transmittanceToAttenuationCoefficient(max(transmittanceColor, materialEpsilon), subsurfaceMaterialInteraction.measurementDistance) :
+    transmittanceColor;
+  subsurfaceMaterial.measurementDistance = subsurfaceMaterialInteraction.measurementDistance;
+  subsurfaceMaterial.singleScatteringAlbedo = r11g11b10ToColor(subsurfaceMaterialInteraction.packedSingleScatteringAlbedo);
+  subsurfaceMaterial.volumetricAnisotropy = snorm8ToF16(subsurfaceMaterialInteraction.volumetricAnisotropy);
+  subsurfaceMaterial.maxSampleRadius = unorm8ToF16(subsurfaceMaterialInteraction.maxSampleRadius);
+
+  return subsurfaceMaterial;
+}
+
+uint getSubsurfaceMaterialIndex(const MemoryPolymorphicSurfaceMaterial memoryPolymorphicSurfaceMaterial, inout uint16_t samplerIndex)
+{
+  OpaqueSurfaceMaterial opaqueSurfaceMaterial = opaqueSurfaceMaterialCreate(memoryPolymorphicSurfaceMaterial);
+  samplerIndex = opaqueSurfaceMaterial.samplerIndex;
+  return opaqueSurfaceMaterial.subsurfaceMaterialIndex;
+}

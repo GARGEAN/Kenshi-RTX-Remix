@@ -1,0 +1,64 @@
+#############################################################################
+# Copyright (c) 2021-2022, NVIDIA CORPORATION. All rights reserved.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a
+# copy of this software and associated documentation files (the "Software"),
+# to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Software, and to permit persons to whom the
+# Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+#############################################################################
+
+/_*/
+# /_output can be a symlink, so diff from above
+/_output
+/.vs
+/_vs
+.history
+/.vs/VSWorkspaceState.json
+/.vs/slnx.sqlite
+*.sublime-workspace
+**/__pycache__
+/gametargets.conf
+/dxvk.conf
+.vscode/
+/external
+**/_batch_output/**
+/public/bin/
+*.log
+.build-venv/
+.venv/
+metrics.txt
+nrc_session_log.txt
+python.dxvk-cache
+*.xml.user
+
+# Editor / scripted backup files — never commit these
+*.bak
+*.bak-*
+*.bak.*
+*.pre-*.bak
+
+# Orchestrator-generated patch reports (build_dxvk_all_ninja.ps1 rewrites these
+# on every build; they are build output, not source). Root-level only: the
+# DX11_V219_*.txt files inside bridge_dx11_work/_dx11_* are hand-written notes
+# describing those staging folders and must stay tracked.
+/DX11_V219_*.txt
+/V106_*.txt
+
+# Per-file source backups made by the orchestrator's patchers. Never restored
+# from (patchers guard on file CONTENT, not on backup existence), so they are
+# pure noise in the tree.
+*.before
+*.v219.before

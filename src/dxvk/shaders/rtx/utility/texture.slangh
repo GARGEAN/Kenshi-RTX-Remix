@@ -1,0 +1,60 @@
+/*
+* Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+
+#include "rtx/concept/surface/surface.slangh"
+
+// DX11_V560: sample at an EXPLICIT mip with a coordinate of our own choosing.
+//
+// textureRead below uses SampleGrad with the surface's stored gradients, which
+// belong to the surface's OWN uvs. That is correct whenever the substituted
+// coordinate is an affine function of those uvs (Kenshi's terrain detail layers,
+// where the constant scale factor is just a fixed mip bias) - and wrong when it
+// is not related to them at all.
+//
+// The dust noise is sampled at WORLD XZ, which has no relationship to a
+// building's uvs: the gradient mismatch varies per object and lands many mips
+// too coarse, so every dusty surface read essentially the texture's average and
+// dust rendered as a flat wash or not at all. At 0.002 units per texel one tile
+// spans 500 world units, so the pattern is very low frequency on screen and mip
+// 0 neither aliases nor costs anything.
+vec4 textureReadLevel(uint16_t textureIndex, uint16_t samplerIndex, vec2 coordinates, float lod = 0.0)
+{
+  return textures[nonuniformEXT(uint(textureIndex))].SampleLevel(
+    samplers[nonuniformEXT(uint(samplerIndex))], coordinates, lod);
+}
+
+vec4 textureRead(uint16_t textureIndex, uint16_t samplerIndex, SurfaceInteraction surfaceInteraction, float lodBias = 0.0)
+{
+  const float gradBias = pow(2, lodBias);
+
+  // Note: The nonuniform decoration on the texture index here and returned Sampler2D does not propagate through function calls due to a rather
+  // annoying exception in the specification (See: https://github.com/KhronosGroup/GLSL/blob/master/extensions/ext/GL_EXT_nonuniform_qualifier.txt).
+  // As such, no functions are used here and SampleGrad is called directly on the retrieved Sampler2D rather than using the GLSL-style textureGrad
+  // helper we had before. This ensures the nonuniform decoration will propagate correctly as otherwise all threads in a warp may potentially sample
+  // from the same texture and cause blocky artifacts on some hardware.
+  return textures[nonuniformEXT(uint(textureIndex))].SampleGrad(samplers[nonuniformEXT(uint(samplerIndex))],
+    surfaceInteraction.textureCoordinates,
+    surfaceInteraction.textureGradientX * gradBias,
+    surfaceInteraction.textureGradientY * gradBias
+  );
+}

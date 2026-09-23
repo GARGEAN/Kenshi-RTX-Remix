@@ -1,0 +1,70 @@
+/*
+* Tonemap operator dispatcher and operator function bodies.
+*
+* Upstream shader passes (tonemapping_apply_tonemapping.comp.slang,
+* final_combine.comp.slang) call applyTonemapOperator() from here instead of
+* branching inline on ACES booleans.
+*/
+
+#ifndef FORK_TONEMAP_OPERATORS_SLANGH
+#define FORK_TONEMAP_OPERATORS_SLANGH
+
+#include "rtx/pass/tonemap/tonemapping.h"
+#include "rtx/pass/tonemap/AgX.hlsl"
+#include "rtx/pass/tonemap/Lottes.hlsl"
+
+// Hable Filmic (Uncharted 2) tonemapper core.
+// Reference: http://filmicworlds.com/blog/filmic-tonemapping-operators/
+float3 hablePartial(float3 x, float A, float B, float C, float D, float E, float F)
+{
+  return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+}
+
+float3 hableFilmicToneMapper(float3 color,
+                             float exposureBias,
+                             float A, float B, float C, float D, float E, float F,
+                             float W)
+{
+  float3 curr = hablePartial(exposureBias * color, A, B, C, D, E, F);
+  float3 whiteScale = float3(1.0f) / hablePartial(float3(W, W, W), A, B, C, D, E, F);
+  return curr * whiteScale;
+}
+
+// Dispatches to the operator implementation selected by `op`.
+// Returns the operator-adjusted color. When op == None, returns `color` unchanged.
+// All operators share the same 8 float slots (mutually exclusive).
+float3 applyTonemapOperator(uint op, float3 color, bool suppressBlackLevelClamp,
+                            float slot0, float slot1, float slot2, float slot3,
+                            float slot4, float slot5, float slot6, float slot7)
+{
+  if (op == tonemapOperatorACES)
+  {
+    return ACESFilm(color, /*useLegacyACES=*/false, suppressBlackLevelClamp);
+  }
+  if (op == tonemapOperatorACESLegacy)
+  {
+    return ACESFilm(color, /*useLegacyACES=*/true, suppressBlackLevelClamp);
+  }
+  if (op == tonemapOperatorHableFilmic)
+  {
+    // slot0=exposureBias, slot1=A, slot2=B, slot3=C, slot4=D, slot5=E, slot6=F, slot7=W
+    return hableFilmicToneMapper(color, slot0,
+                                 slot1, slot2, slot3,
+                                 slot4, slot5, slot6, slot7);
+  }
+  if (op == tonemapOperatorAgX)
+  {
+    // slot0=gamma, slot1=saturation, slot2=exposureOffset, slot3=look, slot4=contrast, slot5=slope, slot6=power
+    return AgXToneMapping(color, slot0, slot1, slot2,
+                          (int)slot3, slot4, slot5, slot6);
+  }
+  if (op == tonemapOperatorLottes)
+  {
+    // slot0=hdrMax, slot1=contrast, slot2=shoulder, slot3=midIn, slot4=midOut
+    return LottesToneMapping(color, slot0, slot1, slot2, slot3, slot4);
+  }
+  // tonemapOperatorNone (0) or unrecognised — identity.
+  return color;
+}
+
+#endif // FORK_TONEMAP_OPERATORS_SLANGH

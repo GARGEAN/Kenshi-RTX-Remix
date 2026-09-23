@@ -1,0 +1,252 @@
+/*
+* Copyright (c) 2022-2024, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+
+typedef float2 vec2;
+typedef float3 vec3;
+typedef float4 vec4;
+
+typedef float2 f32vec2;
+typedef float3 f32vec3;
+typedef float4 f32vec4;
+
+typedef uint2 uvec2;
+typedef uint3 uvec3;
+typedef uint4 uvec4;
+
+typedef int2 ivec2;
+typedef int3 ivec3;
+typedef int4 ivec4;
+
+typedef float16_t2 f16vec2;
+typedef float16_t3 f16vec3;
+typedef float16_t4 f16vec4;
+
+typedef uint16_t2 u16vec2;
+typedef uint16_t3 u16vec3;
+typedef uint16_t4 u16vec4;
+
+typedef float3x3 mat3;
+typedef float3x3 mat3x3;
+typedef float2x4 mat4x2; // 4 columns, 2 rows
+typedef float3x4 mat4x3; // 4 columns, 3 rows
+typedef float4x2 mat2x4; // 2 columns, 4 rows
+typedef float4x3 mat3x4; // 3 columns, 4 rows
+typedef float4x4 mat4;
+
+typedef float16_t3x3 f16mat3;
+typedef float16_t3x4 f16mat4x3;
+typedef float16_t4x3 f16mat3x4;
+typedef float16_t4x4 f16mat4;
+
+typedef float32_t3x3 f32mat3;
+typedef float32_t3x4 f32mat4x3;
+typedef float32_t4x4 f32mat3x4;
+typedef float32_t4x4 f32mat4;
+
+// UAV coherency tag to ensure UAV writes are visible post ReorderThread()
+// Conditionally enabled only when ReorderThread is present to avoid any negative perf impact (though none was measured)
+#ifdef RT_SHADER_EXECUTION_REORDERING
+#define REORDER_COHERENT globallycoherent
+#else
+#define REORDER_COHERENT
+#endif
+
+#define fract frac
+#define sampler2D Sampler2D
+#define floatBitsToUint asuint
+#define floatBitsToInt asint
+#define uintBitsToFloat asfloat
+#define nonuniformEXT NonUniformResourceIndex
+#define equal(x,y)            ((x)==(y))
+#define greaterThan(x,y)      ((x)>(y))
+#define greaterThanEqual(x,y) ((x)>=(y))
+#define lessThan(x,y)         ((x)<(y))
+#define lessThanEqual(x,y)    ((x)<=(y))
+#define mix(x,y,s) lerp(x,y,s)
+
+#define BUFFER_ARRAY(buffers, bufferIndex, elementIndex) buffers[NonUniformResourceIndex(bufferIndex)][elementIndex]
+
+T texelFetch<T : ITexelElement>(Texture2D<T> tex, int2 loc, int mip)
+{
+  return tex.Load(int3(loc, mip));
+}
+
+T texelFetch<T : ITexelElement>(Texture2DArray<T> tex, int3 loc, int mip)
+{
+  return tex.Load(int4(loc, mip));
+}
+
+T textureGrad<T : ITexelElement>(Sampler2D<T> tex, float2 loc, float2 du, float2 dv)
+{
+  return tex.SampleGrad(loc, du, dv);
+}
+T imageLoad<T : ITexelElement>(RWTexture2D<T> tex, int2 loc)
+{
+  return tex[loc];
+}
+
+void imageStore<T : ITexelElement>(RWTexture2D<T> tex, int2 loc, T val)
+{
+  tex[loc] = val;
+}
+
+uvec2 imageSize<T : ITexelElement>(RWTexture2D<T> tex)
+{
+  uvec2 size;
+  tex.GetDimensions(size.x, size.y);
+  return size;
+}
+
+vector<T, N> mod<T: __BuiltinFloatingPointType, let N: int>(vector<T, N> x, vector<T, N> y)
+{
+  return x - y * floor(x / y);
+}
+
+__generic<T : __BuiltinFloatingPointType>
+__target_intrinsic(hlsl)
+T saturate(T x)
+{
+  return clamp(x,
+      (T(0)),
+      (T(1)));
+}
+
+u16vec2 unpack16(uint x) {
+    return u16vec2(uint16_t(x & 0xFFFF), uint16_t(x >> 16));
+}
+
+uint pack32(u16vec2 x)
+{
+  return (uint32_t(x.x) & 0xFFFF) | (uint32_t(x.y) << 16);
+}
+
+float16_t uint16BitsToHalf(uint16_t u)
+{
+  return reinterpret<half>(u);
+}
+
+vector<float16_t, N> uint16BitsToHalf<let N : int>(vector<uint16_t, N> u)
+{
+  return reinterpret<vector<float16_t, N>>(u);
+}
+
+float uint16BitsToF32(uint16_t u)
+{
+  return float(uint16BitsToHalf(u));
+}
+
+vector<float, N> uint16BitsToF32<let N : int>(vector<uint16_t, N> u)
+{
+  return vector<float, N>(uint16BitsToHalf(u));
+}
+
+uint16_t float16BitsToUint16(float16_t f)
+{
+  return reinterpret<uint16_t>(f);
+}
+
+vector<uint16_t, N> float16BitsToUint16<let N : int>(vector<float16_t, N> f)
+{
+  return reinterpret<vector<uint16_t, N>>(f);
+}
+
+float16_t2 unpackFloat2x16(uint32_t u)
+{
+  uint16_t2 halves = uint16_t2(uint16_t(u & 0xFFFF), uint16_t(u >> 16));
+  return reinterpret<float16_t2>(halves);
+}
+
+uint32_t packFloat2x16(float16_t2 f)
+{
+  return (uint32_t(reinterpret<uint16_t>(f.y)) << 16) | uint32_t(reinterpret<uint16_t>(f.x));
+}
+
+uint32_t packFloat2x16(float2 f)
+{
+  return packFloat2x16(float16_t2(f));
+}
+
+// For reference https://github.com/g-truc/glm/blob/2d4c4b4dd31fde06cfffad7915c2b3006402322f/glm/gtc/packing.hpp#L45
+float4 unpackUnorm4x8(uint32_t f)
+{
+  return float4(
+    float((f >> 0) & 0xFF) / 255.0,
+    float((f >> 8) & 0xFF) / 255.0,
+    float((f >> 16) & 0xFF) / 255.0,
+    float((f >> 24) & 0xFF) / 255.0);
+}
+
+// For reference https://github.com/g-truc/glm/blob/2d4c4b4dd31fde06cfffad7915c2b3006402322f/glm/gtc/packing.hpp#L103
+float4 unpackSnorm4x8(uint32_t f)
+{
+  float4 unpacked = float4(
+    int((f >> 0) & 0xFF),
+    int((f >> 8) & 0xFF),
+    int((f >> 16) & 0xFF),
+    int((f >> 24) & 0xFF));
+
+  unpacked = unpacked - 256.0 * step(128.0, unpacked);
+
+  return clamp(unpacked / 127.0, -1.0, 1.0);
+}
+
+float16_t4 unpackFloat4x16(uint2 u)
+{
+  return float16_t4(unpackFloat2x16(u.x), unpackFloat2x16(u.y));
+}
+
+uint2 packFloat4x16(float16_t4 u)
+{
+  return uint2(packFloat2x16(u.xy), packFloat2x16(u.zw));
+}
+
+uint2 packFloat4x16(float4 u)
+{
+  return packFloat4x16(float16_t4(u));
+}
+
+// Implement the float-typed InterlockedAdd in SPIRV assembly because Slang doesn't have it
+float InterlockedAddFloat(__ref float dest, float value)
+{
+  return spirv_asm
+  {
+      OpExtension "SPV_EXT_shader_atomic_float_add";
+      OpCapability AtomicFloat32AddEXT;
+      result:$$float = OpAtomicFAddEXT &dest Device None $value
+  };
+}
+
+#ifndef RAY_PIPELINE
+// This is used to get the thread ID anywhere in a compute shader.
+property uint3 gl_GlobalInvocationID
+{
+  get
+  {
+    __target_switch
+    {
+    case glsl: __intrinsic_asm "(gl_GlobalInvocationID)";
+    case spirv: return spirv_asm { result:$$uint3 = OpLoad builtin(GlobalInvocationId:uint3); };
+    }
+  }
+}
+#endif

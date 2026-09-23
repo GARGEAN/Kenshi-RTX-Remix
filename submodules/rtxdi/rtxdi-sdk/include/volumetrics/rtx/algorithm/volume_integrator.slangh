@@ -1,0 +1,269 @@
+/***************************************************************************
+ # Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+ #
+ # NVIDIA CORPORATION and its licensors retain all intellectual property
+ # and proprietary rights in and to this software, related documentation
+ # and any modifications thereto.  Any use, reproduction, disclosure or
+ # distribution of this software and related documentation without an express
+ # license agreement from NVIDIA CORPORATION is strictly prohibited.
+ **************************************************************************/
+
+#pragma once
+
+// Note: volume_integrator.h must be first include to define required structures
+#include "rtx/algorithm/volume_integrator.h"
+#include "rtx/algorithm/volume_integrator_helpers.slangh"
+#include "rtx/utility/common.slangh"
+#include "rtx/utility/noise.slangh"
+#include "rtx/utility/color.slangh"
+#include "rtx/concept/ray/ray.slangh"
+#include "rtx/concept/light/light.slangh"
+#include "rtx/utility/packing.slangh"
+#include "rtx/utility/froxel.slangh"
+#include "rtx/algorithm/resolve.slangh"
+#include "rtx/algorithm/lighting.slangh"
+#include "rtx/algorithm/rtxdi/rtxdi.slangh"
+
+// Volume Integrate Helper Functions
+
+// Todo: Find some way to unify this with the normal Integrator's evalNEE function some day. Not ideal to duplicate code like this.
+bool evalNEE(
+  inout vec3 radiance,
+  LightSample lightSample, float invSelectionPdf, uint8_t sampledTransportPortalIndex,
+  Ray viewRay, MinimalRayInteraction minimalRayInteraction, VolumeInteraction volumeInteraction)
+{
+  if(invSelectionPdf * lightSample.solidAnglePdf <= 0)
+  {
+    return false;
+  }
+  
+  const VolumeArgs volumeArgs = cb.volumeArgs;
+
+  // Create a Ray to the location sampled on the light
+
+  const Ray visibilityRay = rayCreatePosition(
+    minimalRayInteraction, volumeInteraction, viewRay, lightSample.position);
+
+  // Test visibility to the light sample
+
+  const VisibilityResult visibility = evalVolumeNEEVisibility(
+    lightSample, sampledTransportPortalIndex, visibilityRay);
+
+  if (visibility.hasOpaqueHit)
+  {
+    return false;
+  }
+
+  // Todo: Add emission here later if beneficial, currently not used, but ray payload size is not too important
+  // for Ray Query functions so it might not hurt to add.
+
+  // Accumulate radiance
+
+  const float lightSampleThroughput = invSelectionPdf / lightSample.solidAnglePdf;
+  
+  const vec3 lightThroughput = lightSampleThroughput * vec3(visibility.attenuation);
+
+  vec3 volumeAttenuation = vec3(1.0f);
+  vec3 attenuatedRadiance;
+  
+  if (volumeArgs.enable)
+  {
+    const float distance = min(float16Max, visibilityRay.tMax);
+    volumeAttenuation = calcVolumetricAttenuation(volumeArgs, none, false, distance, lightSample.position, -visibilityRay.direction);
+  }
+  
+  attenuatedRadiance = lightSample.radiance * lightThroughput * volumeAttenuation;
+  
+  // Note: Sanitize radiance value from NEE to ensure no rare NaNs or other invalid values happen as these
+  // can propigate in the volume and cause large artifacts which may ruin a user's expierence. Ideally we'd
+  // have no NaNs but tracking down the rare few in this large of a codebase currently is tricky. Similar
+  // sanitization is done in the demodulate pass for non-volumetric lighting before feeding data to the
+  // denoisers.
+  radiance += sanitize(attenuatedRadiance, vec3(0.0f, 0.0f, 0.0f));
+  
+  return true;
+}
+
+// Volume Integrate Functions
+
+void integrateVolume(
+  inout RAB_RandomSamplerState rabRandomState, uvec3 froxelIndex, uint froxelVolume, uint previousFroxelVolume, bool previousVolumeExists,
+  Ray ray, MinimalRayInteraction minimalRayInteraction, VolumeInteraction volumeInteraction,
+  vec3 previousFroxelUVW, uvec3 previousFroxelIndex, uvec3 clampedPreviousFroxelIndex)
+{
+  const VolumeArgs volumeArgs = cb.volumeArgs;
+  const uvec3 froxelVolumeOffset = uvec3(volumeArgs.froxelGridDimensions.x * froxelVolume, 0, 0);
+  const uvec3 previousFroxelVolumeOffset = uvec3(volumeArgs.froxelGridDimensions.x * previousFroxelVolume, 0, 0);
+
+  // Apply some temporal fuzzing to break up lumpy signal caused by restir
+  previousFroxelUVW = calculateJitteredFroxelUvw(volumeArgs, previousFroxelUVW, 0.05f);
+
+  // Read information from the previous frame for accumulation based on a reprojected froxel coordinate
+
+  const bool reprojectionValid = all(previousFroxelUVW > vec3(0.0f, 0.0f, 0.0f) && previousFroxelUVW < vec3(1.0f, 1.0f, 1.0f));
+  SphericalHarmonic oldRadianceSH = SphericalHarmonic();
+  // Note: Default age is 0 when reprojection fails to reset history.
+  float newHistoryAge = 0.0f;
+  // Note: Default to 1.0 when reprojection fails to always favor new data coming in.
+  float historyAgeWeight = 1.0f;
+
+  if (previousVolumeExists && reprojectionValid && volumeArgs.maxAccumulationFrames > 0)
+  {
+    // Read previous history and radiance
+
+    // Note: This conversion is done after checking if the reprojection is valid to allow for the virtual UVW coordinates to trigger a failure on that if
+    // applicable (for proper reprojection confidence loss). Additionally, in theory this conversion could cause the froxel sampled from UVW wise to detach
+    // from the already computed previous froxel index, but as long as the logic is working properly (e.g. clamping only to the center of the edge froxel),
+    // this will not happen.
+    vec3 physicalPreviousFroxelUVW = virtualFroxelUVWToPhysicalFroxelUVW(
+      previousFroxelUVW, previousFroxelVolume,
+      volumeArgs.minFilteredRadianceU, volumeArgs.maxFilteredRadianceU, volumeArgs.inverseNumFroxelVolumes);
+      
+    // Note: Filtered read for now (may pose issues in the future depending on how we handle the contribution through ray portals as
+    // these methods may require custom filtering logic). Additionally, the history age stored in the alpha channel is filtered too
+    // which is fine as this should blend the histories of the contributions involved in the sample, which makes sense.
+    oldRadianceSH = HarmonicsHelpers::loadFiltered3D<SphericalHarmonic>(PrevAccumulatedRadianceY, PrevAccumulatedRadianceCoCg, physicalPreviousFroxelUVW);
+    const float oldHistoryAge = PrevAccumulatedRadianceAge.SampleLevel(physicalPreviousFroxelUVW, 0) * volumeArgs.maxAccumulationFrames;
+
+    // Note: Increment the sampled history age by 1 to represent this new sample.
+    newHistoryAge = min(oldHistoryAge + 1.0f, volumeArgs.maxAccumulationFrames);
+
+    // Note: The initial value for the history age in the buffer will be 0, then it will be incremented to 1. This check then ensures we
+    // only manipulate the history weight for information beyond the first sample, as the first sample should always fully write
+    // into the texture to overwrite potential uninitialized information there.
+    if (newHistoryAge > 1.0f)
+    {
+      // Note: Samples for an age past 1 follow the progression 1/(1+offset), 1/(2+offset), etc, causing it to favor the history more
+      // and more once things stabilize. The offset is used to immediately start favoring history more than it would otherwise to minimize
+      // instability in freshly visible regions at the cost of slightly more time to accumulate a new contribution. This can be tweaked to minimize
+      // instability and flickering but should not be raised too high as an initial bad sample will persist longer in a disoccluded region otherwise.
+      const float historyAgeOffset = 5.0f;
+
+      historyAgeWeight = 1.0f / (newHistoryAge + historyAgeOffset);
+    }
+  }
+
+  // Perform NEE on the final Reservoir
+
+  SphericalHarmonic radianceSH = SphericalHarmonic();
+  
+  // Select and sample from a light for NEE via the Reservoir
+  RAB_VolumeInteraction rabVolumeInteraction;
+  rabVolumeInteraction.volumeInteraction = volumeInteraction;
+  
+  const bool useRestir = !volumeArgs.enableReferenceMode;
+  if (useRestir)
+  {
+    const VolumeDefinitionCamera camera = cb.volumeArgs.restirCameras[froxelVolume];
+    const uint3 restirGridDimensions = uint3(volumeArgs.restirFroxelGridDimensions.xy, volumeArgs.restirFroxelDepthSlices);
+    const float3 sampleTranslatedWorldPos = worldToTranslatedWorld(camera, volumeInteraction.position);
+    const vec3 sampleFroxelUVW = translatedWorldPositionToFroxelUVW(
+                                    camera.translatedWorldToView, camera.translatedWorldToProjectionJittered, packedFlagGet(camera.flags, rightHandedFlag),
+                                    volumeArgs.restirFroxelDepthSlices, volumeArgs.froxelDepthSliceDistributionExponent, volumeArgs.froxelMaxDistance, camera.nearPlane,
+                                    sampleTranslatedWorldPos);
+
+    const float3 randomSample = float3(RAB_GetNextRandom(rabRandomState), RAB_GetNextRandom(rabRandomState), RAB_GetNextRandom(rabRandomState));
+    uint3 restirFroxelCoordinate = uint3(sampleFroxelUVW * restirGridDimensions + calcUniformCenteredCubePositionSample(randomSample));
+
+    RAB_LightSample rabLightSample;
+    float inverseSelectionPdf;
+    // Note: The Ray Portal index that the NEE light sample should be assumed to be sampled through.
+    // Set to the invalid index if the light was not sampled through a Ray Portal.
+    uint8_t sampledTransportPortalIndex = invalidRayPortalIndex;
+
+    const uvec3 restirFroxelVolumeOffset = uvec3(volumeArgs.restirFroxelGridDimensions.x * froxelVolume, 0, 0);
+    
+    VolumeReSTIR_PackedReservoir packedReservoir;
+    packedReservoir.data0 = VolumeReservoirs[restirFroxelCoordinate + restirFroxelVolumeOffset];
+    
+    VolumeReSTIR_Reservoir currentVolumeReservoir = VolumeReSTIR_Reservoir::createFromPacked(packedReservoir);
+    
+    const bool lightSampleValid = VolumeReSTIR_GetLightSample(
+      currentVolumeReservoir, rabVolumeInteraction,
+      rabLightSample, inverseSelectionPdf);
+    
+    // Perform NEE if the light sample is valid
+    vec3 radiance = vec3(0.0f, 0.0f, 0.0f);
+
+    if (lightSampleValid)
+    {
+      if (evalNEE(
+          radiance,
+          rabLightSample, inverseSelectionPdf, sampledTransportPortalIndex,
+          ray, minimalRayInteraction, volumeInteraction))
+      {
+      
+        // Apply firefly filtering to the new NEE contribution
+        // Note: This ensures super high energy fireflies do not make their way into the accumulation buffer and spread temporally
+        // as this can create very distracting and unnsatural blobs of light which persist for many frames in the volumetric lighting.
+        // Fireflies still get through with a basic clamp like this of course, but with the filtering and accumulation they make much less
+        // of a visual impact and are better handled.
+
+        const vec3 fireflyFilteredRadiance = fireflyFiltering(radiance, volumeArgs.froxelFireflyFilteringLuminanceThreshold);
+    
+        const float3 lightDir = normalize(rabLightSample.position - volumeInteraction.position);
+        radianceSH.addRadiance(fireflyFilteredRadiance, lightDir);
+      }
+    }
+  }
+  else
+  {
+    const float inverseSelectionPdf = 1.f;
+    
+    [unroll]
+    for (uint lightType = 0; lightType < RAB_GetLightTypeCount(); ++lightType)
+    {
+      const RTXDI_LightRange range = RAB_GetLightRange(lightType);
+
+      if (range.count == 0)
+      {
+        continue;
+      }
+      
+      for (uint i = 0; i < range.count; i++)
+      {
+        // Sample the light
+
+        const float2 risSampleCoordinates = float2(RAB_GetNextRandom(rabRandomState), RAB_GetNextRandom(rabRandomState));
+        const uint offsetLightIndex = i + range.firstIndex;
+        
+        // Note: The Ray Portal index that the NEE light sample should be assumed to be sampled through.
+        // Set to the invalid index if the light was not sampled through a Ray Portal.
+        uint8_t sampledTransportPortalIndex = invalidRayPortalIndex;
+        
+        // Note: lightType comes from the loop and is provided as a hint so that the compiler
+        // can effectively unroll the loop and remove the switch from decodedPolymorphicLightSampleArea called within.
+        RAB_LightSample rabLightSample = RAB_GetLightSampleWithTypeHint(offsetLightIndex, risSampleCoordinates, lightType, rabVolumeInteraction);
+        
+        vec3 radiance = vec3(0.0f, 0.0f, 0.0f);
+
+        if(evalNEE(
+          radiance,
+          rabLightSample, inverseSelectionPdf, sampledTransportPortalIndex,
+          ray, minimalRayInteraction, volumeInteraction))
+        {
+          // Apply firefly filtering to the new NEE contribution
+          // Note: This ensures super high energy fireflies do not make their way into the accumulation buffer and spread temporally
+          // as this can create very distracting and unnsatural blobs of light which persist for many frames in the volumetric lighting.
+          // Fireflies still get through with a basic clamp like this of course, but with the filtering and accumulation they make much less
+          // of a visual impact and are better handled.
+
+          const vec3 fireflyFilteredRadiance = fireflyFiltering(radiance, volumeArgs.froxelFireflyFilteringLuminanceThreshold);
+        
+          const float3 lightDir = normalize(rabLightSample.position - volumeInteraction.position);
+          radianceSH.addRadiance(fireflyFilteredRadiance, lightDir);
+        }
+      }
+    }
+  }
+  
+  // Accumulate the previous reprojected radiance with the current filtered sampled radiance
+
+  const SphericalHarmonic newAccumulatedRadianceSH = HarmonicsHelpers::mix(oldRadianceSH, radianceSH, historyAgeWeight);
+
+  // Store the current data
+  
+  HarmonicsHelpers::store3D<SphericalHarmonic>(newAccumulatedRadianceSH, AccumulatedRadianceY, AccumulatedRadianceCoCg, froxelIndex + froxelVolumeOffset);
+  
+  AccumulatedRadianceAge[froxelIndex + froxelVolumeOffset] = newHistoryAge / volumeArgs.maxAccumulationFrames;
+}

@@ -1,0 +1,2661 @@
+/*
+* Copyright (c) 2021-2026, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+
+#include <algorithm>
+#include <unordered_set>
+#include <cassert>
+#include <limits>
+#include <sstream>
+#include <iomanip>
+
+#include "../util/util_keybind.h"
+#include "../util/config/config.h"
+#include "../util/xxHash/xxhash.h"
+#include "../util/util_math.h"
+#include "../util/util_env.h"
+#include "rtx/algorithm/accumulate.h"
+#include "rtx_utils.h"
+#include "rtx/concept/ray_portal/ray_portal.h"
+#include "rtx_global_volumetrics.h"
+#include "rtx_pathtracer_gbuffer.h"
+#include "rtx_pathtracer_integrate_direct.h"
+#include "rtx_pathtracer_integrate_indirect.h"
+#include "rtx_dlss.h"
+#include "rtx_materials.h"
+#include "rtx/pass/material_args.h"
+#include "rtx_option.h"
+#include "rtx_option_manager.h"
+#include "rtx_hashing.h"
+#include "rtx_mod_manager.h"
+#include "rtx_fork_weather.h"
+
+enum _NV_GPU_ARCHITECTURE_ID;
+typedef enum _NV_GPU_ARCHITECTURE_ID NV_GPU_ARCHITECTURE_ID;
+enum _NV_GPU_ARCH_IMPLEMENTATION_ID;
+typedef enum _NV_GPU_ARCH_IMPLEMENTATION_ID NV_GPU_ARCH_IMPLEMENTATION_ID;
+
+// RTX specific options
+
+namespace dxvk {
+  class DxvkDevice;
+
+  using RenderPassVolumeIntegrateRaytraceMode = RtxGlobalVolumetrics::RaytraceMode;
+  using RenderPassGBufferRaytraceMode = DxvkPathtracerGbuffer::RaytraceMode;
+  using RenderPassIntegrateDirectRaytraceMode = DxvkPathtracerIntegrateDirect::RaytraceMode;
+  using RenderPassIntegrateIndirectRaytraceMode = DxvkPathtracerIntegrateIndirect::RaytraceMode;
+
+  // DLSS-RR is not listed here, because it's considered as a special mode of DLSS
+  enum class UpscalerType : int {
+    None = 0,
+    DLSS,
+    NIS,
+    TAAU,
+    XeSS
+  };
+
+  enum class GraphicsPreset : int {
+    Ultra = 0,
+    High,
+    Medium,
+    Low,
+    Custom,
+    // Note: Used to automatically have the graphics preset set on initialization, not used beyond this case
+    // as it should be overridden by one of the other values by the time any other code uses it.
+    Auto
+  };
+
+  enum class RaytraceModePreset {
+    Custom = 0,
+    Auto = 1
+  };
+
+  enum class DlssPreset : int {
+    Off = 0,
+    On,
+    Custom
+  };
+
+  enum class XeSSPreset : int {
+    UltraPerf = 0,
+    Performance,
+    Balanced,
+    Quality,
+    UltraQuality,
+    UltraQualityPlus,
+    NativeAA,
+    Custom,
+    Invalid
+  };
+
+  enum class NisPreset : int {
+    Performance = 0,
+    Balanced,
+    Quality,
+    Fullscreen
+  };
+
+  enum class TaauPreset : int {
+    UltraPerformance = 0,
+    Performance,
+    Balanced,
+    Quality,
+    Fullscreen
+  };
+
+  enum class CameraAnimationMode : int {
+    CameraShake_LeftRight = 0,
+    CameraShake_FrontBack,
+    CameraShake_Yaw,
+    CameraShake_Pitch,
+    YawRotation
+  };
+
+  enum class TonemappingMode : int {
+    Global = 0,
+    Local
+  };
+
+  enum class UIType : int {
+    None = 0,
+    Basic,
+    Advanced,
+    Count
+  };
+
+  enum class ReflexMode : int {
+    None = 0,
+    LowLatency,
+    LowLatencyBoost
+  };
+
+  enum class FusedWorldViewMode : int {
+    None = 0,
+    View,
+    World
+  };
+  
+  enum class SkyAutoDetectMode : int {
+    None = 0,
+    CameraPosition,
+    CameraPositionAndDepthFlags
+  };
+
+  enum class SkyMode : int {
+    SkyboxRasterization = 0,
+    PhysicalAtmosphere = 1
+  };
+
+  enum class EnableVsync : int {
+    Off = 0,
+    On = 1,
+    WaitingForImplicitSwapchain = 2   // waiting for the app to create the device + implicit swapchain, we latch the vsync setting from there
+  };
+
+  enum class IntegrateIndirectMode : int {
+    ImportanceSampled = 0,   // Importance sampled integration - provides the noisiest output and used primarily for reference comparisons
+    ReSTIRGI = 1,            // Importance Sampled + ReSTIR GI integrations
+    NeuralRadianceCache = 2, // Implements a live trained neural network to provide a world space radiance cache and allow the pathtracer to terminate paths earlier into the cache.
+  
+    Count
+  };
+
+  class RtxOptions {
+    friend class ImGUI;
+    friend class ImGuiSplash;
+    friend class ImGuiCapture;
+    friend class NeuralRadianceCache;
+    friend class RtxContext;
+    friend class RtxInitializer;
+    friend class RtxComposite;
+
+    RTX_OPTION("rtx", fast_unordered_set, lightmapTextures, {},
+                  "Textures used for lightmapping (baked static lighting on surfaces) in older games.\n"
+                  "These textures will be ignored when attempting to determine the desired textures from a draw to use for ray tracing.");
+    RTX_OPTION("rtx", fast_unordered_set, neverAlbedoTextures, {},
+                  "Textures that must never be selected as the primary albedo in D3D11 shader path draws.\n"
+                  "Use this for shared overlay content (dirt/grunge masks, detail patterns, tint ramps) that the albedo "
+                  "inference might otherwise pick over the intended diffuse; tagging the overlay once corrects every "
+                  "material that samples it.");
+    RTX_OPTION("rtx", fast_unordered_set, preferredAlbedoTextures, {},
+                  "Textures that should be strongly preferred as the primary albedo when bound to a draw.\n"
+                  "Use this to override the albedo sampler inference for D3D11 shader path draws where the heuristics pick "
+                  "the wrong texture (e.g. a specular or normal map is selected instead of the intended diffuse).");
+    RTX_OPTION("rtx", fast_unordered_set, skyBoxTextures, {},
+                  "Textures on draw calls used for the sky or are otherwise intended to be very far away from the camera at all times (no parallax).\n"
+                  "Any draw calls using a texture in this list will be treated as sky and rendered as such in a manner different from typical geometry.");    
+    RTX_OPTION("rtx", fast_unordered_set, skyBoxGeometries, {},
+                  "Geometries from draw calls used for the sky or are otherwise intended to be very far away from the camera at all times (no parallax).\n"
+                  "Any draw calls using a geometry hash in this list will be treated as sky and rendered as such in a manner different from typical geometry.\n"
+                  "The geometry hash being used for sky detection is based off of the asset hash rule, see: \"rtx.geometryAssetHashRuleString\".");
+    RTX_OPTION("rtx", fast_unordered_set, ignoreTextures, {},
+                  "Textures on draw calls that should be ignored.\n"
+                  "Any draw call using an ignore texture will be skipped and not ray traced, useful for removing undesirable rasterized effects or geometry not suitable for ray tracing.");
+    RTX_OPTION("rtx", fast_unordered_set, ignoreLights, {},
+                  "Lights that should be ignored.\nAny matching light will be skipped and not added to be ray traced.");
+    RTX_OPTION("rtx", fast_unordered_set, uiTextures, {},
+                  "Textures on draw calls that should be treated as screenspace UI elements.\n"
+                  "All exclusively UI-related textures should be classified this way and doing so allows the UI to be rasterized on top of the ray traced scene like usual.\n"
+                  "Note that currently the first UI texture encountered triggers RTX injection (though this may change in the future as this does cause issues with games that draw UI mid-frame).");
+    RTX_OPTION("rtx", fast_unordered_set, deferredUiTextures, {},
+                  "Textures on overlay draw calls (fullscreen fades, scope/damage screen effects) that the game renders mid-scene, before 3D rendering has finished for the frame.\n"
+                  "Like rtx.uiTextures these draws are rasterized on top of the ray-traced image, but they never trigger RTX injection; instead each tagged draw is captured and replayed right after RTX injection fires later in the frame (at the first real UI draw, or at the end-of-frame fallback).\n"
+                  "Use this for post-process style overlays (e.g. full-screen material fade effects) that would otherwise end the ray-traced scene early and force later geometry (such as first-person meshes) back to rasterization.\n"
+                  "For render-target textures the stable descriptor hash matches in addition to the (recreation-dependent) image hash, and rtx.d3d11.deferredUiPixelShaders can tag the overlay's pixel shader instead.\n"
+                  "Tagging is not absolute: depth-writing draws, world geometry (anything beyond trivial depth-test-off overlay quads), and engine post-process shaders are refused deferral and classified normally, so shared textures cannot pull scene geometry out of the ray-traced world.\n"
+                  "See rtx.d3d11.deferredUiReplay and rtx.d3d11.deferredUiRefreshSceneColor for the replay behavior.");
+    RTX_OPTION("rtx", fast_unordered_set, worldSpaceUiTextures, {},
+                  "Textures on draw calls that should be treated as worldspace UI elements.\n"
+                  "Unlike typical UI textures this option is useful for improved rendering of UI elements which appear as part of the scene (moving around in 3D space rather than as a screenspace element).");
+    RTX_OPTION("rtx", fast_unordered_set, worldSpaceUiBackgroundTextures, {}, 
+                  "Hack/workaround option for dynamic world space UI textures with a coplanar background.\n"
+                  "Apply to backgrounds if the foreground material is a dynamic world texture rendered in UI that is unpredictable and rapidly changing.\n"
+                  "This offsets the background texture backwards.");
+    RTX_OPTION("rtx", fast_unordered_set, hideInstanceTextures, {},
+                  "Textures on draw calls that should be hidden from rendering, but not totally ignored.\n"
+                  "This is similar to rtx.ignoreTextures but instead of completely ignoring such draw calls they are only hidden from rendering, allowing for the hidden objects to still appear in captures.\n"
+                  "As such, this is mostly only a development tool to hide objects during development until they are properly replaced, otherwise the objects should be ignored with rtx.ignoreTextures instead for better performance.");
+    RTX_OPTION("rtx", fast_unordered_set, playerModelTextures, {}, "");
+    RTX_OPTION("rtx", fast_unordered_set, playerModelBodyTextures, {}, "");
+    RTX_OPTION("rtx", fast_unordered_set, lightConverter, {}, "");
+    RTX_OPTION("rtx", fast_unordered_set, particleTextures, {},
+                  "Textures on draw calls that should be treated as particles.\n"
+                  "When objects are marked as particles more approximate rendering methods are leveraged allowing for more effecient and typically better looking particle rendering.\n"
+                  "Generally any billboard-like blended particle objects in the original application should be classified this way.");
+    RTX_OPTION("rtx", fast_unordered_set, beamTextures, {},
+                  "Textures on draw calls that are already particles or emissively blended and have beam-like geometry.\n"
+                  "Typically objects marked as particles or objects using emissive blending will be rendered with a special method which allows re-orientation of the billboard geometry assumed to make up the draw call in indirect rays (reflections for example).\n"
+                  "This method works fine for typical particles, but some (e.g. a laser beam) may not be well-represented with the typical billboard assumption of simply needing to rotate around its centroid to face the view direction.\n"
+                  "To handle such cases a different beam mode is used to treat objects as more of a cylindrical beam and re-orient around its main spanning axis, allowing for better rendering of these beam-like effect objects.");
+    RTX_OPTION("rtx", fast_unordered_set, ignoreTransparencyLayerTextures, {},
+                  "Textures on draw calls that should not be stored in the transparency layer, when DLSS-RR is on.\n"
+                  "The transparency layer stores noise-free transparent objects which bypasses DLSS-RR denoising, but it has lower anti-aliasing quality.\n"
+                  "Transparent objects that have aliasing/flickering issues, like laser beams, can be added to this list to achieve better anti-aliasing quality.");
+    RTX_OPTION("rtx", fast_unordered_set, decalTextures, {},
+                  "Textures on draw calls used for static geometric decals or decals with complex topology.\n"
+                  "These materials will be blended over the materials underneath them when decal material blending is enabled.\n"
+                  "A small configurable offset is applied to each flat/co-planar part of these decals to prevent coplanar geometric cases (which poses problems for ray tracing).");
+    // Deprecated decal texture options - these are migrated to decalTextures via onChange callbacks
+    public: static void dynamicDecalTexturesOnChange(DxvkDevice* device);
+    public: static void singleOffsetDecalTexturesOnChange(DxvkDevice* device);
+    public: static void nonOffsetDecalTexturesOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", fast_unordered_set, dynamicDecalTextures, {},
+                  "Warning: This option is deprecated, please use rtx.decalTextures instead.\n"
+                  "Textures on draw calls used for dynamically spawned geometric decals, such as bullet holes.\n"
+                  "These materials will be blended over the materials underneath them when decal material blending is enabled.\n"
+                  "A small configurable offset is applied to each quad part of these decals to prevent coplanar geometric cases (which poses problems for ray tracing).",
+                  args.onChangeCallback = &dynamicDecalTexturesOnChange);
+    RTX_OPTION_ARGS("rtx", fast_unordered_set, singleOffsetDecalTextures, {},
+                  "Warning: This option is deprecated, please use rtx.decalTextures instead.\n"
+                  "Textures on draw calls used for geometric decals that don't inter-overlap for a given texture hash. Textures must be tagged as \"Decal Texture\" or \"Dynamic Decal Texture\" to apply.\n"
+                  "Applies a single shared offset to all the batched decal geometry rendered in a given draw call, rather than increasing offset per decal within the batch (i.e. a quad in case of \"Dynamic Decal Texture\").\n"
+                  "Note, the offset adds to the global offset among all decals drawn with different draw calls.\n"
+                  "The decal textures tagged this way must not inter-overlap within a batch / single draw call since the same offset is applied to all of them.\n"
+                  "Applying a single offset is useful for stabilizing decal offsets when a game dynamically batches decals together.\n"
+                  "In addition, it makes the global decal offset index grow slower and thus it minimizes a chance of hitting the \"rtx.decals.maxOffsetIndex limit\".",
+                  args.onChangeCallback = &singleOffsetDecalTexturesOnChange);
+    RTX_OPTION_ARGS("rtx", fast_unordered_set, nonOffsetDecalTextures, {},
+                  "Warning: This option is deprecated, please use rtx.decalTextures instead.\n"
+                  "Textures on draw calls used for geometric decals with arbitrary topology that are already offset from the base geometry.\n"
+                  "These materials will be blended over the materials underneath them when decal material blending is enabled.\n"
+                  "Unlike typical decals however these decals have no offset applied to them due assuming the offset is already being done by whatever is passing data to Remix.",
+                  args.onChangeCallback = &nonOffsetDecalTexturesOnChange);
+    RTX_OPTION("rtx", fast_unordered_set, terrainTextures, {}, "Albedo textures that are baked blended together to form a unified terrain texture used during ray tracing.\n"
+                                                                  "Put albedo textures into this category if the game renders terrain as a blend of multiple textures.");
+    RTX_OPTION("rtx", fast_unordered_set, opacityMicromapIgnoreTextures, {}, "Textures to ignore when generating Opacity Micromaps. This generally does not have to be set and is only useful for black listing problematic cases for Opacity Micromap usage.");
+    RTX_OPTION("rtx", fast_unordered_set, animatedWaterTextures, {},
+                  "Textures on draw calls to be treated as \"animated water\".\n"
+                  "Objects with this flag applied will animate their normals to fake a basic water effect based on the layered water material parameters, and only when rtx.opaqueMaterial.layeredWaterNormalEnable is set to true.\n"
+                  "Should typically be used on static water planes that the original application may have relied on shaders to animate water on.");
+    RTX_OPTION("rtx", fast_unordered_set, ignoreBakedLightingTextures, {},
+                  "Textures for which to ignore two types of baked lighting, Texture Factors and Vertex Color.\n\n"
+                  "Texture Factor disablement:\n"
+                  "Using this feature on selected textures will eliminate the texture factors.\n"
+                  "For instance, if a game bakes lighting information into the Texture Factor for particular textures, applying this option will remove them.\n"
+                  "This becomes useful when unexpected results occur due to the Texture Factor.\n"
+                  "Consider an example where the original texture contains red tints baked into the Texture Factor. If a user replaces the texture, it will blend with the red tints, resulting in an undesirable reddish outcome.\n"
+                  "In such cases, users can employ this option to eliminate the unwanted tints from their replacement textures.\n"
+                  "Similarly, users can tag textures if shadows are baked into the Texture Factor, causing the replacing texture to appear darker than anticipated.\n\n"
+                  "Vertex Color disablement:\n"
+                  "Using this feature on selected textures will eliminate the vertex colors.\n\n"
+                  "Note, enabling this setting will automatically disable multiple-stage texture factor blendings for the selected textures.\n"
+                  "Only use this option when necessary, as the Texture Factor and Vertex Color can be used for simulating various texture effects, tagging a texture with this option will unexpectedly eliminate these effects.");
+    RTX_OPTION("rtx", fast_unordered_set, ignoreAlphaOnTextures, {}, 
+                  "Textures for which to ignore the alpha channel of the legacy colormap. Textures will be rendered fully opaque as a result.");
+    RTX_OPTION("rtx.antiCulling", fast_unordered_set, antiCullingTextures, {},
+                  "Textures that are forced to extend life length when anti-culling is enabled.\n"
+                  "Some games use different culling methods we can't fully match, use this option to manually add textures to force extend their life when anti-culling fails.");
+    RTX_OPTION("rtx.postfx", fast_unordered_set, motionBlurMaskOutTextures, {}, "Disable motion blur for meshes with specific texture.");
+
+    public: static void geometryGenerationHashRuleStringOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", std::string, geometryGenerationHashRuleString, "positions,indices,texcoords,geometrydescriptor,vertexlayout,vertexshader",
+                  "Defines which asset hashes we need to generate via the geometry processing engine.",
+                  args.onChangeCallback = &geometryGenerationHashRuleStringOnChange);
+    public: static void geometryAssetHashRuleStringOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", std::string, geometryAssetHashRuleString, "positions,indices,geometrydescriptor",
+                  "Defines which hashes we need to include when sampling from replacements and doing USD capture.",
+                  args.onChangeCallback = &geometryAssetHashRuleStringOnChange);
+    RTX_OPTION("rtx", fast_unordered_set, raytracedRenderTargetTextures, {}, "DescriptorHashes for Render Targets. (Screens that should display the output of another camera).");
+    RTX_OPTION("rtx", fast_unordered_set, particleEmitterTextures, {}, "Objects rendered with these textures will emit particles that inherit the material of the object itself.");
+    RTX_OPTION("rtx", fast_unordered_set, smoothNormalsTextures, {},
+                  "Textures on draw calls whose geometry should have smooth normals generated on the GPU.\n"
+                  "This is useful for older D3D11 games where the geometry may be missing smooth normals, especially when using the VertexShader Capture mechanism.\n"
+                  "When a draw call matches, area-weighted smooth normals will be computed from the triangle mesh and used for ray tracing.");
+    
+  public:
+    RTX_OPTION("rtx", bool, showRaytracingOption, true, "Enables or disables the option to toggle ray tracing in the UI. When set to false the ray tracing checkbox will not appear in the Remix UI.");
+    RTX_OPTION_ENV("rtx", bool, enableRaytracing, true, "DXVK_ENABLE_RAYTRACING",
+                   "Globally enables or disables ray tracing. When set to false the original game should render mostly as it would in DXVK typically.\n"
+                   "Some artifacts may still appear however compared to the original game either due to issues with the underlying DXVK translation or issues in Remix itself.");
+
+    RTX_OPTION("rtx", float, sceneScale, 1, "Defines the ratio of rendering unit (1cm) to game unit, i.e. sceneScale = 1cm / GameUnit.");
+    RTX_OPTION("rtx", bool, zUp, false, "Indicates that the Z axis is the \"upward\" axis in the world when true, otherwise the Y axis when false.");
+    RTX_OPTION("rtx", bool, leftHandedCoordinateSystem, false, "Indicates that the world space coordinate system is left-handed when true, otherwise right-handed when false.");
+    // DX11_V225: options consumed by the DX11 in-process draw-processing path.
+    RTX_OPTION("rtx", bool, significanceCulling, false, "Performance (opt-in): drops scene instances whose projected on-screen size is below significanceCullingMinScreenFraction, reducing the instance count the path tracer must build/trace each frame. Defaults OFF so ALL geometry is always present; when enabled it is fail-safe (only culls when the world bounding box is valid and the projected size is sub-pixel, i.e. already-invisible geometry).");
+    RTX_OPTION("rtx", float, significanceCullingMinScreenFraction, 0.0003f, "Performance: minimum projected on-screen size (object world-size / camera distance, an angular fraction) below which significanceCulling drops an instance. 0.0003 is sub-pixel even at 4K; raise for more aggressive culling, lower (or 0) to keep everything.");
+    RTX_OPTION("rtx", uint32_t, maxInstanceSubmissions, 100000u, "Performance: hard cap on the number of (non-culled) main-camera scene instances submitted to the path tracer per frame. Default 100000 effectively means no cap; lower it to bound worst-case instance counts in pathological scenes.");
+    RTX_OPTION("rtx", bool, forceInjection, true, "DX11: forces Remix injection for draws even when normal heuristics would skip them. Default ON so games path-trace instead of falling back to rasterization whenever a real camera or a previous scene exists; camera-less pure-UI frames still pass through (injecting those would render black menus).");
+    RTX_OPTION("rtx", bool, dx11StrongerDenoising, true, "DX11: strengthen NRD denoising beyond the stock presets - longer temporal accumulation, forced firefly suppression, and wider spatial filtering (the same measures Unreal's path tracer leans on: heavy temporal history + variance-guided spatial reconstruction). The DX11 capture's signal is noisier than native Remix (approximate cameras, absent per-object motion), so the stock tuning under-resolves. Disable per game in rtx.conf if temporal ghosting is objectionable.");
+    RTX_OPTION("rtx", bool, useCBufferWorldMatrices, false, "DX11: derives world/view matrices from constant buffers when true.");
+    RTX_OPTION("rtx", bool, enableUnrealTextureFixes, false, "DX11: applies generic albedo texture-selection reinforcement (boost strong-albedo mipmapped textures, demote scene/intermediate surfaces). Removed from the default path (it could promote the wrong texture to albedo); set true to re-enable per game.");
+    RTX_OPTION("rtx", bool, enableSource2Fixes, false, "DX11: applies Source 2 engine specific fixes when true.");
+    RTX_OPTION("rtx", bool, ignoreSecondaryTextures, false, "DX11: only consider the primary color texture per draw when true.");
+    RTX_OPTION("rtx", bool, useInputAssemblerNormals, false, "DX11: sources vertex normals from the input assembler layout when true.");
+    // Note: This time is in milliseconds, should be named something like millisecondDeltaBetweenFrames ideally, but keeping it as it is for now.
+    RTX_OPTION_ENV("rtx", float, timeDeltaBetweenFrames, 0.f, "RTX_FRAME_TIME_DELTA_MS",
+                   "Frame time delta in milliseconds to use for rendering.\n"
+                   "Setting this to 0 will use actual frame time delta for a given frame. Non-zero value allows the actual time delta to be overridden and is primarily used for automation to ensure determinism run to run without variance due to frame time fluctuations.");
+
+    RTX_OPTION_FLAG("rtx", bool, keepTexturesForTagging, false, RtxOptionFlags::NoSave, "A flag to keep all textures in video memory, which can drastically increase VRAM consumption. Intended to assist with tagging textures that are only used for a short period of time (such as loading screens). Use only when necessary!");
+    RTX_OPTION_ARGS("rtx.gui", float, textureGridThumbnailScale, 1.f, 
+                    "A float to set the scale of thumbnails while selecting textures.\n"
+                    "This will be scaled by the default value of 120 pixels.\n"
+                    "This value must always be greater than zero.",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx", bool, skipDrawCallsPostRTXInjection, false, "Ignores all draw calls recorded after RTX Injection, the location of which varies but is currently based on when tagged UI textures begin to draw.");
+    // DX11: default to Custom (not On). DlssPreset::On forces upscalerType=DLSS in
+    // updateUpscalerFromDlssPreset(), which would override the TAAU default below and
+    // leave non-NVIDIA GPUs (AMD/Intel, and pre-Turing NVIDIA) with no working upscaler
+    // -> native-res path tracing -> ~2 fps. Custom is the no-op case, so the upscaler
+    // default is honored on every vendor.
+    RTX_OPTION_ARGS("rtx", DlssPreset, dlssPreset, DlssPreset::Custom, "Combined DLSS Preset for quickly controlling Upscaling, Frame Interpolation and Latency Reduction.",
+                    args.environment = "RTX_DLSS_PRESET",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", NisPreset, nisPreset, NisPreset::Balanced, "Adjusts NIS scaling factor, trades quality for performance.",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", TaauPreset, taauPreset, TaauPreset::Balanced,  "Adjusts TAA-U scaling factor, trades quality for performance.",
+                    args.flags = RtxOptionFlags::UserSetting);
+    static void graphicsPresetOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", GraphicsPreset, graphicsPreset, GraphicsPreset::Auto, "Overall rendering preset, higher presets result in higher image quality, lower presets result in better performance.",
+                    args.environment = "DXVK_GRAPHICS_PRESET_TYPE",
+                    args.onChangeCallback = &graphicsPresetOnChange,
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ENV("rtx", RaytraceModePreset, raytraceModePreset, RaytraceModePreset::Auto, "DXVK_RAYTRACE_MODE_PRESET_TYPE", "");
+    RTX_OPTION_FLAG("rtx", bool, lowMemoryGpu, false, RtxOptionFlags::NoSave | RtxOptionFlags::UserSetting, "Enables low memory mode, where we aggressively detune caches and streaming systems to accomodate the lower memory available.");
+    RTX_OPTION_ARGS("rtx", float, emissiveIntensity, 1.0f, "A general scale factor on all emissive intensity values globally. Generally per-material emissive intensities should be used, but this option may be useful for debugging without needing to author materials.",
+                    args.minValue = 0.0f);
+    RTX_OPTION_ARGS("rtx", float, fireflyFilteringLuminanceThreshold, 1000.0f, "Maximum luminance threshold for the firefly filtering to clamp to.",
+                    args.minValue = 0.0f);
+    RTX_OPTION("rtx", float, secondarySpecularFireflyFilteringThreshold, 1000.0f, "Firefly luminance clamping threshold for secondary specular signal.");
+    RTX_OPTION_ARGS("rtx", float, vertexColorStrength, 0.6f,
+                    "A scalar to apply to how strong vertex color influence should be on materials.\n"
+                    "A value of 1 indicates that it should be fully considered (though do note the texture operation and relevant parameters still control how much it should be blended with the actual albedo color), a value of 0 indicates that it should be fully ignored.",
+                    args.minValue = 0.0f, args.maxValue = 1.0f);
+    RTX_OPTION("rtx", bool, vertexColorIsBakedLighting, true, "If true, brightness contribution will be removed from the vertex color by dividing each component by the largest component.");
+    RTX_OPTION("rtx", bool, ignoreAllVertexColorBakedLighting, false, "If true, all baked lighting bound to all vertex colors will be ignored.");
+    RTX_OPTION("rtx", bool, allowFSE, false,
+               "A flag indicating if the application should be able to utilize exclusive full screen mode when set to true, otherwise force it to be disabled when set to false.\n"
+               "Exclusive full screen may see performance benefits over other fullscreen modes at the cost of stability in some cases.\n"
+               "Do note that on modern Windows full screen optimizations will likely be used regardless which in most cases results in performance similar to exclusive full screen even when it is not in use.");
+    RTX_OPTION("rtx", std::string, baseGameModRegex, "", "Regex used to determine if the base game is running a mod, like a sourcemod.");
+    RTX_OPTION("rtx", std::string, baseGameModPathRegex, "", "Regex used to redirect RTX Remix Runtime to another path for replacements and rtx.conf.");
+    RTX_OPTION("rtx", bool, disableAMDSwitchableGraphics, true,
+               "A flag indicating if Remix should attempt to disable AMD's switchable graphics Vulkan layer (VK_LAYER_AMD_swichable_graphics).\n"
+               "Due to how some older AMD drivers filter devices exposed to Vulkan it is possible for Remix to see no valid GPUs on a machine when using an integerated AMD GPU with a dedicated Nvidia GPU (for instance a laptop).\n"
+               "This is because on such machines both Nvidia Optimus and AMD switchable graphics attempt to filter the device list to promote their respective GPUs, but rather than leaving at least one device all end up filtered out.\n"
+               "To work around this issue, Remix can attempt to disable the AMD switchable graphics layer which should eliminate this buggy filtering. As such, this option should generally remain enabled.\n"
+               "If this causes an undesired GPU to be selected (e.g. if for some reason you want to force Remix to run on an integerated AMD GPU via the switchable graphics layer), then this option should be disabled.");
+
+
+    // PC-game D3D11 capture: camera recovery for titles whose geometry can
+    // only be captured camera-relative (view space, no proven world/view
+    // matrix). Fully separate from the emulator camera below - the two paths
+    // never share state.
+    RTX_OPTION("rtx.dx11", bool, estimateViewSpaceCameraMotion, true,
+               "Estimates real camera motion for PC games whose geometry is captured in camera-relative view space because no world/view matrix could be proven from the game's shaders (e.g. an unconfirmed view matrix).\n"
+               "Static geometry is re-identified across frames and the camera's rigid motion is solved from it, anchoring the scene in a consistent world space: motion vectors, temporal accumulation and the free camera then behave like a title with a real captured camera.\n"
+               "Titles with a proven world or confirmed view matrix never use this path. Disable to restore the fixed camera-relative fallback.");
+    // PC-game D3D11 capture: engines that render camera-relative supply a view
+    // matrix with no translation at all, so the RT camera would otherwise sit
+    // on the world origin forever while the scene slides past it.
+    RTX_OPTION("rtx.dx11", bool, anchorCameraRelativeWorld, true,
+               "Restores the camera's world position for games that render camera-relative - engines that subtract the eye position from every object transform on the CPU and leave the view matrix a pure rotation with a zero translation (Creation Engine among others).\n"
+               "Without it Remix reads that zero translation as 'the camera is at the world origin', anchors captured geometry with a rotation only, and the whole scene translates with the player while the camera stands still. The missing position is solved from the captured geometry itself - the frame-to-frame motion of static meshes, median-filtered so moving objects cannot carry it - and applied to the view matrix and to object placement together, so what the game rasterizes is unchanged.\n"
+               "Games whose view matrix already carries a translation are untouched by this. Disable to restore the origin-anchored behavior.");
+    // DX11_V319_DEFERRED_LIGHT_VOLUMES: recover game lights from the light-volume
+    // draws a deferred renderer already makes.
+    //
+    // D3D11 has no light API - lighting is shader code and light data is untyped
+    // bytes in a constant or structured buffer - so there is nothing to hook and
+    // no layout that is the same between two engines. But a deferred renderer
+    // draws each light as approximate geometry: a unit sphere for a point light,
+    // a unit cone for a spot, positioned and scaled by an ordinary world matrix.
+    // That matrix is already extracted for every draw, so the light's POSITION is
+    // its translation and its RANGE is its scale - no constant-buffer parsing and
+    // nothing engine-specific.
+    //
+    // Colour and intensity genuinely are not recoverable this way (they live in
+    // the shader constants), so they are settings rather than guesses.
+    RTX_OPTION("rtx.dx11", bool, deferredLightVolumeAutoDetect, true,
+               "Detects a deferred renderer from its own draws and starts capturing its light volumes as Remix lights, without needing to know which engine or game is running.\n"
+               "The runtime watches for the light-accumulation signature (additive blend, no depth write, a low-poly volume mesh carrying a real scale) and arms the capture only after several consecutive frames contain enough of them. Until it arms, matching draws are counted but otherwise left completely untouched, so a forward-rendered game that trips the signature occasionally is unaffected.\n"
+               "This is what makes light capture game-agnostic: an engine that lights deferred switches it on by behaving like one. Set to False to require the explicit rtx.dx11.deferredLightVolumeCapture instead.");
+    RTX_OPTION("rtx.dx11", uint, deferredLightVolumeAutoDetectMinPerFrame, 8,
+               "How many light-volume draws a frame must contain to count as evidence of a deferred renderer. Below this the frame is not counted and the run resets.");
+    RTX_OPTION("rtx.dx11", uint, deferredLightVolumeAutoDetectFrames, 30,
+               "How many consecutive qualifying frames are required before light-volume capture arms itself. A run rather than a single frame, so an incidental burst of small additive draws cannot trigger it.");
+    RTX_OPTION("rtx.dx11", bool, deferredLightVolumeCapture, false,
+               "Creates Remix lights from the light-volume draws of a deferred renderer (UE4, Unity deferred, and similar).\n"
+               "The DX11 runtime otherwise captures NO game lights at all - D3D11 has no light API, so a scene is lit only by the fallback light plus anything added in USD. A deferred renderer draws every light as a sphere or cone scaled by its range, so position and range can be read straight off the draw's world matrix without parsing any constant buffer.\n"
+               "Colour and intensity are NOT recoverable from the volume geometry; they come from rtx.dx11.deferredLightVolumeColor and rtx.dx11.deferredLightVolumeIntensity. Off by default: on a forward-rendered game the heuristic has nothing correct to find, and a wrong light is worse than none.");
+    RTX_OPTION("rtx.dx11", uint, deferredLightVolumeMaxPrimitives, 2048,
+               "Largest primitive count still considered a light volume. Light volumes are low-poly stand-ins (a unit sphere or cone); world meshes are far denser, so this separates them. Raise it if lights are being missed, lower it if world geometry is being eaten.");
+    RTX_OPTION("rtx.dx11", float, deferredLightVolumeMinRange, 1.0f,
+               "Smallest world-space range (the volume's scale) accepted as a light. Rejects degenerate or unscaled volumes that would otherwise produce a light with no reach.");
+    RTX_OPTION("rtx.dx11", float, deferredLightVolumeRadiusScale, 0.05f,
+               "Emitter radius as a fraction of the light's range. The volume gives the range the light reaches, not the size of the bulb; this derives a plausible physical emitter size from it. Larger values give softer shadows.");
+    RTX_OPTION("rtx.dx11", float, deferredLightVolumeIntensity, 1.0f,
+               "Brightness multiplier for lights recovered from light volumes. The volume geometry carries no intensity, so this is the single knob that scales all of them.");
+    RTX_OPTION("rtx.dx11", Vector3, deferredLightVolumeColor, Vector3(1.0f, 1.0f, 1.0f),
+               "Colour applied to lights recovered from light volumes, since the volume geometry carries no colour.");
+    RTX_OPTION("rtx.dx11", uint, deferredLightVolumeMaxPerFrame, 64,
+               "Maximum lights created from light volumes in one frame. Bounds the cost when a heuristic misfires on a scene full of small additive draws.");
+
+    RTX_OPTION("rtx.dx11", bool, skyProbePatchFirstMatrix, true,
+               "Fill the sky probe by re-issuing the game's own sky draws once per cube face with a patched copy of vertex constant buffer 0.\n"
+               "The DX11 fork has no vertex-capture constant buffer, so Remix's usual per-face reprojection (customWorldToProjection) cannot be injected and skybox-cubemap mode was disabled outright - the probe stayed at its clear value and the player sat inside a black box. This path needs no shader authoring: engines whose sky vertex shader takes its world-view-projection as the FIRST constant of b0 (OGRE/SkyX, and therefore Kenshi) are reprojected by rewriting that one matrix, copying the rest of the block through untouched.\n"
+               "Requires a host-visible b0; falls back to the previous behaviour when the constant buffer cannot be read. Set to False to force the physical atmosphere instead.");
+
+    // ----- Game-driven sun (fork - DX11_V444) -----
+    // Reads the sun straight out of the game's own deferred lighting constants
+    // and pushes it into the physical atmosphere each frame, so time of day,
+    // sunset colour and the night fade all come from the game instead of from
+    // static settings. Matched by constant NAME, so it costs nothing on titles
+    // that do not expose those names.
+    RTX_OPTION("rtx.dx11", bool, kenshiSunDrive, true,
+               "Drive the physical atmosphere's sun from the game's own lighting constants.\n"
+               "Elevation and azimuth come from the unclamped sun vector on the sky draws (`sunDirectionReal`/`uLightDir`); colour and intensity come from the deferred sun composite's `sunColour`/`ambientParams`. The composite's own `sunDirection` is deliberately NOT used for elevation: it is horizon-clamped (measured y=0.0 at both sunset and midnight) and would pin the sun to the horizon all night.\n"
+               "Set to False to go back to a static sun set by rtx.atmosphere.sunElevation/sunRotation/sunIlluminance.");
+    RTX_OPTION("rtx.dx11", float, kenshiSunColourBlend, 1.0f,
+               "How much of the game's authored sun HUE to apply, 0..1. The physical atmosphere already reddens the sun through its own transmittance, so 1.0 (the game-look default) applies the game's sunset orange on top of that and reddens twice - which is usually what a stylised game wants. Use 0.0 for a physically derived sun colour, or an intermediate value to split the difference.\n"
+               "Only the hue is taken, so this can be changed without changing sunlight brightness.");
+    RTX_OPTION("rtx.dx11", float, kenshiSunRadiance, 2.0f,
+               "Brightness of sunlight on the scene when using Kenshi's captured sky. 0 turns sunlight off.\n"
+               "Time-of-day and biome changes still apply. Does not change the visible sky or skylight.");
+    RTX_OPTION("rtx.dx11", uint, worldMatrixScanMaxMissesPerShader, 8,
+               "How many consecutive draws a vertex shader may fail to yield a world matrix before the per-draw search is skipped for that shader. 0 keeps searching forever.\n"
+               "The search caches no location on purpose - a remembered slot/offset can point at a bone, light or post matrix after a shader change - so the full sweep otherwise runs for every draw: every bound constant buffer, every 16-byte offset, an affine/shear/scale test per candidate, plus a second sweep for a derived object-to-view matrix. On a game that exposes no world matrix at all (Skyrim logs 'world=NO') that work runs and fails on every draw of the session.\n"
+               "DX11_V319: measured in Mine Souls III at 3.0ms of a 4.6ms draw-submission budget across 503 draws. What is remembered is a property of the SHADER, not a location, and any success clears it immediately, so a shader that only sometimes binds its world cbuffer is never suppressed by a few early misses.");
+    RTX_OPTION("rtx.dx11", bool, stableDynamicTextureHashes, true,
+               "Gives sampled textures created without initial data (UI/font atlases, video surfaces, streaming pools) a stable identity derived from their descriptor and creation order, instead of hashing the content of whichever runtime upload happened to arrive first.\n"
+               "First-upload hashing made such texture hashes differ between sessions - the first upload depends on which glyphs or frames the menu touched first - so UI texture tags and replacements silently stopped applying on the next run.\n"
+               "Note: enabling or disabling this changes the hashes of these dynamic textures once, so existing tags on them need re-tagging; textures created with data (nearly all world materials) are unaffected.");
+    // DX11_V295_CAPTURE_BUDGET: per-frame post-VS capture budgets. Remix-native
+    // titles route their whole scene through capture (50-200 small draws per
+    // frame), so the caps default high; the byte cap bounds one frame's GPU
+    // copy work against TDR. Lower these per title if a device-lost occurs.
+    RTX_OPTION("rtx.dx11", int, captureMaxDrawsPerFrame, 128,
+               "Maximum post-VS position captures performed per frame. Draws past the cap keep their previous capture or stay on the raster layer until a later frame captures them.\n"
+               "DX11_V298: raised 64 -> 128 (with new=64, replay=64, 48 MiB). Fallout 4 pinned the old cold lane (new=32/32) during world streaming, so scenery popped in over many seconds. GPU pacing is bounded separately (8 draws / 64K vertices per queue submission) and capture memory is capped, so the wider lanes only shorten pop-in.");
+    RTX_OPTION("rtx.dx11", int, captureMaxNewBuffersPerFrame, 64,
+               "Maximum NEW capture buffers allocated per frame (cold captures of meshes never seen before).");
+    RTX_OPTION("rtx.dx11", int, captureMaxReplaysPerFrame, 64,
+               "Maximum dynamic-mesh capture replays per frame (meshes whose vertex data changes every frame).");
+    RTX_OPTION("rtx.dx11", int, captureMaxMiBPerFrame, 48,
+               "Maximum bytes (MiB) of post-VS capture copied per frame. Bounds a single frame's GPU copy work so capture can never push one queue submission past the TDR limit.");
+    RTX_OPTION("rtx.dx11", bool, dynamicTextureHashUsesOrdinal, true,
+               "Includes a same-descriptor slot ordinal in the stable dynamic-texture identity. Slots are recycled when a texture is destroyed, so a recreated UI atlas keeps its hash across recreation.\n"
+               "Games that rotate several live buffers for one UI element get one stable hash per rotation slot - tag each slot once and the tags stick.\n"
+               "Set to false to collapse ALL dynamic textures sharing a descriptor (size/format/mips/usage) into a single identity: one tag then covers the whole rotation, at the cost of unrelated same-descriptor textures sharing that tag.");
+
+    // Authenticated emulator integration (PCSX2 and other emulators publishing
+    // the remix::emulator draw ABI through their D3D11 backend).
+    struct Emulator {
+      RTX_OPTION("rtx.emulator", bool, enableIntegration, true,
+                 "Master switch for the authenticated emulator integration (draw-metadata ABI, per-title profiles, emulator camera synthesis/estimation).\n"
+                 "Emulator handling only ever engages for draws carrying valid sealed metadata from a known emulator, or post-transform heuristics inside a known emulator process - native PC games always take the unmodified PC path.\n"
+                 "Set to false to guarantee every draw is treated as a native PC game draw, e.g. when diagnosing whether emulator handling affects a title.");
+      RTX_OPTION("rtx.emulator", float, cameraFovDegrees, 60.0f,
+                 "Vertical field of view in degrees for the camera synthesized on authenticated post-transform emulator draws (e.g. PCSX2's GS output).\n"
+                 "Guest post-transform geometry no longer carries the game's projection, so the runtime rebuilds one; set this to the game's real FOV for correct world proportions.\n"
+                 "Stored per title in the auto-created rtx.<SERIAL>_<CRC>.conf, so each game can carry its own value.");
+      RTX_OPTION("rtx.emulator", float, cameraNearPlane, 0.1f,
+                 "Near plane distance of the synthesized emulator camera in world units.");
+      RTX_OPTION("rtx.emulator", float, cameraFarPlane, 10000.0f,
+                 "Far plane distance of the synthesized emulator camera in world units.");
+      RTX_OPTION("rtx.emulator", bool, estimateCameraMotion, true,
+                 "Estimates guest camera motion between frames from re-identified guest meshes and applies it to the Remix camera on post-transform emulator draws.\n"
+                 "This anchors static geometry in a consistent world space: temporal accumulation, denoising, motion vectors and the Remix free camera then behave like a native game instead of the whole scene teleporting with the guest camera.\n"
+                 "An emulator that publishes a real camera through the ABI camera block overrides this estimate. Disable to fall back to the fixed identity camera.");
+      RTX_OPTION("rtx.emulator", int, cameraMotionMinSamplePoints, 24,
+                 "Minimum number of corresponded guest vertices required before a frame's camera-motion estimate is applied. Below this the previous camera pose is kept.");
+      RTX_OPTION("rtx.emulator", float, cameraMotionMaxTranslation, 500.0f,
+                 "Maximum plausible camera translation per guest frame in world units. Larger estimated jumps are treated as scene cuts and ignored.");
+    };
+
+    // Shader Compilation
+    struct Shader {
+      friend class ShaderManager;
+
+      // Note: Shader recompilation is only useful with a development setup for the most part and is disabled when REMIX_DEVELOPMENT is not defined,
+      // so these options will not take effect in such builds. They are however still included rather than ifdeffed out to keep consistent options documentation
+      // across builds.
+      RTX_OPTION("rtx.shader", bool, asyncSpirVRecompilation, true,
+                 "When set to true runtime shader recompilation will recompile shaders to SPIR-V asynchronously rather than blocking until complete.\n"
+                 "Do note that despite setting this option the actual compilation of the shader from SPIR-V to the ISA will still be blocking as only the prewarming process can handle this step asynchronously for now.\n"
+                 "Generally this option should remain enabled, though disabling it may be useful for CI where deterministic behavior is needed, and may be useful to maximize performance at the cost of blocking (by not having application running while compiling to SPIR-V).\n"
+                 "This option is mainly meant for development use and should not be set for user-facing operation.");
+      RTX_OPTION("rtx.shader", bool, recompileOnLaunch, false,
+                 "When set to true runtime shader recompilation will execute on the first frame after launch.\n"
+                 "This option is mainly meant for development use and should not be set for user-facing operation. Also see rtx.useLiveShaderEditMode for a similar option which auto-detects shader changes instead.");
+      RTX_OPTION("rtx.shader", bool, useLiveEditMode, false,
+                 "When set to true shaders will be automatically recompiled when any shader file is updated (saved for instance) in addition to the usual manual recompilation trigger.\n"
+                 "This option is mainly meant for development use and should not be set for user-facing operation.");
+
+      RTX_OPTION_ENV("rtx.shader", bool, prewarmAllVariants, true, "RTX_PREWARM_ALL_VARIANTS",
+                     "Prewarms every Remix shader variant in the injected game process after an external game launcher has handed off and before Remix completes game initialization. Only takes effect when rtx.initializer.asyncShaderPrewarming is true.\n"
+                     "Disable only to diagnose a driver compiler problem or reduce first-run compilation time; disabled variants compile asynchronously when first selected.");
+      RTX_OPTION_ENV("rtx.shader", bool, prewarmOnBoot, true, "DXVK_REMIX_PREWARM",
+                     "Registers the Remix path-tracing pipeline set with the asynchronous compiler during startup so required shaders are compiled before their first rendered use. Disable only when diagnosing a driver-specific compiler failure.");
+      RTX_OPTION("rtx.shader", bool, waitForPrewarmOnBoot, true,
+                 "Waits for boot shader prewarming to finish before Remix completes game initialization. The wait is bounded so a driver compiler failure cannot hang startup forever.\n"
+                 "DX11_V298: defaults ON - the game holds at the prewarm window and does not initialize past it until every Remix pipeline is compiled, so gameplay never overlaps compilation. The multi-minute cost the old OFF default avoided is now first-boot-only: compiled pipelines persist to rtx-remix/cache and later boots drain the wait in seconds.");
+      RTX_OPTION("rtx.shader", uint, maxBootPrewarmWaitSeconds, 45,
+                 "Longest the boot shader prewarm may hold the game before the remaining pipelines are handed to the background compiler and the game is allowed to start. Only applies to the boot wait; the shutdown drain always finishes.\n"
+                 "DX11_V319: with rtx.shader.prewarmAllVariants on there was previously NO total limit - only a 180s no-progress timeout - so a cold per-game pipeline cache blocked startup for as long as compilation kept making progress. Measured: Call of Duty Advanced Warfare 7m21s, Saints Row IV 8m02s, with no log output during the wait, which is indistinguishable from a hang and was reported as the game never loading.\n"
+                 "The handoff keeps the benefit: compiled pipelines still persist to rtx-remix/cache, so a later launch drains the wait in seconds. Raise it to favour compiling before play, or set to 0 for the old unbounded wait.");
+      RTX_OPTION("rtx.shader", bool, showPrewarmDialog, true,
+                 "Shows a responsive native Please Wait window with live shader count while boot shader prewarming is running before the game can render Remix's in-game UI.");
+      RTX_OPTION_ENV("rtx.shader", bool, enableAsyncCompilation, true, "RTX_ENABLE_ASYNC_COMPILATION",
+                 "When set to true shader compilation (especially that of prewarming) will be done asynchronously rather than blocking.\n"
+                 "Typically shader prewarming with async finalization is done to attempt to compile all required shader variants before they are used, often by overlapping this work with a startup sequence (e.g. a game's loading screen). Often times however this prewarming takes longer than the time available, or an application may not have a startup sequence to begin with and immediately begin using Remix shaders.\n"
+                 "To accomodate this, async shader compilation allows for this work to be done asynchronously to avoid blocking the application at the cost of being unable to render anything until the process is complete.\n"
+                 "This is typically better choice than blocking however and is recommended to be enabled as on Windows Remix blocking will cause the application to stop responding, making it seem as if the application has crashed if shader compilation takes a long time. Additionally, when combined with rtx.shader.enableAsyncCompilationUI the progress of the compilation process can be shown to the user as a UI, improving user experience.\n"
+                 "The main downside to this approach is that when blocking shader compilation is allowed to take up more of the CPU, whereas async shader compilation will have to compete with the application which can make compilation take slightly longer than it would otherwise (especially true if the application's framerate is uncapped).\n"
+                 "To mitigate this, Remix can optionally throttle the application during async compilation via rtx.shader.asyncCompilationThrottleMilliseconds to ensure enough time is available for compilation.\n"
+                 "Finally, a more minor downside is that when async shader compilation is in use Remix currently has no way of keeping the application in a startup sequence (e.g. keeping a game on its loading screen) while it waits for shaders to compile.\n"
+                 "This will mean for instance a game's menu may be active but not be able to render until the compilation is complete, rather than blocking on the loading screen and transitioning to the menu only once all shaders are loaded. Not blocking the application is typically better for user experience regardless though as long as some sort of progress UI is displayed to indicate what is happening.");
+      RTX_OPTION("rtx.shader", bool, enableAsyncCompilationUI, true,
+                 "Enables a UI message when async shader compilation is in progress to indicate the current compilation progress. Only takes effect when rtx.shader.enableAsyncCompilation is true.\n"
+                 "This should usually be enabled as providing information to the user about the current progress of compilation is useful. May be disabled however for automated testing purposes if the nondeterministic behavior of the UI's rendered text interferes with testing.");
+      RTX_OPTION("rtx.shader", std::uint32_t, asyncCompilationThrottleMilliseconds, 8,
+                 "Specifies a time in milliseconds to throttle each application frame when async shader compilation is in progress. Set to 0 to disable, and only takes effect when rtx.shader.enableAsyncCompilation is true.\n"
+                 "This generally should be set to a value low enough to not impact the application framerate significantly (especially if non-ray traced visuals are capable of being displayed by the application while loading, e.g. an intro video), but also high enough to get the desired shader compilation performance (especially relevant if the application is fairly heavy on the CPU during async shader compilation, or on CPUs with few hardware threads).\n"
+                 "DX11_V296: default lowered from 33 to 8. With rtx.shader.waitForPrewarmOnBoot off, the full pipeline set compiles in the background while the game is already playable; a 33ms tax on every frame capped games near 30 FPS for that whole multi-minute window - the reported post-prewarm lag. 8ms keeps the compiler fed without visibly dragging the frame rate.");
+      RTX_OPTION("rtx.shader", std::uint32_t, backgroundCompilerConcurrency, 0,
+                 "Maximum number of Remix pipeline compiles allowed to run concurrently on the shader compiler workers once the game is running (0 = automatic: one quarter of the hardware threads, clamped to [1, 4]).\n"
+                 "Remix ray-tracing pipelines take seconds to minutes each to build and the GPU driver parallelizes each compile internally; letting every worker thread build one at once saturates the CPU and the driver's own compiler pool, which lags gameplay while the background prewarm runs. This cap only applies to Remix pipelines and only after initialization - boot-time blocking prewarm and the exit drain always run at full parallelism - and regular game pipelines are never held back by it.");
+    } shader;
+
+    struct RaytracedRenderTarget {
+      RTX_OPTION("rtx.raytracedRenderTarget", bool, enable, true, "Enables or disables raytracing for render-to-texture effects.  The render target to be raytraced must be specified in the texture selection menu.");
+    } raytracedRenderTarget;
+
+    struct ViewModel {
+      friend class ImGUI;
+      public: static void enableOnChange(DxvkDevice* device);
+      RTX_OPTION_ARGS("rtx.viewModel", bool, enable, false, "If true, try to resolve view models (e.g. first-person weapons). World geometry doesn't have shadows / reflections / etc from the view models.",
+                       args.onChangeCallback = &enableOnChange);
+      RTX_OPTION("rtx.viewModel", float, rangeMeters, 1.0f, "[meters] Max distance at which to find a portal for view model virtual instances. If rtx.viewModel.separateRays is true, this is also max length of view model rays.");
+      RTX_OPTION("rtx.viewModel", float, scale, 1.0f, "Scale for view models. Minimize to prevent clipping.");
+      RTX_OPTION("rtx.viewModel", bool, enableVirtualInstances, true, "If true, virtual instances are created to render the view models behind a portal.");
+      RTX_OPTION("rtx.viewModel", bool, perspectiveCorrection, true, "If true, apply correction to view models (e.g. different FOV is used for view models).");
+      RTX_OPTION("rtx.viewModel", float, maxZThreshold, 0.0f, "If a draw call's viewport has max depth less than or equal to this threshold, then assume that it's a view model.");
+    } viewModel;
+
+    struct PlayerModel {
+      friend class ImGUI;
+      RTX_OPTION("rtx.playerModel", bool, enableVirtualInstances, true, "");
+      RTX_OPTION("rtx.playerModel", bool, enableInPrimarySpace, false, "");
+      RTX_OPTION("rtx.playerModel", bool, enablePrimaryShadows, true, "");
+      RTX_OPTION("rtx.playerModel", float, backwardOffset, 0.f, "");
+      RTX_OPTION("rtx.playerModel", float, horizontalDetectionDistance, 34.f, "");
+      RTX_OPTION("rtx.playerModel", float, verticalDetectionDistance, 64.f, "");
+      RTX_OPTION("rtx.playerModel", float, eyeHeight, 64.f, "");
+      RTX_OPTION("rtx.playerModel", float, intersectionCapsuleRadius, 24.f, "");
+      RTX_OPTION("rtx.playerModel", float, intersectionCapsuleHeight, 68.f, "");
+    } playerModel;
+
+    struct Displacement {
+      friend class ImGUI;
+      RTX_OPTION("rtx.displacement", DisplacementMode, mode, DisplacementMode::QuadtreePOM, "What algorithm the displacement uses.\n"
+        "RaymarchPOM: advances the ray in linear steps until the ray is below the heightfield.\n"
+        "QuadtreePOM: Relies on special mipmaps with maximum values instead of average values.  Uses the mipmap as a quadtree.");
+      RTX_OPTION("rtx.displacement", bool, enableDirectLighting, true, "Whether direct lighting accounts for displacement mapping");
+      RTX_OPTION("rtx.displacement", bool, enableIndirectLighting, true, "Whether indirect lighting accounts for displacement mapping");
+      RTX_OPTION("rtx.displacement", bool, enableNEECache, true, "Whether the NEE cache accounts for displacement mapping");
+      RTX_OPTION("rtx.displacement", bool, enableReSTIRGI, true, "Whether ReSTIR GI accounts for displacement mapping");
+      RTX_OPTION("rtx.displacement", bool, enableIndirectHit, false, "Whether indirect ray hits account for displacement mapping (Enabling this is expensive.  Without it, non-perfect reflections of displaced objects will not show displacement.)");
+      RTX_OPTION("rtx.displacement", bool, enablePSR, false, "Enable PSR (perfect reflections) for materials with displacement.  Rays that have been perfectly reflected off a POM surface will not collide correctly with other parts of that same surface.");
+      RTX_OPTION("rtx.displacement", float, displacementFactor, 1.0f, "Scaling factor for all displacement maps");
+      RTX_OPTION("rtx.displacement", float, displacementInFactor, 1.0f, "Scale factor for inwards displacement");
+      RTX_OPTION("rtx.displacement", float, displacementOutFactor, 1.0f, "Scale factor for outwards displacement");
+      RTX_OPTION("rtx.displacement", uint, maxIterations, 64, "The max number of times the POM raymarch will iterate.");
+    } displacement;
+
+    RTX_OPTION("rtx", bool, resolvePreCombinedMatrices, true, "");
+
+    RTX_OPTION("rtx", uint32_t, minPrimsInDynamicBLAS, 1000, "The minimum number of triangles required to promote a mesh to it's own BLAS, otherwise it lands in the merged BLAS with multiple other meshes.");
+    RTX_OPTION("rtx", uint32_t, maxPrimsInMergedBLAS, 50000, "The maximum number of triangles for a mesh that can be in the merged BLAS.  ");
+    RTX_OPTION_FLAG("rtx", bool, forceMergeAllMeshes, false, RtxOptionFlags::NoSave, "Force merges all meshes into as few BLAS as possible.  This is generally not desirable for performance, but can be a useful debugging tool.");
+    RTX_OPTION_FLAG("rtx", bool, minimizeBlasMerging, false, RtxOptionFlags::NoSave, "Minimize BLAS merging to the minimum possible, this option tries to give all meshes their own BLAS.  This is generally not desirable forperformance, but can be a useful debugging tool.");
+
+    RTX_OPTION_ENV("rtx", bool, enableAlwaysCalculateAABB, false, "RTX_ALWAYS_CALCULATE_AABB", "Calculate an Axis Aligned Bounding Box for every draw call.\n This may improve instance tracking across frames for skinned and vertex shaded calls.");
+
+    // Camera
+    struct FreeCam{
+      RTX_OPTION("rtx.freeCam", VirtualKeys, keyMoveFaster,  {VirtualKey{VK_LSHIFT}}, "Move faster in free camera mode.\nExample override: 'rtx.rtx.freeCam.keyMoveForward = RSHIFT'");
+      RTX_OPTION("rtx.freeCam", VirtualKeys, keyMoveForward, {VirtualKey{'W'}}, "Move forward in free camera mode.\nExample override: 'rtx.rtx.freeCam.keyMoveForward = P'");
+      RTX_OPTION("rtx.freeCam", VirtualKeys, keyMoveLeft,    {VirtualKey{'A'}}, "Move left in free camera mode.\nExample override: 'rtx.rtx.freeCam.keyMoveLeft = P'");
+      RTX_OPTION("rtx.freeCam", VirtualKeys, keyMoveBack,    {VirtualKey{'S'}}, "Move back in free camera mode.\nExample override: 'rtx.rtx.freeCam.keyMoveBack = P'");
+      RTX_OPTION("rtx.freeCam", VirtualKeys, keyMoveRight,   {VirtualKey{'D'}}, "Move right in free camera mode.\nExample override: 'rtx.rtx.freeCam.keyMoveRight = P'");
+      RTX_OPTION("rtx.freeCam", VirtualKeys, keyMoveUp,      {VirtualKey{'E'}}, "Move up in free camera mode.\nExample override: 'rtx.rtx.freeCam.keyMoveUp = P'");
+      RTX_OPTION("rtx.freeCam", VirtualKeys, keyMoveDown,    {VirtualKey{'Q'}}, "Move down in free camera mode.\nExample override: 'rtx.rtx.freeCam.keyMoveDown = P'");
+      RTX_OPTION("rtx.freeCam", VirtualKeys, keyPitchDown,   {VirtualKey{'I'}}, "Pitch down in free camera mode.\nExample override: 'rtx.rtx.freeCam.keyPitchDown = P'");
+      RTX_OPTION("rtx.freeCam", VirtualKeys, keyPitchUp,     {VirtualKey{'K'}}, "Pitch up in free camera mode.\nExample override: 'rtx.rtx.freeCam.keyPitchUp = P'");
+      RTX_OPTION("rtx.freeCam", VirtualKeys, keyYawLeft,     {VirtualKey{'J'}}, "Yaw left in free camera mode.\nExample override: 'rtx.rtx.freeCam.keyYawLeft = P'");
+      RTX_OPTION("rtx.freeCam", VirtualKeys, keyYawRight,    {VirtualKey{'L'}}, "Yaw right in free camera mode.\nExample override: 'rtx.rtx.freeCam.keyYawRight = P'");
+    } freeCam;
+    RTX_OPTION_ENV("rtx", bool, shakeCamera, false, "RTX_FREE_CAMERA_ENABLE_ANIMATION", "Enables animation of the free camera.");
+    RTX_OPTION_ENV("rtx", CameraAnimationMode, cameraAnimationMode, CameraAnimationMode::CameraShake_Pitch, "RTX_FREE_CAMERA_ANIMATION_MODE", "Free camera's animation mode.");
+    RTX_OPTION_ENV("rtx", int, cameraShakePeriod, 20, "RTX_FREE_CAMERA_ANIMATION_PERIOD", "Period of the free camera's animation.");
+    RTX_OPTION_ENV("rtx", float, cameraAnimationAmplitude, 2.0f, "RTX_FREE_CAMERA_ANIMATION_AMPLITUDE", "Amplitude of the free camera's animation.");
+    RTX_OPTION("rtx", bool, skipObjectsWithUnknownCamera, false, "");
+    RTX_OPTION("rtx", bool, enableNearPlaneOverride, false,
+               "A flag to enable or disable the Camera's near plane override feature.\n"
+               "Since the camera is not used directly for ray tracing the near plane the application uses typically does not matter, but for certain matrix-based operations (such as temporal reprojection or voxel grid projection) it is still relevant.\n"
+               "The issue arises when geometry is ray traced that is behind where the chosen Camera's near plane is located, typically common on viewmodels especially with how they are ray traced, causing graphical artifacts and other issues.\n"
+               "This option helps correct this issue by overriding the near plane value to else (usually smaller) to sit behind the objects in question (such as the view model). As such this option should usually be enabled on games with viewmodels.\n"
+               "Do note that when adjusting the near plane the larger the relative magnitude gap between the near and far plane the worse the precision of matrix operations will be, so the near plane should be set as high as possible even when overriding.");
+    RTX_OPTION("rtx", float, nearPlaneOverride, 0.1f,
+               "The near plane value to use for the Camera when the near plane override is enabled.\n"
+               "Only takes effect when rtx.enableNearPlaneOverride is enabled, see that option for more information about why this is useful.");
+
+    RTX_OPTION("rtx", bool, useRayPortalVirtualInstanceMatching, true, "");
+    RTX_OPTION("rtx", bool, enablePortalFadeInEffect, false, "");
+
+    RTX_OPTION_ENV("rtx", bool, useRTXDI, true, "DXVK_USE_RTXDI",
+                   "A flag indicating if RTXDI should be used, true enables RTXDI, false disables it and falls back on simpler light sampling methods.\n"
+                   "RTXDI provides improved direct light sampling quality over traditional methods and should generally be enabled for improved direct lighting quality at the cost of some performance.");
+    // DX11_V244_NRC_OPT_IN: default to ReSTIR GI, NOT NRC. NRC crashes on first use on
+    // the DX11 path (REMIX-4105 class), so it must be an explicit opt-in rather than the
+    // baseline default used when no graphics preset forces a mode. Set to 2 (or env
+    // DXVK_REMIX_ENABLE_NRC=1) to opt back into NRC.
+    RTX_OPTION_ARGS("rtx", IntegrateIndirectMode, integrateIndirectMode, IntegrateIndirectMode::ReSTIRGI,
+                   "Indirect integration mode:\n"
+                   "0: Importance Sampled. Importance sampled mode uses typical GI sampling and it is not recommended for general use as it provides the noisiest output.\n"
+                   "   It serves as a reference integration mode for validation of other indirect integration modes.\n"
+                   "1: ReSTIR GI. ReSTIR GI provides improved indirect path sampling over \"Importance Sampled\" mode \n"
+                   "   with better indirect diffuse and specular GI quality at increased performance cost.\n"
+                   "2: RTX Neural Radiance Cache (NRC). NRC is an AI based world space radiance cache. It is live trained by the path tracer\n"
+                   "   and allows paths to terminate early by looking up the cached value and saving performance.\n"
+                   "   NRC supports infinite bounces and often provides results closer to that of reference than ReSTIR GI\n"
+                   "   while improving performance in scenarios where ray paths have 2 or more bounces on average.\n",
+                   args.environment = "RTX_INTEGRATE_INDIRECT_MODE",
+                   args.flags = RtxOptionFlags::UserSetting);
+    // DX11: default to TAAU, not DLSS. TAA-Upscaling is vendor-agnostic (works on NVIDIA,
+    // AMD and Intel), so resolutionScale upscaling is always active and every GPU gets the
+    // perf win. DLSS is still selectable in the UI on supported NVIDIA RTX hardware.
+    RTX_OPTION_ARGS("rtx", UpscalerType, upscalerType, UpscalerType::TAAU, "Upscaling boosts performance with varying degrees of image quality tradeoff depending on the type of upscaler and the quality mode/preset.",
+                    args.environment = "DXVK_UPSCALER_TYPE",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", bool, enableRayReconstruction, true, "Enables DLSS ray reconstruction, an AI-based denoiser designed for real time ray tracing.",
+                    args.environment = "DXVK_RAY_RECONSTRUCTION",
+                    args.flags = RtxOptionFlags::UserSetting);
+
+    RTX_OPTION_ARGS("rtx", float, resolutionScale, 0.75f, "",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx", bool, forceCameraJitter, false, "Force enables camera jitter frame to frame.");
+    RTX_OPTION("rtx", uint32_t, cameraJitterSequenceLength, 64, "Sets a camera jitter sequence length [number of frames]. It will loop around once the length is reached.");
+    RTX_OPTION("rtx", bool, enableDirectLighting, true, "Enables direct lighting (lighting directly from lights on to a surface) on surfaces when set to true, otherwise disables it.");
+    RTX_OPTION("rtx", bool, enableSecondaryBounces, true, "Enables indirect lighting (lighting from diffuse/specular bounces to one or more other surfaces) on surfaces when set to true, otherwise disables it.");
+      
+    // Needs to be > 0
+    RTX_OPTION_ARGS("rtx", float, uniqueObjectDistance, 300.f, "The distance (in game units) that an object can move in a single frame before it is no longer considered the same object.\n"
+                    "If this is too low, fast moving objects may flicker and have bad lighting.  If it's too high, repeated objects may flicker.\n"
+                    "This does not account for sceneScale.", args.minValue = 0.f);
+    
+    RTX_OPTION("rtx", bool, useNewGuiInputMethod, true, "Disables the previous method for getting mouse/keyboard input and enables a new method which should be more reliable.  If successful the old method will be deprecated.  This setting can't be changed at runtime, so it must be set in a .conf file.");
+
+    RTX_OPTION_ARGS("rtx", UIType, showUI, UIType::None, "0 = Don't Show, 1 = Show Simple, 2 = Show Advanced.",
+                    args.environment = "RTX_GUI_DISPLAY_UI",
+                    args.flags = RtxOptionFlags::NoSave | RtxOptionFlags::NoReset);
+    RTX_OPTION_ARGS("rtx", bool, defaultToAdvancedUI, false, "Whether to default to the Advanced UI when opening the developer menu.", 
+                    args.flags = RtxOptionFlags::UserSetting | RtxOptionFlags::NoReset);
+
+    public: static void showUICursorOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", bool, showUICursor, true, "If true, the ImGUI mouse cursor will be shown when the UI is active.\n"
+                    "Can be toggled with Alt + Delete.", args.onChangeCallback = &showUICursorOnChange);
+    
+    public: static void blockInputToGameInUIOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", bool, blockInputToGameInUI, true,
+                    "If true, input will not be passed to the game when the UI is active.\n"
+                    "Can be toggled with Alt + Backspace", args.onChangeCallback = &blockInputToGameInUIOnChange, args.flags = RtxOptionFlags::NoSave);
+
+    RTX_OPTION_ARGS("rtx", bool, restoreCursorPosition, false,
+                    "If true, the game's mouse cursor position will be restored when the Remix UI is closed.\n"
+                    "This should fix the issue where the game camera suddenly turns when closing the UI.\n",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", bool, autoUnblockOptionEdits, false,
+                    "If true, editing an RtxOption in the Remix UI that is overridden by a stronger config layer clears the stronger value immediately instead of showing a confirmation dialog.",
+                    args.environment = "RTX_IMGUI_AUTO_UNBLOCK_OPTION_EDITS",
+                    args.flags = RtxOptionFlags::UserSetting);
+
+    inline static const VirtualKeys kDefaultRemixMenuKeyBinds{ VirtualKey{VK_MENU},VirtualKey{'X'} };
+    RTX_OPTION("rtx", VirtualKeys, remixMenuKeyBinds, kDefaultRemixMenuKeyBinds,
+               "Hotkey to open the Remix menu.\n"
+               "example override: 'rtx.remixMenuKeyBinds = CTRL, SHIFT, Z'.\n"
+               "Full list of key names available in `src/util/util_keybind.h`.");
+
+    RTX_OPTION_ARGS("rtx", DLSSProfile, qualityDLSS, DLSSProfile::Auto, "Adjusts internal DLSS scaling factor, trades quality for performance.",
+                    args.environment = "RTX_QUALITY_DLSS",
+                    args.flags = RtxOptionFlags::UserSetting);
+    // Note: All ray tracing modes depend on the rtx.raytraceModePreset option as they may be overridden by automatic defaults for a specific vendor if the preset is set to Auto. Set
+    // to Custom to ensure these settings are not overridden.
+    //RenderPassVolumeIntegrateRaytraceMode renderPassVolumeIntegrateRaytraceMode = RenderPassVolumeIntegrateRaytraceMode::RayQuery;
+    RTX_OPTION_ARGS("rtx", RenderPassGBufferRaytraceMode, renderPassGBufferRaytraceMode, RenderPassGBufferRaytraceMode::RayQuery,
+                   "The ray tracing mode to use for the G-Buffer pass which resolves the initial primary and secondary surfaces to apply lighting to.",
+                   args.environment = "DXVK_RENDER_PASS_GBUFFER_RAYTRACE_MODE",
+                   args.maxValue = RenderPassGBufferRaytraceMode(uint32_t(RenderPassGBufferRaytraceMode::Count) - 1),
+                   args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", RenderPassIntegrateDirectRaytraceMode, renderPassIntegrateDirectRaytraceMode, RenderPassIntegrateDirectRaytraceMode::RayQuery,
+                   "The ray tracing mode to use for the Direct Lighting pass which applies lighting to the primary/secondary surfaces.",
+                   args.environment = "DXVK_RENDER_PASS_INTEGRATE_DIRECT_RAYTRACE_MODE",
+                   args.maxValue = RenderPassIntegrateDirectRaytraceMode(uint32_t(RenderPassIntegrateDirectRaytraceMode::Count) - 1),
+                   args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", RenderPassIntegrateIndirectRaytraceMode, renderPassIntegrateIndirectRaytraceMode, RenderPassIntegrateIndirectRaytraceMode::TraceRay,
+                   "The ray tracing mode to use for the Indirect Lighting pass which applies lighting to the primary/secondary surfaces.",
+                   args.environment = "DXVK_RENDER_PASS_INTEGRATE_INDIRECT_RAYTRACE_MODE",
+                   args.maxValue = RenderPassIntegrateIndirectRaytraceMode(uint32_t(RenderPassIntegrateIndirectRaytraceMode::Count) - 1),
+                   args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx", bool, captureDebugImage, false, "");
+
+    // Denoiser Options
+    RTX_OPTION_ENV("rtx", bool, useDenoiser, true, "DXVK_USE_DENOISER",
+                   "Enables usage of denoiser(s) when set to true, otherwise disables denoising when set to false.\n"
+                   "Denoising is important for filtering the raw noisy ray traced signal into a smoother and more stable result at the cost of some potential spatial/temporal artifacts (ghosting, boiling, blurring, etc).\n"
+                   "Generally should remain enabled except when debugging behavior which requires investigating the output directly, or diagnosing denoising-related issues.");
+    RTX_OPTION_ENV("rtx", bool, useDenoiserReferenceMode, false, "DXVK_USE_DENOISER_REFERENCE_MODE",
+                   "Enables reference \"denoiser\" (~ accumulation mode) when set to true, otherwise uses a standard denoiser.\n"
+                   "The reference denoiser accumulates frames over time to generate a reference multi-sample per pixel contribution\n"
+                   "which should converge slowly to the ideal result the renderer is working towards.\n"
+                   "It is useful for analyzing quality differences in various denoising methods, post-processing filters,\n"
+                   "or for more accurately comparing subtle effects of potentially biased rendering techniques\n"
+                   "which may be hard to see through noise and filtering.\n"
+                   "It is also useful for higher quality artistic renders of a scene beyond what is possible in real-time.");
+
+    struct Accumulation {
+      RTX_OPTION_ARGS("rtx.accumulation", uint32_t, numberOfFramesToAccumulate, 1024,
+                 "Number of frames to accumulate render output.\n"
+                 "This can be used for generating reference images smoothed over time.\n"
+                 "By default the accumulation stops once the limit is reached.\n"
+                 "When desired, continous accumulation can be enabled via enableContinuousAccumulation.",
+                 args.environment = "RTX_ACCUMULATION_NUMBER_OF_FRAMES_TO_ACCUMULATE",
+                 args.minValue = 1);
+      RTX_OPTION_ENV("rtx.accumulation", AccumulationBlendMode, blendMode, AccumulationBlendMode::Average, "RTX_ACCUMULATION_BLEND_MODE",
+                     "The blend mode to use for accumulating debug view output.\n"
+                     "Supported modes are: 0 = Average, 1 = Min, 2 = Max.\n"
+                     "Average is the default mode and is the most common mode to use for accumulation.\n"
+                     "Min and Max are useful for visualizing the minimum or maximum value of a debug view output over time.");
+      RTX_OPTION_ENV("rtx.accumulation", bool, resetOnCameraTransformChange, true, "RTX_ACCUMULATION_RESET_ON_CAMERA_TRANFORM_CHANGE",
+                      "Resets the accumulated debug view output when the camera transform changes.");
+    } accumulation;
+
+    RTX_OPTION_ARGS("rtx", bool, denoiseDirectAndIndirectLightingSeparately, true, "Denoising quality, high uses separate denoising of direct and indirect lighting for higher quality at the cost of performance.",
+                    args.environment = "DXVK_DENOISE_DIRECT_AND_INDIRECT_LIGHTING_SEPARATELY",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx", bool, replaceDirectSpecularHitTWithIndirectSpecularHitT, true, "");
+    RTX_OPTION("rtx", bool, adaptiveResolutionDenoising, true, "");
+    RTX_OPTION_ENV("rtx", bool, adaptiveAccumulation, true, "DXVK_USE_ADAPTIVE_ACCUMULATION", "");
+    RTX_OPTION("rtx", uint32_t, numFramesToKeepInstances, 1, "");
+    RTX_OPTION("rtx", uint32_t, numFramesToKeepBLAS, 1, "");
+    RTX_OPTION("rtx", uint32_t, numFramesToKeepLights, 100, ""); // NOTE: This was the default we've had for a while, can probably be reduced...
+    RTX_OPTION("rtx", uint32_t, sceneKeepAliveFrames, 0, 
+               "Number of consecutive frames without valid camera or raytracing before clearing the scene."
+               " Set to 0 to clear immediately (legacy behavior). Higher values prevent scene clearing during"
+               " brief shader loading delays, camera cuts, etc.");
+
+    static uint32_t numFramesToKeepGeometryData() {
+      return numFramesToKeepBLAS();
+    }
+
+    static uint32_t numFramesToKeepMaterialTextures() {
+      return numFramesToKeepBLAS();
+    }
+
+    static bool enablePreviousTLAS() {
+      return !isRayReconstructionEnabled() || useReSTIRGI();
+    }
+
+    struct AntiCulling {
+      struct Object {
+        friend class ImGUI;
+        friend class RtxOptions;
+        // Anti-Culling Options
+        RTX_OPTION_ENV("rtx.antiCulling.object", bool, enable, false, "RTX_ANTI_CULLING_OBJECTS", "Extends lifetime of objects that go outside the camera frustum (anti-culling frustum).");
+        RTX_OPTION("rtx.antiCulling.object", bool, enableHighPrecisionAntiCulling, true, "Use robust intersection check with Separate Axis Theorem.\n"
+                   "This method is slightly expensive but it effectively addresses object flickering issues that arise from corner cases in the fast intersection check method.\n"
+                   "Typically, it's advisable to enable this option unless it results in a notable performance drop; otherwise, the presence of flickering artifacts could significantly diminish the overall image quality.");
+        RTX_OPTION("rtx.antiCulling.object", bool, enableInfinityFarFrustum, false, "Enable infinity far plane frustum for anti-culling.");
+        RTX_OPTION("rtx.antiCulling.object", bool, hashInstanceWithBoundingBoxHash, true, "Hash instances with bounding box hash for object duplication check.\n Disable this when the game using primitive culling which may cause flickering.");
+        // TODO: This should be a threshold of memory size
+        RTX_OPTION("rtx.antiCulling.object", uint32_t, numObjectsToKeep, 10000, "The maximum number of RayTracing instances to keep when Anti-Culling is enabled.");
+        RTX_OPTION("rtx.antiCulling.object", float, fovScale, 1.0f, "Scale applied to the FOV of Anti-Culling Frustum for matching the culling frustum in the original game.");
+        RTX_OPTION("rtx.antiCulling.object", float, farPlaneScale, 10.0f, "Scale applied to the far plane for Anti-Culling Frustum for matching the culling frustum in the original game.");
+      };
+      struct Light {
+        friend class ImGUI;
+        friend class RtxOptions;
+        RTX_OPTION_ENV("rtx.antiCulling.light", bool, enable, false, "RTX_ANTI_CULLING_LIGHTS", "Enable Anti-Culling for lights.");
+        RTX_OPTION("rtx.antiCulling.light", uint32_t, numLightsToKeep, 1000, "(DEPRECATED)");
+        RTX_OPTION("rtx.antiCulling.light", uint32_t, numFramesToExtendLightLifetime, 1000, "Maximum number of frames to keep  when Anti-Culling is enabled. Make sure not to set this too low (then the anti-culling won't work), nor too high (which will hurt the performance).");
+        RTX_OPTION("rtx.antiCulling.light", float, fovScale, 1.0f, "Scalar of the FOV of lights Anti-Culling Frustum.");
+      };
+
+      inline static bool isObjectAntiCullingEnabled() {
+        return RtxOptions::AntiCulling::Object::enable() && !RtCamera::enableFreeCamera();
+      }
+
+      inline static bool isLightAntiCullingEnabled() {
+        return RtxOptions::AntiCulling::Light::enable() && !RtCamera::enableFreeCamera();
+      }
+    };
+
+    // Resolve Options
+    // Todo: Potentially document that after a number of resolver interactions is exhausted the next interaction will be treated as a hit regardless.
+    RTX_OPTION_ARGS("rtx", uint8_t, primaryRayMaxInteractions, 32,
+               "The maximum number of resolver interactions to use for primary (initial G-Buffer) rays.\n"
+               "This affects how many Decals, Ray Portals and potentially particles (if unordered approximations are not enabled) may be interacted with along a ray at the cost of performance for higher amounts of interactions.",
+               args.minValue = static_cast<uint8_t>(1), args.maxValue = std::numeric_limits<uint8_t>::max());
+    RTX_OPTION_ARGS("rtx", uint8_t, psrRayMaxInteractions, 32,
+               "The maximum number of resolver interactions to use for PSR (primary surface replacement G-Buffer) rays.\n"
+               "This affects how many Decals, Ray Portals and potentially particles (if unordered approximations are not enabled) may be interacted with along a ray at the cost of performance for higher amounts of interactions.",
+               args.minValue = static_cast<uint8_t>(1), args.maxValue = std::numeric_limits<uint8_t>::max());
+    RTX_OPTION_ARGS("rtx", uint8_t, secondaryRayMaxInteractions, 8,
+               "The maximum number of resolver interactions to use for secondary (indirect) rays.\n"
+               "This affects how many Decals, Ray Portals and potentially particles (if unordered approximations are not enabled) may be interacted with along a ray at the cost of performance for higher amounts of interactions.\n"
+               "This value is recommended to be set lower than the primary/PSR max ray interactions as secondary ray interactions are less visually relevant relative to the performance cost of resolving them.",
+               args.minValue = static_cast<uint8_t>(1), args.maxValue = std::numeric_limits<uint8_t>::max());
+    RTX_OPTION("rtx", bool, enableSeparateUnorderedApproximations, true,
+               "Use a separate loop during resolving for surfaces which can have lighting evaluated in an approximate unordered way on each path segment (such as particles).\n"
+               "This improves performance typically in how particles or decals are rendered and should usually always be enabled.\n"
+               "Do note however the unordered nature of this resolving method may result in visual artifacts with large numbers of stacked particles due to difficulty in determining the intended order.\n"
+               "Additionally, unordered approximations will only be done on the first indirect ray bounce (as particles matter less in higher bounces), and only if enabled by its corresponding setting.");
+    RTX_OPTION("rtx", bool, trackParticleObjects, true, "Track last frame's corresponding particle object.");
+    RTX_OPTION_ENV("rtx", bool, enableDirectTranslucentShadows, false, "RTX_ENABLE_DIRECT_TRANSLUCENT_SHADOWS", "Calculate coloured shadows for translucent materials (i.e. glass, water) in direct lighting. In engineering terms: include OBJECT_MASK_TRANSLUCENT into primary visibility rays.");
+    RTX_OPTION_ENV("rtx", bool, enableDirectAlphaBlendShadows, true, "RTX_ENABLE_DIRECT_ALPHABLEND_SHADOWS", "Calculate shadows for semi-transparent materials (alpha blended) in direct lighting. In engineering terms: include OBJECT_MASK_ALPHA_BLEND into primary visibility rays.");
+    RTX_OPTION_ENV("rtx", bool, enableIndirectTranslucentShadows, false, "RTX_ENABLE_INDIRECT_TRANSLUCENT_SHADOWS", "Calculate coloured shadows for translucent materials (i.e. glass, water) in indirect lighting (i.e. reflections and GI). In engineering terms: include OBJECT_MASK_TRANSLUCENT into secondary visibility rays.");
+    RTX_OPTION_ENV("rtx", bool, enableIndirectAlphaBlendShadows, true, "RTX_ENABLE_INDIRECT_ALPHABLEND_SHADOWS", "Calculate shadows for semi-transparent (alpha blended) objects in indirect lighting (i.e. reflections and GI). In engineering terms: include OBJECT_MASK_ALPHA_BLEND into secondary visibility rays.");
+
+    public: static void resolveTransparencyThresholdOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", float, resolveTransparencyThreshold, 1.0f / 255.0f, "A threshold for which any opacity value below is considered totally transparent and may be safely skipped without as significant of a performance cost.",
+               args.minValue = 0.0f, args.maxValue = 1.0f, args.onChangeCallback = &resolveTransparencyThresholdOnChange);
+    RTX_OPTION_ARGS("rtx", float, resolveOpaquenessThreshold, 254.0f / 255.0f, "A threshold for which any opacity value above is considered totally opaque.",
+               args.minValue = 0.0f, args.maxValue = 1.0f);
+
+    // PSR Options
+    RTX_OPTION("rtx", bool, enablePSRR, true,
+               "A flag to enable or disable reflection PSR (Primary Surface Replacement).\n"
+               "When enabled this feature allows higher quality mirror-like reflections in special cases by replacing the G-Buffer's surface with the reflected surface.\n"
+               "Should usually be enabled for the sake of quality as almost all applications will utilize it in the form of glass or mirrors.");
+    RTX_OPTION("rtx", bool, enablePSTR, true,
+               "A flag to enable or disable transmission PSR (Primary Surface Replacement).\n"
+               "When enabled this feature allows higher quality glass-like refraction in special cases by replacing the G-Buffer's surface with the refracted surface.\n"
+               "Should usually be enabled for the sake of quality as almost all applications will utilize it in the form of glass.");
+    RTX_OPTION_ARGS("rtx", uint8_t, psrrMaxBounces, 10,
+               "The maximum number of Reflection PSR bounces to traverse. Must be 15 or less due to payload encoding.\n"
+               "Should be set higher when many mirror-like reflection bounces may be needed, though more bounces may come at a higher performance cost.",
+               args.minValue = static_cast<uint8_t>(1), args.maxValue = static_cast<uint8_t>(254));
+    RTX_OPTION_ARGS("rtx", uint8_t, pstrMaxBounces, 10,
+               "The maximum number of Transmission PSR bounces to traverse. Must be 15 or less due to payload encoding.\n"
+               "Should be set higher when refraction through many layers of glass may be needed, though more bounces may come at a higher performance cost.",
+               args.minValue = static_cast<uint8_t>(1), args.maxValue = static_cast<uint8_t>(254));
+    RTX_OPTION("rtx", bool, enablePSTROutgoingSplitApproximation, true,
+               "Enable transmission PSR on outgoing transmission events such as leaving translucent materials (rather than respecting no-split path PSR rule).\n"
+               "Typically this results in better looking glass when enabled (at the cost of accuracy due to ignoring non-TIR inter-reflections within the glass itself).");
+    RTX_OPTION("rtx", bool, enablePSTRSecondaryIncidentSplitApproximation, true,
+               "Enable transmission PSR on secondary incident transmission events such as entering a translucent material on an already-transmitted path (rather than respecting no-split path PSR rule).\n"
+               "Typically this results in better looking glass when enabled (at the cost accuracy due to ignoring reflections off of glass seen through glass for example).");
+    
+    // Note: In a more technical sense, any PSR reflection or transmission from a surface with "normal detail" greater than the specified value will generate a 1.0 in the
+    // disocclusionThresholdMix mask, indicating that the alternate disocclusion threshold in the denoiser should be used.
+    // A value of 0 is a valid setting as it means that any detail at all, no matter how small, will set that mask bit (e.g. any usage of a normal map deviating from from the
+    // underlying normal).
+    RTX_OPTION("rtx", float, psrrNormalDetailThreshold, 0.0f,
+               "A threshold value to indicate that the denoiser's alternate disocclusion threshold should be used when normal map \"detail\" on a reflection PSR surface exceeds a desired amount.\n"
+               "Normal detail is defined as 1-dot(tangent_normal, vec3(0, 0, 1)), or in other words it is 0 when no normal mapping is used, and 1 when the normal mapped normal is perpendicular to the underlying normal.\n"
+               "This is typically used to reduce flickering artifacts resulting from reflection on surfaces like glass leveraging normal maps as often the denoiser is too aggressive with disocclusion checks frame to frame when DLSS or other camera jittering is in use.");
+    RTX_OPTION("rtx", float, pstrNormalDetailThreshold, 0.0f,
+               "A threshold value to indicate that the denoiser's alternate disocclusion threshold should be used when normal map \"detail\" on a transmission PSR surface exceeds a desired amount.\n"
+               "Normal detail is defined as 1-dot(tangent_normal, vec3(0, 0, 1)), or in other words it is 0 when no normal mapping is used, and 1 when the normal mapped normal is perpendicular to the underlying normal.\n"
+               "This is typically used to reduce flickering artifacts resulting from refraction on surfaces like glass leveraging normal maps as often the denoiser is too aggressive with disocclusion checks frame to frame when DLSS or other camera jittering is in use.");
+
+    // Shader Execution Reordering Options
+    RTX_OPTION_ENV("rtx", bool, isShaderExecutionReorderingSupported, true, "DXVK_IS_SHADER_EXECUTION_REORDERING_SUPPORTED", "Enables Shader Execution Reordering (SER) if it is supported by the target HW and SW."); 
+    // True if `isShaderExecutionReorderingSupported` is true and the computer actually supports it.
+    public: static inline bool enableShaderExecutionReordering = true;
+    RTX_OPTION("rtx", bool, enableShaderExecutionReorderingInPathtracerGbuffer, false, "(Note: Hard disabled in shader code) Enables Shader Execution Reordering (SER) in GBuffer Raytrace pass if SER is supported.");
+    RTX_OPTION("rtx", bool, enableShaderExecutionReorderingInPathtracerIntegrateIndirect, true, "Enables Shader Execution Reordering (SER) in Integrate Indirect pass if SER is supported.");
+
+    // Path Options
+    RTX_OPTION("rtx", bool, enableRussianRoulette, true,
+               "A flag to enable or disable Russian Roulette, a rendering technique to give paths a chance of terminating randomly with each bounce based on their importance.\n"
+               "This is usually useful to have enabled as it will ensure useless paths are terminated earlier while more important paths are allowed to accumulate more bounces.\n"
+               "Furthermore this allows for the renderer to remain unbiased whereas a hard clamp on the number of bounces will introduce bias (though this is also done in Remix for the sake of performance).\n"
+               "On the other hand, randomly terminating paths too aggressively may leave threads in GPU warps without work which may hurt thread occupancy when not used with a thread-reordering technique like SER.\n"
+               "Additionally, Russian Roulette will always for the most part increase variance and will reduce the average path depth from whatever the current maximum path length is set to.\n"
+               "This increase in variance will slightly impact image quality especially on scenes relying heavily on many bounces of indirect lighting, but this is usually worth it for efficiency purposes, as Russian Roulette allows each ray to reduces variance more than it would otherwise.");
+    RTX_OPTION_ARGS("rtx", RussianRouletteMode, russianRouletteMode, RussianRouletteMode::ThroughputBased, "Russian Roulette Mode. Throughput Based: paths with higher throughput become longer; Specular Based: specular paths become longer.\n",
+                    args.environment = "DXVK_PATH_TRACING_RR_MODE",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx", float, russianRouletteDiffuseContinueProbability, 0.1f, "The probability of continuing a diffuse path when Russian Roulette is being used. Only apply to specular based mode.\n");
+    RTX_OPTION("rtx", float, russianRouletteSpecularContinueProbability, 0.98f, "The probability of continuing a specular path when Russian Roulette is being used. Only apply to specular based mode.\n");
+    RTX_OPTION("rtx", float, russianRouletteDistanceFactor, 0.1f, "Path segments whose distance proportion are under this threshold are more likely to continue. Only apply to specular based mode.\n");
+    RTX_OPTION_ARGS("rtx", float, russianRouletteMaxContinueProbability, 0.9f,
+               "The maximum probability of continuing a path when Russian Roulette is being used.\n"
+               "This ensures all rays have a small probability of terminating each bounce, mostly to prevent infinite paths in perfectly reflective mirror rooms (though the maximum path bounce count will also ensure this).",
+               args.minValue = 0.0f, args.maxValue = 1.0f,
+               args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", float, russianRoulette1stBounceMinContinueProbability, 0.6f,
+               "The minimum probability of continuing a path when Russian Roulette is being used on the first bounce.\n"
+               "This ensures that on the first bounce rays are not terminated too aggressively as it may be useful for some denoisers to have a contribution even if it is a relatively unimportant one rather than a missing indirect sample.",
+               args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx", float, russianRoulette1stBounceMaxContinueProbability, 1.0f,
+               "The maximum probability of continuing a path when Russian Roulette is being used on the first bounce.\n"
+               "This is similar to the usual max continuation probability for Russian Roulette, but specifically only for the first bounce.");
+    public: static void pathMinBouncesOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", uint8_t, pathMinBounces, 1,
+                   "The minimum number of indirect bounces the path must complete before Russian Roulette can be used. Must be < 16.\n"
+                   "This value is recommended to stay fairly low (1 for example) as forcing longer paths when they carry little contribution quickly becomes detrimental to performance.",
+                   args.environment = "DXVK_PATH_TRACING_MIN_BOUNCES",
+                   args.minValue = static_cast<uint8_t>(0), args.maxValue = static_cast<uint8_t>(15),
+                   args.onChangeCallback = &pathMinBouncesOnChange,
+                   args.flags = RtxOptionFlags::UserSetting);
+    public: static void pathMaxBouncesOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", uint8_t, pathMaxBounces, 4,
+                   "The maximum number of indirect bounces the path will be allowed to complete. Must be < 16.\n"
+                   "Higher values result in better indirect lighting quality due to biasing the signal less, lower values result in better performance.\n"
+                   "Very high values are not recommended however as while long paths may be technically needed for unbiased rendering, in practice the contributions from higher bounces have diminishing returns.",
+                   args.environment = "DXVK_PATH_TRACING_MAX_BOUNCES",
+                   args.minValue = static_cast<uint8_t>(0), args.maxValue = static_cast<uint8_t>(15),
+                   args.onChangeCallback = &pathMaxBouncesOnChange,
+                   args.flags = RtxOptionFlags::UserSetting);
+    // Note: Use caution when adjusting any zero thresholds as values too high may cause entire lobes of contribution to be missing in material edge cases. For example
+    // with translucency, a zero threshold on the specular lobe of 0.05 removes the entire contribution when viewing straight on for any glass with an IoR below 1.58 or so
+    // which can be paticularly noticable in some scenes. To bias sampling more in the favor of one lobe the min probability should be used instead, but be aware this will
+    // end up wasting more samples in some cases versus pure importance sampling (but may help denoising if it cannot deal with super sparse signals).
+    RTX_OPTION("rtx", float, opaqueDiffuseLobeSamplingProbabilityZeroThreshold, 0.01f, "The threshold for which to zero opaque diffuse probability weight values.");
+    RTX_OPTION_ARGS("rtx", float, minOpaqueDiffuseLobeSamplingProbability, 0.25f, "The minimum allowed non-zero value for opaque diffuse probability weights.",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx", float, opaqueSpecularLobeSamplingProbabilityZeroThreshold, 0.01f, "The threshold for which to zero opaque specular probability weight values.");
+    RTX_OPTION_ARGS("rtx", float, minOpaqueSpecularLobeSamplingProbability, 0.25f, "The minimum allowed non-zero value for opaque specular probability weights.",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx", float, opaqueOpacityTransmissionLobeSamplingProbabilityZeroThreshold, 0.01f, "The threshold for which to zero opaque opacity probability weight values.");
+    RTX_OPTION("rtx", float, minOpaqueOpacityTransmissionLobeSamplingProbability, 0.25f, "The minimum allowed non-zero value for opaque opacity probability weights.");
+    RTX_OPTION("rtx", float, opaqueDiffuseTransmissionLobeSamplingProbabilityZeroThreshold, 0.01f, "The threshold for which to zero thin opaque diffuse transmission probability weight values.");
+    RTX_OPTION("rtx", float, minOpaqueDiffuseTransmissionLobeSamplingProbability, 0.25f, "The minimum allowed non-zero value for thin opaque diffuse transmission probability weights.");
+    // Note: 0.01 chosen as mentioned before to avoid cutting off reflection lobe on most common types of glass when looking straight on (a base reflectivity
+    // of 0.01 corresponds to an IoR of 1.22 or so). Avoid changing this default without good reason to prevent glass from losing its reflection contribution.
+    RTX_OPTION("rtx", float, translucentSpecularLobeSamplingProbabilityZeroThreshold, 0.01f, "The threshold for which to zero translucent specular probability weight values.");
+    RTX_OPTION("rtx", float, minTranslucentSpecularLobeSamplingProbability, 0.3f, "The minimum allowed non-zero value for translucent specular probability weights.");
+    RTX_OPTION("rtx", float, translucentTransmissionLobeSamplingProbabilityZeroThreshold, 0.01f, "The threshold for which to zero translucent transmission probability weight values.");
+    RTX_OPTION("rtx", float, minTranslucentTransmissionLobeSamplingProbability, 0.25f, "The minimum allowed non-zero value for translucent transmission probability weights.");
+
+    RTX_OPTION("rtx", float, indirectRaySpreadAngleFactor, 0.05f,
+               "A tuning factor applied to the spread angle calculated from the sampled lobe solid angle PDF. Should be 0-1.\n"
+               "This scaled spread angle is used to widen a ray's cone angle after indirect lighting BRDF samples to essentially prefilter the effects of the BRDF lobe's spread which potentially may reduce noise from indirect rays (e.g. reflections).\n"
+               "Prefiltering will overblur detail however compared to the ground truth of casting multiple samples especially given this calculated spread angle is a basic approximation and ray cones to begin with are a simple approximation for ray pixel footprint.\n"
+               "As such rather than using the spread angle fully this spread angle factor allows it to be scaled down to something more narrow so that overblurring can be minimized. Similarly, setting this factor to 0 disables this cone angle widening feature.");
+    RTX_OPTION("rtx", bool, rngSeedWithFrameIndex, true,
+               "Indicates that pseudo-random number generator should be seeded with the frame number of the application every frame, otherwise seed with 0.\n"
+               "This should generally always be enabled as without the frame index each frame will typically be identical in the random values that are produced which will result in incorrect rendering. Only meant as a debugging tool.");
+    // declare onAdvanceTimeChanged
+    static void onAdvanceTimeChanged(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", bool, advanceTime, true,
+                    "A flag to enable or disable advancing time used by Remix subsystems (particle effects, animations, etc.).\n",
+                    args.environment = "RTX_ADVANCE_TIME",
+                    args.onChangeCallback = &RtxOptions::onAdvanceTimeChanged);
+    RTX_OPTION_ARGS("rtx", bool, enableFirstBounceLobeProbabilityDithering, true,
+               "A flag to enable or disable screen-space probability dithering on the first indirect lobe sampled.\n"
+               "Generally sampling a diffuse, specular or other lobe relies on a random number generated against the probability of sampling each lobe, effectively focusing more rays/paths on lobes which matter more.\n"
+               "This can cause issues however with denoisers which do not handle sparse stochastic signals (like those from path tracing) well as they may be expecting a more \"complete\" signal like those used in simpler branching ray tracing setups.\n"
+               "To help solve this issue this option uses a temporal screenspace dithering based on the probability rather than a purely random choice to determine which lobe to sample from on the first indirect bounce.\n"
+               "This as a result helps ensure there will always be a diffuse or specular sample within the dithering pattern's area and should help the denoising resolve a more stable result.",
+               args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", bool, enableUnorderedResolveInIndirectRays, true,
+               "A flag to enable or disable unordered resolve approximations in indirect rays.\n"
+               "This allows for the presence of unordered approximations in resolving to be overridden in indirect rays and as such requires separate unordered approximations to be enabled to have any effect.\n"
+               "This option should be enabled if objects which can be resolvered in an unordered way in indirect rays are expected for higher quality in reflections, but may come at a performance cost.\n"
+               "Note that even with this option enabled, unordered resolve approximations are only done on the first indirect bounce for the sake of performance overall.",
+               args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx", bool, enableProbabilisticUnorderedResolveInIndirectRays, true,
+               "A flag to enable or disable probabilistic unordered resolve approximations in indirect rays.\n"
+               "This flag speeds up the unordered resolve for indirect rays by probabilistically deciding when to perform unordered resolve or not.  Must have both unordered resolve and unordered resolve in indirect rays enabled for this to take effect.\n"
+               "This option should be enabled by default as it can significantly improve performance on some hardware.  In rare cases it may come at the cost of some quality for particles and decals in reflections.\n"
+               "Note that even with this option enabled, unordered resolve approximations are only done on the first indirect bounce for the sake of performance overall.");
+    RTX_OPTION_ARGS("rtx", bool, enableUnorderedEmissiveParticlesInIndirectRays, false,
+                   "A flag to enable or disable unordered resolve emissive particles specifically in indirect rays.\n"
+                   "Should be enabled in higher quality rendering modes as emissive particles are fairly important in reflections, but may be disabled to skip such interactions which can improve performance on lower end hardware.\n"
+                   "Note that rtx.enableUnorderedResolveInIndirectRays must first be enabled for this option to take any effect (as it will control if unordered resolve is used to begin with in indirect rays).",
+                   args.environment = "DXVK_EMISSIVE_INDIRECT_PARTICLES",
+                   args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", bool, enableTransmissionApproximationInIndirectRays, false,
+               "A flag to enable transmission approximations in indirect rays.\n"
+               "Translucent objects hit by indirect rays will not alter ray direction, just change the ray throughput.",
+               args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx", bool, enableDecalMaterialBlending, true,
+               "A flag to enable or disable material blending on decals.\n"
+               "This should generally always be enabled when decals are in use as this allows decals to be blended down on to the surface they sit slightly above which results in more convincing decals rendering.");
+
+    RTX_OPTION("rtx", bool, enableBillboardOrientationCorrection, true, "");
+    RTX_OPTION("rtx", bool, useIntersectionBillboardsOnPrimaryRays, false, "");
+    RTX_OPTION("rtx", float, translucentDecalAlbedoFactor, 10.0f,
+               "A global scale factor applied to the albedo of decals that are applied to a translucent base material, to make the decals more visible.\n"
+               "This is generally needed as albedo values for decals may be fairly low when dealing with opaque surfaces, but the translucent diffuse layer requires a fairly high albedo value to result in an expected look.\n"
+               "The need for this option could be avoided by simply authoring decals applied to translucent materials with a higher albedo to begin with, but sometimes applications may share decals between different material types.");
+
+    RTX_OPTION("rtx", float, worldSpaceUiBackgroundOffset, -0.01f, "Distance along normal to offset objects rendered as worldspace UI, specifically for the background of screens.");
+
+    struct ShadowTerminator {
+      RTX_OPTION("rtx.shadowTerminator", bool, soften, true,
+                 "Fix the harsh transition on a shadow terminator by gradually smoothing, when the geometry normal is inconsistent with shading normal."
+                 "Note that it doesn't modify the shadow ray, and only applies a falloff when calculating a direct illumination.");
+
+      RTX_OPTION("rtx.shadowTerminator", bool, enableOffset, true,
+                 "Offset the shadow ray origin along the triangle vertex normals to avoid self-intersection. "
+                 "Helps to remove the triangular shadow artifacts on a terminator region. "
+                 "Note that it may introduce a noticeable light leaking if the geometry is low-poly.");
+      RTX_OPTION("rtx.shadowTerminator", float, maxArea, 0.05f, "If a polygon area is larger than this value (in square meters), then a shadow terminator offset will not be applied.");
+      RTX_OPTION("rtx.shadowTerminator", float, maxLength, 0.02f, "Clamp shadow terminator length by this value (in meters).");
+    };
+
+    // Light Selection/Sampling Options
+    RTX_OPTION_ARGS("rtx", uint16_t, risLightSampleCount, 7,
+               "The number of lights randomly selected from the global pool to consider when selecting a light with RIS.\n"
+               "Higher values generally increases the quality of RIS light sampling, but also has diminishing returns and higher performance cost past a point.\n"
+               "Note that RIS is only used when RTXDI is disabled for direct lighting, or for light sampling in indirect rays, so the impact of this effect will vary.",
+               args.minValue = static_cast<uint16_t>(1), args.maxValue = std::numeric_limits<uint16_t>::max());
+
+    // Subsurface Scattering
+    struct SubsurfaceScattering {
+      friend class RtxOptions;
+      friend class ImGUI;
+
+      RTX_OPTION("rtx.subsurface", bool, enableThinOpaque, true, "Enable thin opaque material. The materials withthin opaque properties will fallback to normal opaque material.");
+      RTX_OPTION("rtx.subsurface", bool, enableTextureMaps, true, "Enable texture maps such as thickness map or scattering albedo map. The corresponding subsurface properties will fallback to per-material constants if this is disabled.");
+      RTX_OPTION("rtx.subsurface", float, surfaceThicknessScale, 1.0f, "Scalar of the subsurface thickness.");
+      RTX_OPTION("rtx.subsurface", bool, enableDiffusionProfile, true, "Enable subsurface material. Solve subsurface rendering equation with (burley/SOTO) diffusion profile.");
+      RTX_OPTION("rtx.subsurface", float, diffusionProfileScale, 1.0f, "Scalar of the diffusion profile scale.");
+      RTX_OPTION("rtx.subsurface", bool, enableTransmission, true, "Enable subsurface transmission. Implement single scattering transmission for thin or curved SSS surface.");
+      RTX_OPTION("rtx.subsurface", bool, enableTransmissionSingleScattering, true, "Enable single scattering for subsurface transmission. If this option is disabled, then the refracted ray will not be scattered again inside of the volume.");
+      RTX_OPTION("rtx.subsurface", bool, enableTransmissionDiffusionProfileCorrection, false,
+        "Enable diffusion profile correction when enabling SSS Transmission.\n"
+        "Both burley's diffusion profile and SSS Transmission includes the single scattering energy.\n"
+        "The correction removes the single scattering part from diffusion profile to avoid double counting the single scattering energy.");
+      RTX_OPTION("rtx.subsurface", bool, enableHeuristicSingleScatteringTransmission, true,
+        "Heuristically checks the mean free path (MFP) of SSS materials to determine whether "
+        "single scattering transmission should be enabled. Extremely large MFP values usually "
+        "indicate thick volumes dominated by high-order scattering, which is already approximated "
+        "by the diffusion profile and captures most of the SSS energy. In these cases, the single "
+        "scattering contribution can be safely ignored.");
+      RTX_OPTION("rtx.subsurface", uint8_t, transmissionBsdfSampleCount, 1, "The sample count for transmission BSDF.(1spp as default)");
+      RTX_OPTION("rtx.subsurface", uint8_t, transmissionSingleScatteringSampleCount, 1, "The sample count for every single scattering on BSDF transmission (refracted) ray.(1spp as default)");
+      RTX_OPTION("rtx.subsurface", Vector2i, diffusionProfileDebugPixelPosition, Vector2i(INT32_MAX, INT32_MAX), "Pixel position where we show debugging sampling positions for diffusion profile. Requires set debug view to 'SSS Diffusion Profile Sampling'.");
+    };
+
+    // Alpha Test/Blend Options
+    RTX_OPTION("rtx", bool, enableAlphaBlend, true, "Enable rendering alpha blended geometry, used for partial opacity and other blending effects on various surfaces in many games.");
+    RTX_OPTION("rtx", bool, enableAlphaTest, true, "Enable rendering alpha tested geometry, used for cutout style opacity in some games.");
+    RTX_OPTION("rtx", bool, enableCulling, true, "Enable front/backface culling for opaque objects. Objects with alpha blend or alpha test are not culled.");
+    RTX_OPTION("rtx", bool, enableCullingInSecondaryRays, false, "Enable front/backface culling for opaque objects. Objects with alpha blend or alpha test are not culled.  Only applies in secondary rays, defaults to off.  Generally helps with light bleeding from objects that aren't watertight.");
+    RTX_OPTION("rtx", bool, enableEmissiveBlendModeTranslation, true, "Treat incoming semi/additive D3D blend modes as emissive.");
+    RTX_OPTION("rtx", bool, enableEmissiveBlendEmissiveOverride, true, "Override typical material emissive information on draw calls with any emissive blending modes to emulate their original look more accurately.");
+    RTX_OPTION_ARGS("rtx", float, emissiveBlendOverrideEmissiveIntensity, 0.2f, "The emissive intensity to use when the emissive blend override is enabled. Adjust this if particles for example look overly bright globally.",
+               args.minValue = 0.0f, args.maxValue = FLOAT16_MAX);
+    RTX_OPTION_ARGS("rtx", float, particleSoftnessFactor, 0.05f, "Multiplier for the view distance that is used to calculate the particle blending range.",
+               args.minValue = 0.0f, args.maxValue = 1.0f);
+    RTX_OPTION("rtx", float, forceCutoutAlpha, 0.5f,
+               "When an object is added to the cutout textures list it will have a cutout alpha mode forced on it, using this value for the alpha test.\n"
+               "This is meant to improve the look of some legacy mode materials using low-resolution textures and alpha blending instead of alpha cutout as this can cause blurry halos around edges due to the difficulty of handling this sort of blending in Remix.\n"
+               "Such objects are generally better handled with actual replacement assets using fully opaque geometry replacements or alpha cutout with higher resolution textures, so this should only be relied on until proper replacements can be authored.");
+    RTX_OPTION("rtx", float, wboitEnergyLossCompensation, 4.f, "Multiplier for the coverage term in the weighted blended OIT imlementation - allows for some configuration to recover energy loss from the technique.  This is non physical, be careful overtuning ");
+    RTX_OPTION("rtx", float, wboitDepthWeightTuning, 2.f, "Allows for tuning the weighted blended OIT depth weight - which can be used to fine tune blending for various circumstances.  This control has a side effect, larger numbers here can adversely affect brightness of emissive blended materials.");
+    RTX_OPTION("rtx", bool, wboitEnabled, true, "Enables the new rendering mode for handling alpha blended objects.  Changing this will trigger a shader recompile.  The new mode improves rendering accuracy, especially in cases where there are many layers of transparent things being rendered.");
+
+    // Ray Portal Options
+    // Note: Not a set as the ordering of the hashes is important. Keep this list small to avoid expensive O(n) searching (should only have 2 or 4 elements usually).
+    // Also must always be a multiple of 2 for proper functionality as each pair of hashes defines a portal connection.
+    public: static void rayPortalModelTextureHashesOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", std::vector<XXH64_hash_t>, rayPortalModelTextureHashes, {},
+                    "Texture hashes identifying ray portals.\n"
+                    "Entries are interpreted as pairs of hashes; the list length must be even and will be clamped to the internal max portal count.",
+                    args.onChangeCallback = &rayPortalModelTextureHashesOnChange);
+    // Todo: Add option for if a model to world transform matrix should be used or if PCA should be used instead to attempt to guess what the matrix should be (for games with
+    // pretransformed Ray Portal vertices).
+    // Note: Axes used for orienting the portal when PCA is used.
+    RTX_OPTION("rtx", Vector3, rayPortalModelNormalAxis, Vector3(0.0f, 0.0f, 1.0f), "The axis in object space to map the ray portal geometry's normal axis to. Currently unused (as PCA is not implemented).");
+    RTX_OPTION("rtx", Vector3, rayPortalModelWidthAxis, Vector3(1.0f, 0.0f, 0.0f), "The axis in object space to map the ray portal geometry's width axis to. Currently unused (as PCA is not implemented).");
+    RTX_OPTION("rtx", Vector3, rayPortalModelHeightAxis, Vector3(0.0f, 1.0f, 0.0f), "The axis in object space to map the ray portal geometry's height axis to. Currently unused (as PCA is not implemented).");
+    public: static void rayPortalSamplingWeightMinDistanceOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", float, rayPortalSamplingWeightMinDistance, 10.0f,
+               "The minimum distance from a portal which the interpolation of the probability of light sampling through portals will begin (and is at its maximum value).\n"
+               "Currently unimplemented, kept here for future use.",
+               args.minValue = 0.0f, args.onChangeCallback = &rayPortalSamplingWeightMinDistanceOnChange);
+    public: static void rayPortalSamplingWeightMaxDistanceOnChange(DxvkDevice* device);
+    RTX_OPTION_ARGS("rtx", float, rayPortalSamplingWeightMaxDistance, 1000.0f,
+               "The maximum distance from a portal which the interpolation of the probability of light sampling through portals will end (and is at its minimum value such that no portal light sampling will happen beyond this point).\n"
+               "Currently unimplemented, kept here for future use.",
+               args.minValue = 0.0f, args.onChangeCallback = &rayPortalSamplingWeightMaxDistanceOnChange);
+    RTX_OPTION("rtx", bool, rayPortalCameraHistoryCorrection, false,
+               "A flag to control if history correction on ray portal camera teleportation events is enabled or disabled.\n"
+               "This allows for the previous camera matrix to be set to a virtual matrix to correct the large discontunity in position and view direction which happens when a camera teleports from moving through a ray portal (in games like Portal).\n"
+               "As such this option should always be enabled in games utilizing ray portals the camera can pass through as it should fix artifacts from incorrectly calculated motion vectors or other deltas that rely on the current and previous camera matrix.");
+    RTX_OPTION("rtx", bool, rayPortalCameraInBetweenPortalsCorrection, false,
+               "A flag to contol correction when the camera is \"in-between\" a pair of ray portals.\n"
+               "This is mostly relevant in applications which allow the camera to move through a ray portal (games like Portal) as often the ray portals are placed slightly off of a surface, allowing the camera to sometimes end up in this tiny gap for a frame.\n"
+               "To correct this artifact (as it can mess up denoising and other temporal surface consistency checks due to the sudden frame of geometry in front of the camera) this option pushes the camera slightly backwards if this occurs when entering a ray portal.\n"
+               "Similar to ray portal camera history correction this option should always be enabled in games utilizing ray portals the camera can pass through.");
+    RTX_OPTION("rtx", float, rayPortalCameraInBetweenPortalsCorrectionThreshold, 0.1f,
+               "The threshold to use for camera \"in-between\" ray portal detection in meters.\n"
+               "When the camera is less than this distance behind the surface of a ray portal it will be pushed backwards to stay behind the ray portal.\n"
+               "This value should stay small but be large enough to cover the gap between ray portals and the geometry behind them (if such a gap exists in the underlying application).\n"
+               "Additionally, this setting must be set at startup and changing it will not take effect at runtime.");
+
+    RTX_OPTION_ENV("rtx", bool, useWhiteMaterialMode, false, "RTX_USE_WHITE_MATERIAL_MODE", "Override all objects' materials by white material");
+    RTX_OPTION("rtx", bool, useHighlightLegacyMode, false, "");
+    RTX_OPTION("rtx", bool, useHighlightUnsafeAnchorMode, false, "");
+    RTX_OPTION("rtx", bool, useHighlightUnsafeReplacementMode, false, "");
+    RTX_OPTION("rtx", float, nativeMipBias, 0.0f,
+               "Specifies a mipmapping level bias to add to all material texture filtering. Stacks with the upscaling mip bias.\n"
+               "Mipmaps are determined based on how far away a texture is, using this can bias the desired level in a lower quality direction (positive bias), or a higher quality direction with potentially more aliasing (negative bias).\n"
+               "Note that mipmaps are also important for good spatial caching of textures, so too far negative of a mip bias may start to significantly affect performance, therefore changing this value is not recommended");
+    RTX_OPTION("rtx", float, upscalingMipBias, 0.0f,
+               "Specifies a mipmapping level bias to add to all material texture filtering when upscaling (such as DLSS) is used.\n"
+               "Mipmaps are determined based on how far away a texture is, using this can bias the desired level in a lower quality direction (positive bias), or a higher quality direction with potentially more aliasing (negative bias).\n"
+               "Note that mipmaps are also important for good spatial caching of textures, so too far negative of a mip bias may start to significantly affect performance, therefore changing this value is not recommended");
+    RTX_OPTION("rtx", bool, useAnisotropicFiltering, true,
+               "A flag to indicate if anisotropic filtering should be used on material textures, otherwise typical trilinear filtering will be used.\n"
+               "This should generally be enabled as anisotropic filtering allows for less blurring on textures at grazing angles than typical trilinear filtering with only usually minor performance impact (depending on the max anisotropy samples).");
+    RTX_OPTION("rtx", float, maxAnisotropySamples, 8.0f,
+               "The maximum number of samples to use when anisotropic filtering is enabled.\n"
+               "The actual max anisotropy used will be the minimum between this value and the hardware's maximum. Higher values increase quality but will likely reduce performance.");
+    RTX_OPTION_ENV("rtx", bool, enableMultiStageTextureFactorBlending, true, "RTX_ENABLE_MULTI_STAGE_TEXTURE_FACTOR_BLENDING", "Support texture factor blending in stage 1~7. Currently only support 1 additional blending stage, more than 1 additional blending stages will be ignored.");
+
+    // Developer Options
+    RTX_OPTION_FLAG_ENV("rtx", bool, enableBreakIntoDebuggerOnPressingB, false, RtxOptionFlags::NoSave, "RTX_BREAK_INTO_DEBUGGER_ON_PRESSING_B",
+                    "Enables a break into a debugger at the start of InjectRTX() on a press of key \'B\'.\n"
+                    "If debugger is not attached at the time, it will wait until a debugger is attached and break into it then.");
+    
+    // Crash Hotkey Feature (Development builds only)
+    // When enabled via checkbox in the Development tab, pressing the configured hotkey will trigger a deliberate crash.
+    // This is useful for testing crash handling, crash dumps, and crash reporting systems.
+    // The feature is only available in REMIX_DEVELOPMENT builds and defaults to disabled.
+    // The checkbox state is not saved to config files (NoSave), but can be pre-enabled by setting rtx.enableCrashHotkey = True in rtx.conf.
+    RTX_OPTION_FLAG_ENV("rtx", bool, enableCrashHotkey, false, RtxOptionFlags::NoSave, "RTX_ENABLE_CRASH_HOTKEY",
+                    "Arms the crash hotkey feature. When enabled, pressing the crash hotkey combination (Ctrl+Shift+Alt+K by default) will trigger a deliberate crash.\n"
+                    "This option is only available in development builds and is intended for testing crash handling and crash dump generation.\n"
+                    "The armed state is indicated by a red warning overlay on screen. This setting is not saved to config files but can be set manually in rtx.conf.");
+    inline static const VirtualKeys kDefaultCrashHotkey{ VirtualKey{VK_CONTROL}, VirtualKey{VK_SHIFT}, VirtualKey{VK_MENU}, VirtualKey{'K'} };
+    RTX_OPTION_FLAG("rtx", VirtualKeys, crashHotkey, kDefaultCrashHotkey, RtxOptionFlags::NoSave,
+                    "The hotkey combination that triggers a deliberate crash when the crash hotkey feature is armed.\n"
+                    "Default is Ctrl+Shift+Alt+K. Only takes effect when rtx.enableCrashHotkey is True.\n"
+                    "This setting is not saved to config files but can be set manually in rtx.conf.");
+    RTX_OPTION_FLAG("rtx", bool, enableInstanceDebuggingTools, false, RtxOptionFlags::NoSave, "NOTE: This will disable temporal correllation for instances, but allow the use of instance developer debug tools");
+    RTX_OPTION("rtx", Vector2i, drawCallRange, Vector2i(0, INT32_MAX), "");
+    RTX_OPTION("rtx", Vector3, instanceOverrideWorldOffset, Vector3(0.f, 0.f, 0.f), "");
+    RTX_OPTION("rtx", uint, instanceOverrideInstanceIdx, UINT32_MAX, "");
+    RTX_OPTION("rtx", uint, instanceOverrideInstanceIdxRange, 15, "");
+    RTX_OPTION("rtx", bool, instanceOverrideSelectedInstancePrintMaterialHash, false, "");
+    RTX_OPTION("rtx", bool, enablePresentThrottle, false,
+               "A flag to enable or disable present throttling, when set to true a sleep for a time specified by the throttle delay will be inserted into the DXVK presentation thread.\n"
+               "Useful to manually reduce the framerate if the application is running too fast or to reduce GPU power usage during development to keep temperatures down.\n"
+               "Should not be enabled in anything other than development situations.");
+    RTX_OPTION("rtx", std::uint32_t, presentThrottleDelay, 16U,
+               "A time in milliseconds that the DXVK presentation thread should sleep for. Requires present throttling to be enabled to take effect.\n"
+               "Note that the application may sleep for longer than the specified time as is expected with sleep functions in general.");
+    RTX_OPTION_ENV("rtx", bool, validateCPUIndexData, false, "DXVK_VALIDATE_CPU_INDEX_DATA", "");
+    RTX_OPTION("rtx", uint, dumpAllInstancesOnFrame, UINT32_MAX, "If set, and running in a REMIX_DEVELOPMENT build, this will dump all active instances to the log on the specified frame.");
+    // Note: Use use areValidationLayersEnabled helper function rather than accessing this option directly as additional logic must be done to determine if validation layers should be used or not.
+    RTX_OPTION_FLAG_ENV("rtx", bool, enableValidationLayers, false, RtxOptionFlags::NoSave, "DXVK_ENABLE_VALIDATION_LAYERS",
+                        "A flag to enable validation layers in Vulkan. Note that in Debug builds validation layers will always be enabled and this flag will have no effect.\n"
+                        "Enabling validation layers is useful for debugging and development to catch common issues in Vulkan, but will reduce overall performance.\n"
+                        "Should only be enabled by developers during development and not put into production builds of any project.\n"
+                        "Additionally, this setting must be set at startup and changing it will not take effect at runtime.");
+    RTX_OPTION_FLAG_ENV("rtx", bool, enableValidationLayerExtendedValidation, false, RtxOptionFlags::NoSave, "DXVK_ENABLE_VALIDATION_LAYER_EXTENDED_VALIDATION",
+                        "A flag to enable extended validation to validation layers in Vulkan. Only takes effect if validation layers are enabled already.\n"
+                        "This flag enables GPU assisted and synchronization validation along with best practices within the Vulkan validation layers which allow for greater error-checking capability at the cost of significant performance impact.\n"
+                        "Much like the rtx.enableValidationLayers option, this option should only be enabled by developers during development and not be put into production builds of any project.\n"
+                        "Additionally, this setting must be set at startup and changing it will not take effect at runtime.");
+    RTX_OPTION_FLAG_ENV("rtx", bool, logCallstacksOnValidationLayerErrors, true, RtxOptionFlags::NoSave, "DXVK_LOG_CALLSTACKS_ON_VALIDATION_LAYER_ERRORS",
+                        "A flag to enable logging of callstacks when validation layer errors occur.\n"
+                        "This is useful for debugging and development to help track down the source of validation layer errors more easily.\n"
+                        "Requires pdb symbols to be present next to Remix's d3d11 dll and/or in the working directory to resolve symbols.");
+
+
+    struct Aliasing {
+      RTX_OPTION("rtx.aliasing", RtxFramePassStage, beginPass, RtxFramePassStage::FrameBegin, "The first render pass where the aliasing resource is bound in a frame.");
+      RTX_OPTION("rtx.aliasing", RtxFramePassStage, endPass, RtxFramePassStage::FrameEnd, "The last render pass where the aliasing resource is bound in a frame.");
+      RTX_OPTION("rtx.aliasing", RtxTextureFormatCompatibilityCategory, formatCategory, RtxTextureFormatCompatibilityCategory::InvalidFormatCompatibilityCategory, "Specifies the texture format compatibility category for the aliasing resource.");
+      RTX_OPTION("rtx.aliasing", RtxTextureExtentType, extentType, RtxTextureExtentType::DownScaledExtent, "Specifies the resolution type for the aliasing resource. If a 3D texture is used, depth must also be set.");
+      RTX_OPTION("rtx.aliasing", uint32_t, width, 1280, "The width of the aliasing resource in pixels.");
+      RTX_OPTION("rtx.aliasing", uint32_t, height, 720, "The height of the aliasing resource in pixels.");
+      RTX_OPTION("rtx.aliasing", uint32_t, depth, 1, "The depth of the aliasing resource. Required for 3D textures.");
+      RTX_OPTION("rtx.aliasing", uint32_t, layer, 1, "The number of layers in the aliasing resource.");
+      RTX_OPTION("rtx.aliasing", VkImageType, imageType, VkImageType::VK_IMAGE_TYPE_2D, "The image type of the aliasing resource (e.g., 1D, 2D, or 3D).");
+      RTX_OPTION("rtx.aliasing", VkImageViewType, imageViewType, VkImageViewType::VK_IMAGE_VIEW_TYPE_2D, "The image view type of the aliasing resource (e.g., 1D, 2D, 3D, or cube).");
+    } aliasing;
+
+    struct OpacityMicromap {
+      friend class RtxOptions;
+      friend class ImGUI;
+      bool isSupported = false;
+      RTX_OPTION_ENV("rtx.opacityMicromap", bool, enable, true, "DXVK_ENABLE_OPACITY_MICROMAP", 
+                     "Enables Opacity Micromaps for geometries with textures that have alpha cutouts.\n"
+                     "This is generally the case for geometries such as fences, foliage, particles, etc. .\n"
+                     "Opacity Micromaps greatly speed up raytracing of partially opaque triangles.\n"
+                     "Examples of scenes that benefit a lot: multiple trees with a lot of foliage,\n"
+                     "a ground densely covered with grass blades or steam consisting of many particles.");
+    } opacityMicromap;
+
+    RTX_OPTION_ARGS("rtx", ReflexMode, reflexMode, ReflexMode::LowLatency,
+               "Reflex mode selection, enabling it helps minimize input latency, boost mode may further reduce latency by boosting GPU clocks in CPU-bound cases.\n"
+               "Supported enum values are 0 = None (Disabled), 1 = LowLatency (Enabled), 2 = LowLatencyBoost (Enabled + Boost).\n"
+               "Note that even when using the \"None\" Reflex mode Reflex will attempt to be initialized. Use rtx.isReflexEnabled to fully disable to skip this initialization if needed.",
+               args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_FLAG("rtx", bool, isReflexEnabled, true, RtxOptionFlags::NoSave,
+                    "Enables or disables Reflex globally.\n"
+                    "Note that this option when set to false will prevent Reflex from even attempting to initialize, unlike setting the Reflex mode to \"None\" which simply tells an initialized Reflex not to take effect.\n"
+                    "Additionally, this setting must be set at startup and changing it will not take effect at runtime.");
+
+    // Store the computed value separately from the user preference.  This enables changing it immediately when needed,
+    // and lets us store the final value to be used by the game.
+    public: inline static EnableVsync enableVsyncState = EnableVsync::WaitingForImplicitSwapchain;
+    public: static void EnableVsyncOnChange(DxvkDevice* device) {
+      if (enableVsync() != EnableVsync::WaitingForImplicitSwapchain) {
+        enableVsyncState = enableVsync();
+      }
+      // If the option is changed to WaitingForImplicitSwapchain, just leave the computed state as it was.
+    }
+    RTX_OPTION_ARGS("rtx", EnableVsync, enableVsync, EnableVsync::WaitingForImplicitSwapchain, "Controls the game's V-Sync setting. Native game's V-Sync settings are ignored.", 
+                    args.flags = RtxOptionFlags::NoSave | RtxOptionFlags::UserSetting,
+                    args.onChangeCallback = &EnableVsyncOnChange);
+
+    // Replacement options
+    RTX_OPTION_ARGS("rtx", bool, enableReplacementAssets, true, "Globally enables or disables all enhanced asset replacement (materials, meshes, lights) functionality.",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", bool, enableReplacementLights, true,
+               "Enables or disables enhanced light replacements.\n"
+               "Requires replacement assets in general to be enabled to have any effect.",
+               args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", bool, enableReplacementMeshes, true,
+               "Enables or disables enhanced mesh replacements.\n"
+               "Requires replacement assets in general to be enabled to have any effect.",
+               args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION_ARGS("rtx", bool, enableReplacementMaterials, true,
+               "Enables or disables enhanced material replacements.\n"
+               "Requires replacement assets in general to be enabled to have any effect.",
+               args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx", bool, enableReplacementInstancerMeshRendering, true,
+               "Enables or disables rendering GeomPointInstancer meshes using an optimized path.\n"
+               "Requires reloading replacement assets.");
+    RTX_OPTION("rtx", uint, adaptiveResolutionReservedGPUMemoryGiB, 2,
+               "The amount of GPU memory in gibibytes to reserve away from consideration for adaptive resolution replacement textures.\n"
+               "This value should only be changed to reflect the estimated amount of memory Remix itself consumes on the GPU (aside from texture loading, mostly from rendering-related buffers) and should not be changed otherwise.\n"
+               "Only relevant when force high resolution replacement textures is disabled and adaptive resolution replacement textures is enabled. See asset estimated size parameter for more information.\n");
+    RTX_OPTION("rtx", uint, positionCaptureThrottleMinDrawsPerFrame, 64,
+               "How many position captures a frame must already have performed before the capture\n"
+               "submission throttle engages. That throttle flushes and then blocks the render thread\n"
+               "until the GPU retires the capture write - a full round trip that costs on the order of\n"
+               "100ms under FIFO present, because it queues behind pending presents.\n"
+               "It exists to stop a capture storm outrunning the GPU during heavy loads, so it should\n"
+               "not fire on light frames: those have no storm to prevent and simply pay the stall.\n"
+               "Lower it if a capture-heavy scene shows GPU-side stalls; raise it if light frames still\n"
+               "report a single draw dominating rtx.logDrawSubmissionPerf. Set to 0 to throttle always.");
+    RTX_OPTION("rtx", bool, logDrawSubmissionPerf, true,
+               "Reports the CPU time the capture layer spends in draw submission each frame, and\n"
+               "attributes the worst single draw. Drawing is the GPU's job; time spent here is the\n"
+               "render thread being held up before the GPU is even asked to do anything, so a large\n"
+               "figure points at capture work (buffer readbacks, stream-out replays, per-draw locking)\n"
+               "stalling the frame rather than at raytracing cost. The raytracing passes time\n"
+               "themselves separately and are typically low single-digit milliseconds.");
+    RTX_OPTION("rtx", uint, logDrawSubmissionPerfThresholdMs, 4,
+               "Only report a frame's draw-submission cost once it exceeds this many milliseconds, so\n"
+               "healthy frames stay silent. 4ms is roughly a quarter of a 60Hz frame budget spent\n"
+               "before rendering starts. Set to 0 to report every frame.");
+    RTX_OPTION("rtx", uint, logDrawSubmissionPerfIntervalFrames, 600,
+               "After the first few reports, emit rtx.logDrawSubmissionPerf at most once every this many\n"
+               "frames. A game that sits permanently above the threshold otherwise writes one warning per\n"
+               "frame for the whole session: Saints Row IV produced 21,966 of them in a single 5.8 MB log,\n"
+               "which buries every other diagnostic and is itself a per-frame cost in a probe meant to\n"
+               "measure per-frame cost. The opening burst still reports the problem immediately, and a\n"
+               "frame markedly worse than anything reported so far is always logged regardless of the\n"
+               "interval, so a genuine escalation is never throttled away. Set to 0 to report every frame.");
+    RTX_OPTION("rtx", bool, logCameraObstruction, true,
+               "Logs any accepted draw whose bounding box, transformed into view space, encloses the eye.\n"
+               "Geometry that genuinely sits elsewhere in the world lands away from the view origin; anything\n"
+               "bracketing it on all three axes is pinned to the viewpoint and will fill the screen no matter\n"
+               "where the player looks. Each entry names the draw, its texture hash, whether it was captured\n"
+               "camera-relative, and both its object-space and view-space boxes, so the obstructing mesh can\n"
+               "be identified and tagged rather than guessed at.");
+    RTX_OPTION("rtx", uint, logCameraObstructionMaxEntries, 32,
+               "Caps how many camera-obstruction entries are logged per session, so a mesh submitted every\n"
+               "frame cannot flood the log. Raise it when several distinct meshes need identifying.");
+    RTX_OPTION("rtx", bool, dropCollapsedEyeGeometry, true,
+               "Drops geometry that has collapsed onto the viewpoint: its bounding box encloses the eye\n"
+               "AND both the object-to-world and world-to-view translations are zero, meaning the mesh\n"
+               "was never actually placed in the world. Such a mesh occludes the scene that renders\n"
+               "correctly behind it - the long-standing 'black box around the camera'.\n"
+               "\n"
+               "Enclosing the eye alone is NOT enough to cull: a room, cave or water volume you are\n"
+               "standing inside legitimately brackets the camera on all three axes. The zero-translation\n"
+               "test is what separates a collapsed mesh from an interior you are genuinely inside.\n"
+               "\n"
+               "This is a safety net. The real fix is submitting the draw in the correct coordinate\n"
+               "space (see rtx.dx11UseResolvedTransformSpace); when that works this never fires.");
+    RTX_OPTION("rtx", bool, dx11UseResolvedTransformSpace, true,
+               "Let the DX11 camera resolver decide which coordinate space a draw's vertices are in,\n"
+               "instead of the legacy cameraRelativeView flag (which is written from 13 separate sites,\n"
+               "so the last writer wins regardless of evidence quality).\n"
+               "\n"
+               "Field logs showed 64 of 64 accepted draws disagreeing with a single signature:\n"
+               "  resolved=view legacy=world reason='confirmed camera-relative identity view'\n"
+               "i.e. the runtime confirms the view is camera-relative (vertices already in camera space)\n"
+               "and then submits them as world space. With the camera at the origin that collapses the\n"
+               "geometry onto the eye, which is the long-standing 'black box around the camera'.\n"
+               "\n"
+               "Set to False to fall back to the legacy flag if this makes things worse - the resolver\n"
+               "only overrides when its confidence is high, and every override is logged.");
+    RTX_OPTION("rtx", uint, vramBudgetLimitMiB, 3584,
+               "Ceiling, in mebibytes, on how much VRAM Remix allocates for itself.\n"
+               "This budgets only Remix's own resources - material textures, its buffers, acceleration\n"
+               "structures, opacity micromaps, render targets and replacement geometry. The rest of the\n"
+               "card stays available to the game, so the GPU is still fully utilised; this only stops\n"
+               "Remix's texture budget from expanding to fill whatever VRAM happens to be free.\n"
+               "The texture budget is what actually gets clamped: it receives whatever the ceiling has\n"
+               "left after Remix's non-texture allocations, and textures are demoted to fit. Resources\n"
+               "sized by the scene rather than by budget (render targets, acceleration structures) are\n"
+               "counted against the ceiling but cannot themselves be shrunk to honour it.\n"
+               "Set to 0 to disable the cap and use the driver-reported budget as before.");
+    RTX_OPTION("rtx", uint, limitedBonesPerVertex, 4,
+               "Limit the number of bone influences per vertex for replacement geometry.  D3D11 games were limited to 4, which is the default.  In rare instances you may want to increase this based on your preference for replaced assets.  This config only takes affect when set on startup via the rtx.conf.");
+
+    struct TextureManager {
+      RTX_OPTION("rtx.texturemanager", int, budgetPercentageOfAvailableVram, 50,
+                 "The percentage of available VRAM we should use for material textures.  If material textures are required beyond "
+                 "this budget, then those textures will be loaded at lower quality.  Important note, it's impossible to perfectly "
+                 "match the budget while maintaining reasonable quality levels, so use this as more of a guideline.  If the "
+                 "replacements assets are simply too large for the target GPUs available vid mem, we may end up going overbudget "
+                 "regularly.  Defaults to 50% of the available VRAM.");
+      RTX_OPTION("rtx.texturemanager", bool, fixedBudgetEnable, false, "If true, rtx.texturemanager.fixedBudgetMiB is used instead of rtx.texturemanager.budgetPercentageOfAvailableVram.");
+      RTX_OPTION_ARGS("rtx.texturemanager", int, fixedBudgetMiB, 2048, "Fixed-size VRAM budget for replacement textures. In mebibytes. To use, set rtx.texturemanager.fixedBudgetEnable to True.",
+                      args.minValue = 256,
+                      args.maxValue = 1024 * 32);
+      RTX_OPTION_ENV("rtx.texturemanager", bool, samplerFeedbackEnable, true, "DXVK_TEXTURES_SAMPLER_FEEDBACK_ENABLE",
+                 "Enable texture sampler feedback. If true, a texture prioritization logic considers the amount of mip-levels that was sampled by a GPU while rendering a scene."
+                 "(For example, if a texture is in the distance, it will have a lower priority compared to a texture rendered just in front of the camera).");
+      RTX_OPTION_FLAG_ENV("rtx.texturemanager", bool, neverDowngradeTextures, false, RtxOptionFlags::NoSave, "DXVK_TEXTURES_NEVER_DOWNGRADE", 
+                 "Debug option to forcibly prevent uploading lower resolution data, if the texture already has been promoted to a high resolution.");
+      RTX_OPTION("rtx.texturemanager", int, stagingBufferSizeMiB, 96,
+                 "Size of a pre-allocated staging (intermediate) buffer to use when sending a texture from a RAM to GPU VRAM. "
+                 "If a texture size exceeds this limit, it will not be considered for the texture streaming. In mebibytes.");
+      RTX_OPTION_FLAG_ENV("rtx.texturemanager", bool, hotReload, false, RtxOptionFlags::NoSave, "DXVK_TEXTURES_HOTRELOAD",
+                 "While a game is running, if a texture file is modified on a disk, it will be automatically reuploaded to GPU.");
+      RTX_OPTION_FLAG_ENV("rtx.texturemanager", uint, hotReloadRateMs, 100, RtxOptionFlags::NoSave, "DXVK_TEXTURES_HOTRELOAD_RATE_MS",
+                 "Amount of time to wait between filesystem OS events, for texture hot-reloading. In milliseconds.");
+    };
+    RTX_OPTION("rtx", bool, reloadTextureWhenResolutionChanged, false, "Reload texture when resolution changed.");
+    RTX_OPTION_FLAG_ENV("rtx", bool, alwaysWaitForAsyncTextures, false, RtxOptionFlags::NoSave, "DXVK_WAIT_ASYNC_TEXTURES", 
+               "Force CPU to wait for the texture upload. Do not use an asynchronous thread for textures. If true, a frame stutter should be expected.");
+    RTX_OPTION_FLAG_ENV("rtx.initializer", bool, asyncAssetLoading, true, RtxOptionFlags::NoSave, "DXVK_ASYNC_ASSET_LOADING", "If true, a separate thread is created to load USD assets asynchronously.");
+    RTX_OPTION("rtx", bool, usePartialDdsLoader, true,
+               "A flag controlling if the partial DDS loader should be used, true to enable, false to disable and use GLI instead.\n"
+               "Generally this should be always enabled as it allows for simple parsing of DDS header information without loading the entire texture into memory like GLI does to retrieve similar information.\n"
+               "Should only be set to false for debugging purposes if the partial DDS loader's logic is suspected to be incorrect to compare against GLI's implementation.");
+
+    RTX_OPTION("rtx", TonemappingMode, tonemappingMode, TonemappingMode::Local,
+               "The tonemapping type to use, 0 for Global, 1 for Local (Default).\n"
+               "Global tonemapping tonemaps the image with respect to global parameters, usually based on statistics about the rendered image as a whole.\n"
+               "Local tonemapping on the other hand uses more spatially-local parameters determined by regions of the rendered image rather than the whole image.\n"
+               "Local tonemapping can result in better preservation of highlights and shadows in scenes with high amounts of dynamic range whereas global tonemapping may have to comprimise between over or underexposure.");
+    RTX_OPTION("rtx", bool, useLegacyACES, true,
+               "Use a luminance-only approximation of ACES that over-saturates the highlights. If false, use a refined ACES transform that converts between color spaces with more precision.");
+    RTX_OPTION("rtx", bool, showLegacyACESOption, false,
+               "Show \'rtx.useLegacyACES\' in the developer menu. Default is OFF, as the non-legacy ACES is currently experimental and the implementation is a subject to change.");
+
+    // Capture Options
+    //   General
+    RTX_OPTION("rtx", bool, captureShowMenuOnHotkey, true,
+               "If true, then the capture menu will appear whenever one of the capture hotkeys are pressed. A capture MUST be started by using a button in the menu, in that case.\n"
+               "If false, the hotkeys behave as expected. The user must manually open the menu in order to change any values.");
+    inline static const VirtualKeys kDefaultCaptureMenuKeyBinds{VirtualKey{VK_CONTROL},VirtualKey{VK_SHIFT},VirtualKey{'Q'}};
+    RTX_OPTION("rtx", VirtualKeys, captureHotKey, kDefaultCaptureMenuKeyBinds,
+               "Hotkey to trigger a capture without bringing up the menu.\n"
+               "example override: 'rtx.captureHotKey = CTRL, SHIFT, P'.\n"
+               "Full list of key names available in `src/util/util_keybind.h`.");
+    RTX_OPTION("rtx", bool, captureInstances, true,
+               "If true, an instanced snapshot of the game scene will be captured and exported to a USD stage, in addition to all meshes, textures, materials, etc.\n"
+               "If false, only meshes, etc will be captured.");
+    RTX_OPTION("rtx", bool, captureNoInstance, false, "Same as \'rtx.captureInstances\' except inverse. This is the original/old variant, and will be deprecated, however is still functional.");
+    RTX_OPTION("rtx", std::string, captureTimestampReplacement, "{timestamp}",
+               "String that can be used for auto-replacing current time stamp in instance stage name.\n"
+               "Note: Changing this value does not change the default value for rtx.captureInstanceStageName.");
+    // Note: default values are used before configs are loaded.  Cannot use the value of `captureTimestampReplacement` to set the default value of `captureInstanceStageName`.
+    RTX_OPTION("rtx", std::string, captureInstanceStageName, "capture_{timestamp}.usd",
+               "Name of the \'instance\' stage (see: \'rtx.captureInstances\').");
+    RTX_OPTION("rtx", bool, captureOverwriteExistingCapture, false,
+               "If true, a capture with the same filename will overwrite any existing capture file instead of appending a numeric suffix to avoid collisions.");
+    RTX_OPTION("rtx", bool, captureEnableMultiframe, false, "Enables multi-frame capturing. THIS HAS NOT BEEN MAINTAINED AND SHOULD BE USED WITH EXTREME CAUTION.");
+    RTX_OPTION("rtx", uint32_t, captureMaxFrames, 1, "Max frames capturable when running a multi-frame capture. The capture can be toggled to completion manually.");
+    RTX_OPTION("rtx", uint32_t, captureFramesPerSecond, 24,
+               "Playback rate marked in the USD stage.\n"
+               "Will eventually determine frequency with which game state is captured and written. Currently every frame -- even those at higher frame rates -- are recorded.");
+    //   Mesh
+    RTX_OPTION("rtx", float, captureMeshPositionDelta, 0.3f, "Inter-frame position min delta warrants new time sample.");
+    RTX_OPTION("rtx", float, captureMeshNormalDelta, 0.3f, "Inter-frame normal min delta warrants new time sample.");
+    RTX_OPTION("rtx", float, captureMeshTexcoordDelta, 0.3f, "Inter-frame texcoord min delta warrants new time sample.");
+    RTX_OPTION("rtx", float, captureMeshColorDelta, 0.3f, "Inter-frame color min delta warrants new time sample.");
+    RTX_OPTION("rtx", float, captureMeshBlendWeightDelta, 0.01f, "Inter-frame blend weight min delta warrants new time sample.");
+
+    RTX_OPTION("rtx", bool, useVirtualShadingNormalsForDenoising, true,
+               "A flag to enable or disable the usage of virtual shading normals for denoising passes.\n"
+               "This is primairly important for anything that modifies the direction of a primary ray, so mainly PSR and ray portals as both of these will view a surface from an angle different from the \"virtual\" viewing direction perceived by the camera.\n"
+               "This can cause some issues with denoising due to the normals not matching the expected perception of what the normals should be, for example normals facing away from the camera direction due to being viewed from a different angle via refraction or portal teleportation.\n"
+               "To correct this, virtual normals are calculcated such that they always are oriented relative to the primary camera ray as if its direction was never altered, matching the virtual perception of the surface from the camera's point of view.\n"
+               "As an aside, virtual normals themselves can cause issues with denoising due to the normals suddenly changing from virtual to \"real\" normals upon traveling through a portal, causing surface consistency failures in the denoiser, but this is accounted for via a special transform given to the denoiser on camera ray portal teleportation events.\n"
+               "As such, this option should generally always be enabled when rendering with ray portals in the scene to have good denoising quality.");
+    RTX_OPTION("rtx", bool, resetDenoiserHistoryOnSettingsChange, false, "");
+
+    RTX_OPTION("rtx", bool, fogIgnoreSky, false, "If true, sky draw calls will be skipped when searching for the D3D11 fog values.")
+
+    RTX_OPTION("rtx", float, skyBrightness, 1.f, "");
+    RTX_OPTION("rtx", bool, skyForceHDR, false, "By default sky will be rasterized in the color format used by the game. Set the checkbox to force sky to be rasterized in HDR intermediate format. This may be important when sky textures replaced with HDR textures.");
+    RTX_OPTION("rtx", uint32_t, skyProbeSide, 1024, "Resolution of the skybox for indirect illumination (rough reflections, global illumination etc).");
+    RTX_OPTION("rtx", float, skyProbeDecodeGamma, 1.0f,
+               "Transfer-function exponent applied to the rasterized sky probe before it is used as radiance. 1.0 (default) leaves it untouched.\n"
+               "The probe is filled by re-rasterizing the game's own sky shaders, so it holds whatever those shaders wrote. If the game composites its sky in a display-referred (gamma-encoded) space, sampling that directly hands encoded values to the path tracer as if they were linear radiance, and the sky reads FLATTENED: blacks lifted (a near-black night sky visibly glows) and highlights crushed (bright stars dimmer than in raster). No value of rtx.skyBrightness fixes both ends, because the error is a curve rather than a factor.\n"
+               "Set 2.2 to linearize a gamma-encoded probe. Applies only to skybox-rasterization mode; the physical atmosphere is unaffected.");
+    RTX_OPTION("rtx", float, skyProbeBlackPoint, 0.0f,
+               "Constant subtracted from every rasterized sky-probe channel before use, clamped at zero. 0.0 (default) leaves it untouched. "
+               "Usually the right control when the RT sky looks WASHED OUT rather than merely too bright: the game's sky shaders can leave a small non-zero floor (a star texture's dark background, a haze term) that reads as black once the game's own tonemapper has crushed it, but glows when sampled directly as radiance. Subtracting that floor restores the black without touching bright features. "
+               "Prefer this to rtx.skyProbeDecodeGamma on an HDR probe: an exponent only crushes values below 1.0, and above it AMPLIFIES (pow(5,2.2)=37), which blows out a sun disc and shows up as violent auto-exposure, environment-sampling fireflies and undenoised-looking glancing-angle noise.");
+    RTX_OPTION("rtx", float, skyProbeLightBrightness, 1.0f,
+               "Independent gain on the sky probe's LIGHTING contribution. 1.0 = unchanged. "
+               "rtx.skyBrightness scales the VISIBLE sky (the screen-space matte sampled on primary miss in composite.comp.slang) and the probe (the cubemap that lights the scene) together, so appearance and illumination cannot be balanced against one another. This multiplies the probe only, letting the sky be left matching the game's raster output while the light it casts is tuned separately. "
+               "Raise it when the sky looks correct but the ground is under-lit.");
+    RTX_OPTION_FLAG("rtx", uint32_t, skyUiDrawcallCount, 0, RtxOptionFlags::NoSave, "");
+    RTX_OPTION("rtx", uint32_t, skyDrawcallIdThreshold, 0, "It's common in games to render the skybox first, and so, this value provides a simple mechanism to identify those early draw calls that are untextured (textured draw calls can still use the Sky Textures functionality.");
+    RTX_OPTION("rtx", float, skyMinZThreshold, 1.f, "If a draw call's viewport has min depth greater than or equal to this threshold, then assume that it's a sky.");
+    RTX_OPTION("rtx", SkyAutoDetectMode, skyAutoDetect, SkyAutoDetectMode::None, 
+               "Automatically tag sky draw calls using various heuristics.\n"
+               "0 = None\n"
+               "1 = CameraPosition - assume the first seen camera position is a sky camera.\n"
+               "2 = CameraPositionAndDepthFlags - assume the first seen camera position is a sky camera, if its draw call's depth test is disabled. If it's enabled, assume no sky camera.\n"
+               "Note: if all draw calls are marked as sky, then assume that there's no sky camera at all.");
+    RTX_OPTION("rtx", float, skyAutoDetectUniqueCameraDistance, 1.0f,
+               "If multiple cameras are found, this threshold distance (in game units) is used to distinguish a sky camera from a main camera. "
+               "Active if sky auto-detect is set to CameraPosition / CameraPositionAndDepthFlags.")
+    RTX_OPTION("rtx", bool, skyReprojectToMainCameraSpace, false,
+               "Move sky geometry to the main camera space.\n"
+               "Useful, if a game has a skybox that contains geometry that can be a part of the main scene (e.g. buildings, mountains). "
+               "So with this option enabled, that geometry would be promoted from sky rasterization to ray tracing.");
+    RTX_OPTION("rtx", float, skyReprojectScale, 16.0f, "Scaling of the sky geometry on reprojection to main camera space.");
+    RTX_OPTION("rtx", bool, skyForceAutoDetectedToReproject, false,
+               "When enabled, draw calls classified as sky by auto-detect are always reprojected to main camera space "
+               "instead of being rasterized to the sky cubemap. This fixes a class of bugs where auto-detect misclassifies "
+               "world geometry as sky (due to shared camera positions), causing that geometry to become invisible. "
+               "Only effective when Sky Auto-Detect and Reproject Sky to Main Camera are both enabled.");
+
+    RTX_OPTION("rtx", SkyMode, skyMode, SkyMode::SkyboxRasterization,
+               "Sky rendering mode. SkyboxRasterization uses traditional skybox rasterization, PhysicalAtmosphere uses Hillaire atmospheric scattering.");
+    RTX_OPTION("rtx", bool, skyAutoPhysicalAtmosphereFallback, true,
+               "Whether the DX11 runtime may switch rtx.skyMode from SkyboxRasterization to PhysicalAtmosphere (Numos) on its own.\n"
+               "DX11_V319: this promotion used to be unconditional, so Numos always replaced the game's sky regardless of rtx.skyMode and there was no setting to stop it. It also only changed an internal variable, leaving rtx.skyMode still reporting SkyboxRasterization - so the game-sky suppression and the Numos-gated night sky/cloud features stayed switched off while Numos was actually being drawn, and the game's own sky was composited alongside it.\n"
+               "It defaults ON because rasterized skybox mode genuinely cannot work here: the sky cubemap has no usable per-face reprojection, its faces stay at the clear value, and the result is a black box around the camera. Set to False to keep Numos out of the way and take the rasterized path as-is, or set rtx.skyMode=1 to choose Numos explicitly rather than by fallback.");
+
+    // Atmosphere parameters
+    RTX_OPTION("rtx.atmosphere", float, sunSize, 0.545f, "Size of sun disc in degrees.");
+    RTX_OPTION("rtx.atmosphere", float, sunShadowSoftnessDeg, 0.0f,
+               "Decoupled sun shadow softness, as the distant light's angular half-angle in degrees. "
+               "0 = physical (use sunSize / 2, so shadow softness tracks the visible disc). When > 0 it "
+               "overrides the sun light's half-angle WITHOUT changing the visible sun disc — larger = "
+               "softer penumbra, for artistic soft shadows under a small sun.");
+    RTX_OPTION("rtx.atmosphere", float, sunIntensity, 1.0f, "Strength of Sun.");
+    RTX_OPTION("rtx.atmosphere", float, sunElevation, 15.0f,
+               "Sun elevation in degrees. Game-drivable per-frame; persists when saved unless overridden by a runtime push.");
+    RTX_OPTION("rtx.atmosphere", float, sunRotation, 0.0f,
+               "Sun rotation in degrees. Game-drivable per-frame; persists when saved unless overridden by a runtime push.");
+    RTX_OPTION("rtx.atmosphere", float, altitude, 100.0f, "Height from sea level in meters.");
+    RTX_OPTION("rtx.atmosphere", float, airDensity, 1.0f, "Density of air molecules multiplier (1.0 = clear sky).");
+    RTX_OPTION("rtx.atmosphere", float, aerosolDensity, 1.1f, "Density of aerosols/dust multiplier (1.0 = typical).");
+    RTX_OPTION("rtx.atmosphere", float, ozoneDensity, 1.0f, "Density of ozone layer multiplier (1.0 = typical).");
+    
+    // Advanced/Internal Atmosphere Parameters
+    RTX_OPTION("rtx.atmosphere", float, planetRadius, 6371.0f, "Planet radius in kilometers.");
+    RTX_OPTION("rtx.atmosphere", float, atmosphereThickness, 100.0f, "Atmosphere thickness in kilometers.");
+    RTX_OPTION("rtx.atmosphere", float, mieAnisotropy, 0.97f, "Mie phase function anisotropy (g parameter, -1 to 1).");
+    
+    // Base coefficients (can be used for non-Earth atmospheres, scaled by density sliders)
+    RTX_OPTION("rtx.atmosphere", Vector3, rayleighScattering, Vector3(5.8e-3f, 13.5e-3f, 33.1e-3f), "Base Rayleigh scattering coefficients (km^-1).");
+    RTX_OPTION("rtx.atmosphere", Vector3, mieScattering, Vector3(3.996e-3f, 3.996e-3f, 3.996e-3f), "Base Mie scattering coefficients (km^-1).");
+    RTX_OPTION("rtx.atmosphere", Vector3, ozoneAbsorption, Vector3(2.04e-3f, 4.97e-3f, 2.14e-4f), "Base Ozone absorption coefficients (km^-1).");
+    RTX_OPTION("rtx.atmosphere", float, ozoneLayerAltitude, 25.0f, "Altitude of ozone layer peak in kilometers.");
+    RTX_OPTION("rtx.atmosphere", float, ozoneLayerWidth, 15.0f, "Width of the ozone layer in kilometers.");
+    RTX_OPTION("rtx.atmosphere", Vector3, sunIlluminance, Vector3(15.0f, 15.0f, 15.0f), "Base Sun illuminance color/intensity.");
+    RTX_OPTION("rtx.atmosphere", float, multiScatterPhysicalStrength, 1.0f, "Blend between the analytical multiscatter fit (0) and the physical Hillaire multiscattering LUT (1). Default 1.0 = physical: the LUT is the correct directional, transmittance-aware hemisphere integration and gives a believable zenith->horizon gradient with warm horizon tones. 0 = the legacy analytical inline fit, which is a flat isotropic blue-biased fill that flattens the gradient and desaturates the warm horizon (kept only for A/B). Intermediate values blend.");
+    RTX_OPTION("rtx.atmosphere", float, multiScatterStrength, 1.0f, "Artistic global scale on the atmosphere's multiscattering 'fill' term. The physical two-term model adds a broadband (pale-blue) multiscatter term that desaturates warm sunset color. Lower this (e.g. 0.3-0.6) to let warm single-scatter dominate for a punchier sunset; 1.0 = physical. Feeds the sky-view LUT, so clouds inherit it.");
+    RTX_OPTION("rtx.atmosphere", float, sunsetSaturation, 1.0f, "Artistic saturation adjustment applied to sky radiance, ramped in as the sun approaches the horizon (midday sky is untouched). 1.0 = no change (default — the physical multiscatter path now produces correct horizon color at the source, so the former 0.5 desaturation band-aid is retired); <1 desaturates the near-horizon sky toward neutral; >1 amplifies the warm horizon hues. Feeds the sky-view LUT, so clouds inherit it.");
+
+    RTX_OPTION_ARGS("rtx.atmosphere", float, skyIndirectRadianceScale, 1.0f,
+               "Artistic multiplier for sky radiance gathered by diffuse indirect bounces only. "
+               "1.0 = physical (default). Raise it to brighten diffuse sky fill (the distant-light "
+               "sun has a much higher radiance than the sky, so indirect lighting reads dull). "
+               "Applies only to genuine diffuse sky gather; sky seen via reflection, refraction, "
+               "alpha-cutout, or the primary view stays at physical brightness so reflections match "
+               "the visible sky.",
+      args.minValue = 0.0f);
+
+    RTX_OPTION("rtx.atmosphere", bool, useSkyViewLut, true,
+               "Sample the precomputed sky-view LUT at sky-miss instead of per-ray evalSkyRadiance. "
+               "Improves performance with minimal visual difference when Numos atmosphere is active.");
+
+    // ----- Night-sky shading (fork) -----
+    // Stars, Milky Way, shooting stars, airglow. Active when skyMode == Numos.
+    RTX_OPTION("rtx.atmosphere", float, starBrightness, 0.5f,
+               "Overall brightness multiplier for stars. Game-drivable per-frame (plugins can fade stars in/out around sunset/sunrise); persists when saved unless overridden by a runtime push.");
+    RTX_OPTION("rtx.atmosphere", float, starDensity, 0.5f,
+               "Star density on a linear-feel slider: 0 = no stars, 1 = maximum stars. Internally "
+               "maps via pow(starDensity, 4) * 0.05 to a per-cell visible-star fraction, so the "
+               "useful range (~0.1% to 5% of cells) spans the whole slider instead of compressing "
+               "into the top 1% (the prior behavior, which made 0.98/0.99/1.0 the only viable "
+               "settings). 0.5 = ~0.3% stars, 0.7 = ~1.2%, 1.0 = ~5%.");
+    RTX_OPTION("rtx.atmosphere", float, starTwinkleSpeed, 1.0f,
+               "Speed of star twinkling animation (0 = no twinkle).");
+    RTX_OPTION("rtx.atmosphere", float, starRotation, 0.0f,
+               "Sidereal sky rotation angle in degrees, 0-360. Game-drivable per-frame; persists when saved unless overridden by a runtime push.");
+    RTX_OPTION("rtx.atmosphere", float, starAxisElevation, 90.0f,
+               "Celestial pole elevation from horizon in degrees. 90 = pole at zenith (default, matches pre-rotation behavior).");
+    RTX_OPTION("rtx.atmosphere", float, starAxisRotation, 0.0f,
+               "Celestial pole azimuth in degrees (0 = North). Only relevant when starAxisElevation != 90.");
+    RTX_OPTION("rtx.atmosphere", float, nightSkyBrightness, 0.002f,
+               "Ambient night-sky brightness from airglow and zodiacal light.");
+    RTX_OPTION("rtx.atmosphere", Vector3, nightSkyColor, Vector3(0.15f, 0.2f, 0.4f),
+               "Base color tint of the night-sky airglow.");
+    // ----- Milky Way controls (fork) -----
+    RTX_OPTION("rtx.atmosphere", bool, milkyWayEnabled, false,
+               "Master toggle for the galactic-band Milky Way effects: increased star density "
+               "inside the band, and the diffuse background dust glow. When disabled, the star "
+               "field is uniformly distributed at the base density across the whole sky. Off by "
+               "default -- stylized opt-in for users who want the band aesthetic.");
+    RTX_OPTION("rtx.atmosphere", float, milkyWayDensityBoost, 0.3f,
+               "Density threshold reduction inside the galactic band. Higher = more (and dimmer) "
+               "stars visible only in the band region, producing the dense-band look.");
+    RTX_OPTION("rtx.atmosphere", float, milkyWayBackgroundBrightness, 0.05f,
+               "Diffuse background glow brightness for the Milky Way band -- represents unresolved "
+               "stars + dust haze. 0 disables the glow. Default 0.05 gives a subtle ambient.");
+    RTX_OPTION("rtx.atmosphere", Vector3, milkyWayBackgroundColor, Vector3(0.5f, 0.55f, 0.75f),
+               "Outer-edge tint for the Milky Way glow (the cool blue periphery away from the "
+               "galactic center, where young stars dominate). Default cool blue (0.5, 0.55, 0.75).");
+    RTX_OPTION("rtx.atmosphere", Vector3, milkyWayCoreColor, Vector3(1.0f, 0.85f, 0.55f),
+               "Bright core tint for the Milky Way glow (warm yellow-cream toward the galactic "
+               "center where stellar density peaks). Default warm cream (1.0, 0.85, 0.55).");
+    RTX_OPTION("rtx.atmosphere", Vector3, milkyWayDustColor, Vector3(0.15f, 0.08f, 0.05f),
+               "Dust-lane tint for the Milky Way glow (dark red-brown patches that occlude the "
+               "bright band, mirroring interstellar dust clouds). Default dark red-brown.");
+    RTX_OPTION("rtx.atmosphere", float, milkyWayDustAmount, 0.6f,
+               "How strongly dust-lane patches darken the Milky Way glow. 0 = no dust (smooth "
+               "uniform band), 1 = full dust contrast. Default 0.6.");
+
+    RTX_OPTION("rtx.atmosphere", float, starPsfSharpness, 20.0f,
+               "PSF Gaussian exponent for procedural stars. Controls the per-star spread "
+               "in cube-grid-cell space (gridScale=400 -> 13.5 arcmin/cell). Lower = wider "
+               "softer stars; higher = sharper pinpoints. At 1080p/90 deg FOV, k=20 yields "
+               "~1-pixel-FWHM (anti-aliased), k=800 yields ~0.08-pixel-FWHM (severe sub-"
+               "pixel flicker on camera motion). 8-30 is the useful range for typical "
+               "render resolutions; reduce starBrightness if widening the PSF makes stars "
+               "too bright overall.");
+    RTX_OPTION("rtx.atmosphere", float, starCloudExtinctionPower, 2.5f,
+               "Power exponent applied to cloud view-transmittance when extincting stars. "
+               "Stars are HDR point sources; standard alpha compositing (T^1) leaves bright "
+               "pinpoints visible through cumulus cores. Raising to 2.5 makes stars die as "
+               "T^2.5, well below cloud body brightness at typical T<0.1 cores while leaving "
+               "clear sky (T=1) unaffected. Lower = stars survive thicker clouds; 1.0 = no "
+               "extra extinction (pure standard composite).");
+    RTX_OPTION("rtx.atmosphere", float, starAmbientCouplingStrength, 0.25f,
+               "Coupling strength of starlight/airglow into the cloud-march nightLight term "
+               "(O(1) knob; the sub-0.01 night-radiance scale is folded into the internal "
+               "kStarCloudCoupling constant in the shader). Adds a faint per-ray ambient based "
+               "on (nightSkyColor * starBrightness * this) so cloud bodies lift slightly under "
+               "starry skies. Default 0.25 = user-tested night level; higher brightens, 0 "
+               "disables the coupling. This is the largest uniform night cloud term, so lower "
+               "it first if night clouds glow.");
+
+    // ----- Per-moon parameters (fork) -----
+    // MAX_MOONS in atmosphere_args.h must equal the number of DECLARE_MOON_OPTIONS
+    // invocations below. Default state: all moons disabled - opt-in via game plugin
+    // or rtx.conf. Pose fields (elevation/rotation/phase) are game-drivable per-frame
+    // but also persist when saved (last writer wins during a session; cold start uses
+    // the saved value until any plugin push lands).
+#define DECLARE_MOON_OPTIONS(N)                                                                 \
+    RTX_OPTION("rtx.atmosphere.moon" #N, bool, enabled##N, false,                               \
+               "Enable moon " #N " rendering.");                                                \
+    RTX_OPTION("rtx.atmosphere.moon" #N, float, angularRadius##N, 3.5f,                         \
+               "Moon " #N " angular diameter in degrees.");                                     \
+    RTX_OPTION("rtx.atmosphere.moon" #N, float, brightness##N, 1.0f,                            \
+               "Moon " #N " brightness multiplier. Default 1.0 = physical neutral; "            \
+               ">1 brightens for stylized scenes (e.g. 4.0 reproduces pre-Phase-2 look).");     \
+    RTX_OPTION("rtx.atmosphere.moon" #N, Vector3, color##N, Vector3(0.12f, 0.12f, 0.12f),       \
+               "Moon " #N " surface albedo. Default (0.12, 0.12, 0.12) ≈ Earth's lunar Bond "   \
+               "albedo; raise per-channel for tinted moons (blood-red, sulfur-yellow, etc.).");\
+    RTX_OPTION("rtx.atmosphere.moon" #N, uint32_t, surfaceStyle##N, 0u,                         \
+               "Moon " #N " surface preset: 0 = Rocky, 1 = Volcanic.");                         \
+    RTX_OPTION("rtx.atmosphere.moon" #N, float, craterDensity##N, 1.0f,                         \
+               "Moon " #N " crater density multiplier [0,1].");                                 \
+    RTX_OPTION("rtx.atmosphere.moon" #N, float, surfaceContrast##N, 1.0f,                       \
+               "Moon " #N " surface light/dark contrast multiplier.");                          \
+    RTX_OPTION("rtx.atmosphere.moon" #N, float, surfaceNoiseScale##N, 1.0f,                     \
+               "Moon " #N " surface feature size multiplier.");                                 \
+    RTX_OPTION("rtx.atmosphere.moon" #N, float, darkSideBrightness##N, 0.005f,                  \
+               "Moon " #N " dark-side brightness as fraction of lit side.");                    \
+    RTX_OPTION("rtx.atmosphere.moon" #N, float, roughnessAmount##N, 1.0f,                       \
+               "Moon " #N " micro-detail surface roughness amplitude.");                        \
+    RTX_OPTION("rtx.atmosphere.moon" #N, float, elevation##N, 45.0f,                            \
+               "Moon " #N " elevation in degrees. Game-drivable per-frame; persists when saved unless overridden by a runtime push."); \
+    RTX_OPTION("rtx.atmosphere.moon" #N, float, rotation##N, 90.0f,                             \
+               "Moon " #N " rotation in degrees. Game-drivable per-frame; persists when saved unless overridden by a runtime push."); \
+    RTX_OPTION("rtx.atmosphere.moon" #N, float, phase##N, 0.5f,                                 \
+               "Moon " #N " phase [0,1]. Game-drivable per-frame; persists when saved unless overridden by a runtime push.")
+
+    DECLARE_MOON_OPTIONS(0);
+    DECLARE_MOON_OPTIONS(1);
+    DECLARE_MOON_OPTIONS(2);
+    DECLARE_MOON_OPTIONS(3);
+#undef DECLARE_MOON_OPTIONS
+
+    // ----- Weather preset declarations (fork, 2026-05-08) -----
+    // 348 RTX_OPTIONs: 12 presets x 29 fields under rtx.weather.preset.<name>.
+    // (Buckets: 19 cloud + 3 atmosphere + 3 sky/moon mood + 4 volumetric.)
+    // Neutral defaults here; per-archetype tuning lands in a follow-up commit.
+    // Getter form: RtxOptions::clear_cloudDensity(), etc.
+    // See src/dxvk/rtx_render/rtx_fork_weather.h for macro definitions.
+    DECLARE_ALL_WEATHER_PRESETS();
+#undef DECLARE_ALL_WEATHER_PRESETS
+#undef DECLARE_WEATHER_PRESET
+#undef WEATHER_PRESET_RTX_OPTION_FOR
+#undef WEATHER_PRESET_BIND_clear
+#undef WEATHER_PRESET_BIND_partlyCloudy
+#undef WEATHER_PRESET_BIND_overcast
+#undef WEATHER_PRESET_BIND_hazy
+#undef WEATHER_PRESET_BIND_foggy
+#undef WEATHER_PRESET_BIND_drizzle
+#undef WEATHER_PRESET_BIND_rainstorm
+#undef WEATHER_PRESET_BIND_thunderstorm
+#undef WEATHER_PRESET_BIND_snow
+#undef WEATHER_PRESET_BIND_blizzard
+#undef WEATHER_PRESET_BIND_sandstorm
+#undef WEATHER_PRESET_BIND_smoggy
+    // NOTE: WEATHER_PRESET_FIELD_LIST is intentionally NOT undef'd here -
+    // Task 2 consumes it to declare WeatherSnapshot struct members.
+
+    // ----- Moon NEE / atmospheric-coupling strengths (fork) -----
+    RTX_OPTION("rtx.atmosphere", float, moonNeeStrength, 1.0f,
+               "World-side master multiplier on direct moon lighting (surface NEE + clouds + future volumetric). "
+               "0 = moon does not light the world; 1 = default physical-baseline magnitude; "
+               ">1 = brighten across all world-side paths simultaneously. Per-path fine-tuning available "
+               "via surfaceMoonBrightness / cloudMoonBrightness / haloMoonBrightness.");
+    RTX_OPTION("rtx.atmosphere", float, moonAtmosphericCouplingStrength, 1.0f,
+               "Sky-side multiplier on the moon's contribution to atmospheric scattering. "
+               "0 = no blue-dome around the moon (sky stays pure black); 1 = default physical-baseline; "
+               ">1 = exaggerated for stylized scenes.");
+
+    // ----- Sun/moon as real distant lights (fork — 2026-06-21) -----
+    // Physical-atmosphere mode injects the sun (and each enabled, above-horizon
+    // moon) as real Remix RtDistantLight sources driven by the atmosphere model,
+    // so they flow through the standard RTXDI/NEE path — the sole sun/moon path
+    // in Numos. This makes subsurface scattering, decals, viewmodels, etc.
+    // automatically correct. Cloud-on-terrain shadows are folded per-pixel onto
+    // the real sun in the NEE (integrator_direct.slangh, gated on
+    // cloudVoxelShadowsEnable). The older bespoke evalAtmosphereSunNEE/MoonNEE
+    // shader path was removed 2026-06-21.
+    RTX_OPTION("rtx.atmosphere", float, directionalLightRadianceScale, 1.0f,
+               "Global tuning multiplier on the injected sun/moon distant-light radiance. "
+               "1.0 targets parity with the reference atmosphere NEE magnitude; "
+               "adjust if the real-light sun/moon reads globally too bright or too dim.");
+    RTX_OPTION("rtx.atmosphere", Vector3, sunRadianceTint, Vector3(1.0f, 1.0f, 1.0f),
+               "Per-channel multiplier applied ONLY to the injected sun distant light, not to the moon and not to the sky.\n"
+               "This is the correct place for a game-driven or stylised sun colour/intensity. Do NOT use rtx.atmosphere.sunIlluminance for that: sunIlluminance is the atmosphere's single source illuminant and multiplies the sky's single-scatter and multiscatter radiance, the lit moon, and the sun disc, so driving it to a saturated colour tints the whole sky and driving it to zero (e.g. at night) blacks the atmosphere out entirely - no sky radiance, no skylight, no moon.\n"
+               "Set by DX11_V445 from the game's own sun colour and intensity when rtx.dx11.kenshiSunDrive is on.");
+
+    // ----- Per-path moon stylistic multipliers (fork, Phase 3) -----
+    // These are tonemapper-correction stylistic axes layered on top of the unified
+    // physical irradiance scaffold from Phase 2. Defaults are empirically tuned by
+    // in-game testing on 2026-05-08 against the Fallout: New Vegas test scene at
+    // m.brightness=1.0 (the new physical-neutral default). Set all three to 1.0
+    // for architecturally-pure physical baseline; the shipped defaults represent
+    // the offset between physical-correct and what the FNV tonemapper makes
+    // visually readable.
+    RTX_OPTION("rtx.atmosphere", float, surfaceMoonBrightness, 50.0f,
+               "Per-path stylistic multiplier on surface NEE (ground moonlight). "
+               "Default 50.0 = user-tested baseline for visible ground under FNV tonemapper "
+               "at m.brightness=1.0; 1.0 = physically-pure (very dim under typical tonemappers); "
+               "raise for brighter ground.");
+    RTX_OPTION("rtx.atmosphere", float, cloudMoonBrightness, 0.2f,
+               "Per-path stylistic multiplier on cloud-moon directional lighting + ambient airglow. "
+               "Default 0.2 = user-tested baseline for cloud silver-lining under FNV tonemapper "
+               "at m.brightness=1.0; 1.0 = physically-pure; 0 = no moon-cloud illumination. "
+               "Higher values produce a stronger silver-lining peak on the cloud directly in front "
+               "of the moon.");
+    RTX_OPTION("rtx.atmosphere", float, haloMoonBrightness, 15.0f,
+               "Per-path stylistic multiplier on disk halo Gaussian glow. "
+               "Default 15.0 = user-tested baseline for visible halo glow under FNV tonemapper "
+               "at m.brightness=1.0; 1.0 = physically-pure; 0 = no halo.");
+
+    // ----- Moon cloud-look + halo shape constants (fork, Phase 3 Task 2) -----
+    // Tunable shape parameters for cloud-moon silver-lining contrast and halo glow.
+    // Defaults preserve current calibrated values; exposed for in-game tuning.
+    RTX_OPTION("rtx.atmosphere", float, moonCloudDiffuseGain, 0.10f,
+               "Cloud-moon Lambert diffuse weight controlling off-axis cloud illumination. "
+               "Lower = stronger contrast (off-axis clouds dimmer relative to peak). "
+               "Higher = more uniform cloud lighting. Default 0.10.");
+    RTX_OPTION("rtx.atmosphere", float, moonCloudPhaseGain, 1.0f,
+               "Cloud-moon HG phase weight controlling peak silver-lining intensity. "
+               "Higher = brighter cloud directly in front of moon. Default 0.30.");
+    RTX_OPTION("rtx.atmosphere", float, moonCloudAnisotropy, 0.85f,
+               "Henyey-Greenstein anisotropy for cloud-moon forward scatter. Higher = "
+               "sharper silver-lining peak (concentrated on cloud directly in front of "
+               "moon); lower = softer falloff. Default 0.85.");
+    RTX_OPTION("rtx.atmosphere", float, moonHaloMagnitude, 0.0015f,
+               "Disk halo Gaussian strength multiplier. Tuned alongside haloMoonBrightness; "
+               "use this for the underlying SHAPE strength and haloMoonBrightness for the "
+               "tonemapper-correction multiplier. Default 0.0015.");
+    RTX_OPTION("rtx.atmosphere", float, moonAmbientAirglow, 1.0f,
+               "Ambient airglow per-moon strength contribution to nightLight, as a multiple of "
+               "the calibrated night level (the 0.0015 night-radiance scale is folded into the "
+               "internal kMoonAirglowScale constant in the shader, so this knob is O(1)). The "
+               "cloud volume gets a uniform sky-bounce from each enabled moon scaled by this. "
+               "Default 1.0 = calibrated level.");
+    RTX_OPTION("rtx.atmosphere", float, moonSilverLiningIntensity, 2.0f,
+               "Master multiplier on the combined cloud-moon silver-lining contribution "
+               "(Lambert diffuse + HG phase). Composes with moonCloudDiffuseGain/PhaseGain "
+               "for ratio tuning.");
+    RTX_OPTION("rtx.atmosphere", float, moonHaloGlowStrength, 2.0f,
+               "Master multiplier on the combined moon halo + ambient airglow contribution. "
+               "Composes with moonHaloMagnitude / moonAmbientAirglow for ratio tuning.");
+
+    // Cloud parameters (procedural FBM cloud layer)
+    RTX_OPTION("rtx.atmosphere", bool, cloudEnabled, true, "Enable procedural cloud rendering.");
+    RTX_OPTION("rtx.atmosphere", float, cloudDensity, 1.8f, "Cloud opacity/density multiplier.");
+    RTX_OPTION("rtx.atmosphere", float, cloudAltitude, 1.3f, "Cloud layer altitude in kilometers.");
+    RTX_OPTION("rtx.atmosphere", Vector3, cloudColor, Vector3(0.89f, 0.92f, 1.0f), "Base cloud color (albedo).");
+    RTX_OPTION("rtx.atmosphere", float, cloudWindSpeed, 0.02f, "Cloud drift speed in km/s. Clouds scroll with this velocity.");
+    RTX_OPTION("rtx.atmosphere", float, cloudWindDirection, 45.0f, "Cloud wind direction in degrees (0 = +X, 90 = +Z).");
+    RTX_OPTION("rtx.atmosphere", float, cloudEvolutionSpeed, 0.0015f,
+               "Cloud field-evolution (morph) speed in km/s. Slowly scrolls the base 3D noise "
+               "sample position through the volume — dominated by a vertical scroll through the "
+               "decorrelated, tile-wrapping Y axis — so cloud formations form and dissolve in "
+               "place instead of translating rigidly with the wind. Decorrelated from wind, so it "
+               "also breaks the wind tile-repeat. 0 = field frozen (legacy rigid behavior).");
+    RTX_OPTION("rtx.atmosphere", float, cloudBoilSpeed, 0.004f,
+               "Cloud edge-boil speed in km/s. Scrolls the high-frequency edge-detail tap "
+               "independently of the base shape so cauliflower billows churn and rebuild at the "
+               "silhouette. Only has effect when cloudDetailStrength > 0. 0 = edges frozen.");
+    RTX_OPTION("rtx.atmosphere", float, cloudEvolutionVerticalBias, 0.8f,
+               "Fraction of the cloud field-evolution scroll directed along the volume's vertical "
+               "(Y) axis [0..1]. Higher = more in-place morphing (clouds form/dissolve); lower = "
+               "more lateral sliding. The remainder is split into a fixed diagonal X/Z drift for "
+               "decorrelation.");
+    RTX_OPTION("rtx.atmosphere", float, cloudShadowStrength, 0.5f,
+               "How strongly overcast clouds dim ground and atmosphere lighting [0..1]. "
+               "1.0 = full physical voxel-grid shadow contribution from cloudVoxelShadowsEnable; "
+               "0 = shadows fully muted (voxel grid still runs but its output is mixed away).");
+    // Cloud volumetric / appearance enhancements
+    RTX_OPTION("rtx.atmosphere", uint32_t, cloudViewSamples, 32,
+               "Number of ray-march steps through the cloud slab. Higher = better quality, more cost. Range 1..32.");
+    RTX_OPTION("rtx.atmosphere", float, cloudThickness, 3.05f,
+               "Vertical depth of the cloud slab in km.");
+    RTX_OPTION("rtx.atmosphere", float, cloudCurvature, 0.38f,
+               "Sky-dome curvature for the cloud layer: 0 = real-planet radius "
+               "(nearly flat ceiling), 1 = tight dome (clouds visibly curve down "
+               "to the horizon). Only affects cloud sphere intersections; "
+               "atmospheric scattering still uses the real planet radius.");
+
+    // Volumetric sky-ambient illumination (fork — 2026-05-12)
+    // Feeds the volumetric froxel pass with sky-view-LUT radiance attenuated
+    // by cloud coverage along each hemisphere sample direction. Default-off
+    // ship strategy: skyAmbientStrength=0 means baseline rendering is
+    // unchanged until the user flips this on. See
+    // docs/superpowers/specs/2026-05-12-volumetric-sky-ambient-design.md.
+    RTX_OPTION("rtx.atmosphere", float, cloudSkyAmbientStrength, 0.0f,
+               "Overall strength of the volumetric sky-ambient illumination term "
+               "[0..3]. 0 = feature disabled (baseline rendering). 1 = physical "
+               "baseline. Higher values brighten shadowed fog with sky-tinted "
+               "ambient. Gated on rtx.skyMode = 1 (Numos).");
+    RTX_OPTION("rtx.atmosphere", float, cloudSkyAmbientCloudOcclusionStrength, 1.0f,
+               "Strength of cloud occlusion applied to the volumetric sky-ambient "
+               "term [0..1]. 1 = full physical cloud occlusion (overcast scenes "
+               "have visibly darker volumetric ambient than clear-sky scenes). "
+               "0 = sky ambient ignores cloud cover (debug only — visually "
+               "inverted versus reality).");
+    // Independent scale on the sun's contribution to volumetric in-scattering
+    // (fork — issue #35). rtx.volumetrics.fogSunVisibilityGain multiplies the
+    // whole froxel SH cache at the fog consumer, so it scales the sun AND every
+    // remix scene light together — forcing it low for balanced scene lights
+    // leaves daytime sun-fog too weak. This knob scales ONLY the atmosphere sun
+    // term, applied where it is added to the SH in volume_integrator.slangh, so
+    // sun-fog can be boosted without over-brightening scene-light fog. Default
+    // 1.0 leaves the sun's contribution unchanged (bit-identical baseline).
+    RTX_OPTION_ARGS("rtx.atmosphere", float, atmosphereSunVolumetricRadianceScale, 1.0f,
+               "Independent multiplier on the physical sun's contribution to "
+               "volumetric fog in-scattering. Unlike rtx.volumetrics.fogSunVisibilityGain "
+               "(which scales the whole froxel cache, sun + all scene lights), this "
+               "affects only the atmosphere sun term. Gated on rtx.skyMode = 1 (Numos). "
+               "Default 1.0 = physical sun contribution unchanged.",
+               args.minValue = 0.0f, args.maxValue = 50.0f);
+
+    // Wrenninge / Hillaire (Frostbite 2016) multi-scatter approximation for the
+    // sun-cloud interaction. Replaces the prior flat-Lambert + single-HG approximation
+    // with a sum of N octaves (each with reduced energy, extinction and phase
+    // asymmetry) plus an isotropic deep-scatter floor — collectively the
+    // "milky-bright bottom" look real cumulus has when viewed from below.
+    RTX_OPTION("rtx.atmosphere", uint32_t, cloudMultiScatterOctaves, 3,
+               "Number of Wrenninge multi-scatter octaves summed per cloud sample. "
+               "3 is the standard cost/quality tradeoff. 1 disables multi-scatter "
+               "(single direct anisotropic term only). Range clamped to 1..4 in-shader.");
+
+    // Master multiplier on the Nubis Cubed sigma_ms remap (page 137 of the
+    // Nubis Cubed 2023 paper). Scales the per-sample multi-scatter sigma
+    // before it enters M = dim_profile * exp(-sigma_ms * D_sun). At 1.0 the
+    // paper baseline is unchanged; raise to brighten cumulus bottoms (more
+    // multi-scatter), lower to flatten lighting. The 4 individual sigma_ms
+    // sub-knobs (cloudMsSigmaShallow/Deep, cloudMsSunDotMax, cloudMsSdfDepth)
+    // remain accessible via user.conf for power tuning.
+    RTX_OPTION("rtx.atmosphere", float, cloudMsScale, 1.0f,
+               "Multi-scatter strength multiplier on the Nubis Cubed sigma_ms term [0..2]. "
+               "1.0 = paper baseline; higher brightens cumulus bottoms, lower flattens.");
+
+    // Cloud spatial variation (Nubis-style — spec 2026-05-06)
+    RTX_OPTION("rtx.atmosphere", float, cloudTypeMean, 0.5f,
+               "Mean cloud type across the sky [0,1]: 0=stratus, 0.5=stratocumulus, 1=cumulus.");
+    RTX_OPTION("rtx.atmosphere", float, cloudTypeSpread, 0.2f,
+               "Spatial variation amplitude for cloud type [0,1]. 0=uniform, 1=full range across the sky.");
+    RTX_OPTION("rtx.atmosphere", float, cloudTypeNoiseScale, 0.0034f,
+               "Region size frequency for type noise. Numerically smaller = larger spatial features. "
+               "Capped at 0.0034 in the UI because faster variation puts visible 2D-noise cell "
+               "structure at sub-cumulus scales (regular grid of cumulus blobs).");
+    RTX_OPTION("rtx.atmosphere", float, cloudCoverageMean, 0.64f,
+               "Mean cloud coverage across the sky [0,1]: 0=clear, 1=overcast.");
+    RTX_OPTION("rtx.atmosphere", float, cloudCoverageSpread, 0.16f,
+               "Spatial variation amplitude for coverage [0,1]. 0=uniform, 1=full range.");
+    RTX_OPTION("rtx.atmosphere", float, cloudCoverageNoiseScale, 0.0033f,
+               "Region size frequency for coverage noise. Independent from type noise scale.");
+    RTX_OPTION("rtx.atmosphere", float, cloudAnvilBias, 0.3f,
+               "Cumulus top inflation strength [0,1]. 0=flat tops, 1=fully spread mushroom-cap anvils.");
+    RTX_OPTION("rtx.atmosphere", float, cloudNoiseTileKm, 12.0f,
+               "World-space tile period (km) for the prebaked 3D cloud noise texture. "
+               "Smaller = more visible repetition; larger = lower-frequency cloud detail. "
+               "Default 12.0; viable range 6-24. Re-bakes the cloud noise volume live on change.");
+    // Hex de-tiling (fork — 2026-06-11, de-tile rework). Root-cause fix for
+    // the prebaked noise volume's periodic repeat: a stochastic
+    // triangle-lattice randomization (Heitz & Neyret 2018 variance-preserving
+    // blending) destroys the tile period at the source while preserving the
+    // field's statistics. Replaced the former anti-tile domain warp
+    // (cloudNoiseWarpStrength), removed once this was validated in-game.
+    RTX_OPTION("rtx.atmosphere", bool, cloudHexTilingEnable, true,
+               "Stochastically randomize the cloud noise tiling on a "
+               "triangle lattice so the 12 km texture repeat can never "
+               "show, with statistics-preserving blending (the cloud look "
+               "is unchanged). Disable for the legacy periodic field "
+               "(visible repetition at the tile period).");
+    RTX_OPTION("rtx.atmosphere", float, cloudNoiseBaseFreqScale, 1.0f,
+               "Multiplier on the cloud noise bake's base + detail FBM "
+               "frequencies [0.25..4]. 1.0 = legacy bake. Raise for "
+               "smaller/busier cloud features, lower for larger ones. "
+               "Re-bakes the noise volume live on change.");
+
+    // Per-column cloud model (fork — 2026-06-11, column-shaping rework; the
+    // legacy global-slab alternative was removed 2026-06-19 and the column
+    // model is now unconditional). Root-cause fix for the "stacked separated
+    // layers" read: the old global-slab path keyed every vertical shaping
+    // signal (density envelope, coverage-threshold scale, anvil pow, dim
+    // profile, bottom darkening) on the GLOBAL slab height fraction — one
+    // vertical recipe pinned to absolute altitude across the whole sky — while
+    // the thresholded 3D noise placed mass independently per altitude (stacked
+    // disconnected puffs in a column). The column model derives a per-column
+    // cloud base/top from a baked 2D placement map (cluster field, top jitter,
+    // base lift) and re-keys all vertical shaping + the Nubis lighting proxies
+    // on each cloud's OWN normalized height.
+    RTX_OPTION("rtx.atmosphere", float, cloudCellSizeKm, 2.0f,
+               "Average cloud-cluster footprint in km [0.5..6] for the "
+               "placement map bake. Smaller = many small clouds; larger = "
+               "fewer, broader banks. Re-bakes the placement map live on "
+               "change (the effective value snaps so an integer number of "
+               "clusters fits the noise tile).");
+    RTX_OPTION("rtx.atmosphere", float, cloudColumnTopVariation, 0.45f,
+               "Per-cloud tower-height jitter [0..1]. 0 = all cloud tops at "
+               "one altitude (flat deck); higher = a varied skyline. "
+               "Applies live.");
+    RTX_OPTION("rtx.atmosphere", float, cloudColumnTopShape, 0.6f,
+               "Exponent mapping column presence to cloud-top height "
+               "[0.1..2]. Low = thin cluster edges still tower (blockier); "
+               "high = only dense cores rise (domed tops, feathered "
+               "edges). Applies live.");
+    RTX_OPTION("rtx.atmosphere", float, cloudColumnBaseVariation, 0.12f,
+               "Max local cloud-base lift as a fraction of the layer depth "
+               "[0..0.4]. 0 = machined-flat cloud ceiling; higher = gently "
+               "undulating bases. Applies live.");
+    RTX_OPTION("rtx.atmosphere", float, cloudColumnFeather, 0.35f,
+               "Coverage-remap feather band at cloud-cluster edges "
+               "[0.05..1]. Narrow = crisp solid-cored clouds; wide = soft "
+               "wispy transitions. Applies live.");
+    // Adaptive march sampling (fork — 2026-06-12). A fixed step COUNT
+    // across a slab span that varies ~4 km (zenith) to 50+ km (horizon
+    // through the curved shell) undersamples horizon rays — ~1.6 km steps
+    // against ~2 km cloud features — and the aliasing reads as soft
+    // horizontal banding concentrated toward the horizon. Hold a target
+    // step LENGTH instead; the count floors at cloudViewSamples and caps
+    // at cloudViewSamplesMax.
+    RTX_OPTION("rtx.atmosphere", float, cloudViewStepKm, 0.1f,
+               "Distance between cloud samples along each view ray, in km "
+               "[0.1..1]. Fixes the horizontal banding near the horizon "
+               "(sightlines there cross 50+ km of cloud layer, which the "
+               "legacy fixed 32-sample march could not resolve). "
+               "PERFORMANCE: cost scales with samples per ray — overhead "
+               "views are unchanged, horizon-heavy views can cost up to "
+               "cloudViewSamplesMax/32 times more cloud time (2x at "
+               "defaults). Raise the spacing or lower the cap to trade "
+               "quality for speed; 0 = legacy fixed count (banding "
+               "returns). Applies live.");
+    RTX_OPTION("rtx.atmosphere", uint32_t, cloudViewSamplesMax, 64,
+               "Hard cap on cloud samples per ray [32..256] — the "
+               "performance governor for cloudViewStepKm. 64 resolves the "
+               "default spacing out to ~6 km of cloud span; lower costs "
+               "less but lets some banding back in at the far horizon. "
+               "32 = legacy cost ceiling. Applies live.");
+    RTX_OPTION("rtx.atmosphere", float, cloudUndersideLightSigma, 0.12f,
+               "Extinction of the light filtering down through each cloud, "
+               "per km of overlying water [0..0.5]. Drives the analytic "
+               "per-column underside light field: brightness varies "
+               "continuously with the water above every point (dark cores, "
+               "bright thin spots, smooth gradients) instead of one flat-lit "
+               "sheet. Higher = darker, more dramatic undersides; 0 = "
+               "underside darkening off (flat-lit base). Overall strength and "
+               "the sun-elevation fade are set by Bottom Darkening. Applies "
+               "live.");
+
+    // Edge detail (fork — 2026-06-10, rev 3 — additive). Concentrates
+    // high-frequency detail at cloud edges: a second, higher-frequency tap of
+    // the prebaked noise volume grows billows OUTWARD from the density field
+    // where it is weak (silhouettes), leaving saturated cores untouched.
+    // Nubis detail remap, bias mirrored across the field mean for growth.
+    RTX_OPTION("rtx.atmosphere", float, cloudDetailStrength, 0.6f,
+               "Edge detail strength [0..1]. Grows high-frequency "
+               "cauliflower billows OUTWARD from cloud EDGES while leaving dense "
+               "cores solid. 0 = off (smooth legacy silhouettes). Note: the "
+               "added billows thicken the silhouette band slightly, so high "
+               "values read as marginally higher coverage.");
+    RTX_OPTION("rtx.atmosphere", float, cloudDetailScale, 4.3f,
+               "Edge-detail noise frequency as a multiple of the base cloud "
+               "noise frequency (cloudNoiseTileKm). Higher = finer edge "
+               "filigree; lower = chunkier edge billows. Non-integer values "
+               "keep the combined base+detail repeat period long. Default 4.3, "
+               "viable range 2-12. Applies live (no re-bake).");
+
+    // Cloud-edge / halo tuning (fork — 2026-06-13). Two live knobs for the soft
+    // fringe around cloud silhouettes: cloudEdgeSoftness sets how wide the
+    // coverage-gate transition band is (the EXTENT of the skirt), and
+    // cloudEdgeAmbientFade fades the horizon-tinted ambient on thin samples (the
+    // discolored COLOR of the skirt). Both apply live, no re-bake.
+    RTX_OPTION("rtx.atmosphere", float, cloudEdgeSoftness, 0.15f,
+               "Cloud silhouette softness [0.02..0.4] — width of the view-path "
+               "coverage-gate transition band. Lower = crisper edges and a "
+               "tighter silhouette; higher = softer edges but a broader faint "
+               "skirt of sub-threshold cloud that can read as a halo. The "
+               "shadow/optical-depth gate is held at 0.25 so self-shadow bakes "
+               "are unaffected. Applies live.");
+    RTX_OPTION("rtx.atmosphere", float, cloudEdgeAmbientFade, 0.15f,
+               "Thin-edge ambient fade [0..0.5]. Sub-threshold skirt samples are "
+               "ambient-dominated, and the ambient is sampled at the horizon (a "
+               "dirty grey-brown), so the soft fringe can read as discolored "
+               "haze. This fades the ambient term toward 0 below the given "
+               "(gated) density, so the faintest edge samples fall to transparent "
+               "instead of horizon-tinted. Direct/moon/night light is untouched, "
+               "so backlit edges keep their glow. 0 = off. Applies live.");
+
+    // Vertical coherence (fork — 2026-06-10, rev 2; EXPERIMENTAL, default
+    // off). Blends the 3D noise sample toward a fixed-Y slice so cloud
+    // cross-sections stay correlated with altitude (connected towers
+    // instead of stacked blobs). Rev 1 (Y-domain stretch) beaded the small
+    // octaves into stacked puffs; rev 2 reads as vertical smearing at
+    // higher values — neither look shipped. Default 1.0 = bit-exact
+    // identity (feature inert) until the towering-cumulus problem is
+    // solved properly, likely at the sky-system level.
+    RTX_OPTION("rtx.atmosphere", float, cloudVerticalStretch, 1.0f,
+               "EXPERIMENTAL vertical connectedness of cloud bodies [1..3]. "
+               "1 = fully 3D noise (default; feature inert); higher anchors "
+               "clouds to a stable vertical footprint so cumulus reads as "
+               "connected towers — but currently smears vertically at high "
+               "values. Applies live; also reshapes the baked self-shadow "
+               "grids so lighting tracks the shapes.");
+
+    // Underside darkening strength (fork — 2026-06-10; reworked 2026-06-19 to
+    // scale the realistic analytic underside light field instead of a constant
+    // gradient). Modulates the Nubis Cubed multi-scatter + ambient terms so
+    // cumulus undersides read darker than tops. The direct-beam term is exempt
+    // so backlit silver linings are unaffected, and the effect fades out as the
+    // sun nears the horizon so low-sun bases light up (sunset glow).
+    RTX_OPTION("rtx.atmosphere", float, cloudBottomDarkening, 1.0f,
+               "Strength of the cloud-underside darkening [0..1]. Scales the "
+               "analytic per-column light field (shaped by Underside Shading) "
+               "applied to the multi-scatter and ambient terms; the direct sun "
+               "beam (silver lining) is unaffected. The darkening is strongest "
+               "with the sun overhead and fades out toward the horizon, where "
+               "the low sun rakes under the deck and lights the bases (sunset "
+               "glow). 0 = off (uniformly lit undersides).");
+    RTX_OPTION("rtx.atmosphere", float, cloudSkyAmbientFill, 0.5f,
+               "How strongly cloud undersides pick up the open sky around them "
+               "[0..1]. Adds a sky-dome fill - the overhead sky color, "
+               "bypassing the bottom-darkening since that skylight reaches the "
+               "base from below/around rather than through the cloud. Lifts "
+               "gloomy undersides under a bright daytime sky and tints them with "
+               "the actual sky color; naturally fades at sunset (the overhead "
+               "sky is dim then). Higher = brighter, more sky-colored bases; "
+               "0 = off (legacy, undersides ignore the open sky). Applies live.");
+    RTX_OPTION("rtx.atmosphere", float, cloudSkyBleedStrength, 0.15f,
+               "How strongly the clouds tint the surrounding sky [0..1+]. The "
+               "sky picks up cloud-colored inscatter sampled from the (smooth) "
+               "cloud field, so an orange sunset deck warms the blue gaps "
+               "between clouds and a grey overcast greys the sky around it, "
+               "instead of clouds and sky reading as two separate layers. "
+               "Strongest next to clouds, fading to nothing in open sky far "
+               "from any. Higher = more cloud color in the sky; 0 = off "
+               "(legacy, sky ignores clouds). Needs the secondary cloud LUT "
+               "(on by default). Applies live.");
+
+    // Worley carve (Schneider15 — slide 17 of RDR2 SIGGRAPH 2019).
+    // These knobs control how chunky / cell-shaped the prebaked cloud noise is.
+    // Changing any of them (or cloudNoiseTileKm) re-bakes the 256^3 noise volume
+    // live via RtxAtmosphere::needsCloudNoiseRebake — no relaunch needed, though
+    // dragging a slider re-bakes each frame the value changes and may hitch.
+    RTX_OPTION("rtx.atmosphere", float, cloudWorleyCarveStrength, 0.6f,
+               "Schneider15 cauliflower carve strength. The Worley FBM is "
+               "subtracted from the Perlin base in the cloud noise bake to "
+               "produce chunky 3D cell silhouettes. 0 = pure Perlin (smooth "
+               "blobs, flat pancake look); 1.0 = aggressive carve (crushed "
+               "base shape). 0.6 default. Re-bakes the cloud noise volume live on change.");
+    RTX_OPTION("rtx.atmosphere", float, cloudWorleyFrequency, 1.0f,
+               "Worley feature-point density, cycles per km. Smaller = larger "
+               "cumulus cells (boulder-sized chunks); larger = smaller cells "
+               "(cauliflower bumps). Default 1.0 targets cumulus-cell scale. "
+               "Re-bakes the cloud noise volume live on change.");
+    RTX_OPTION("rtx.atmosphere", uint32_t, cloudWorleyOctaves, 3,
+               "Worley FBM octave count (clamped 1..4 in the bake shader). "
+               "Higher = more sub-scale detail on cell boundaries. Default 3. "
+               "Re-bakes the cloud noise volume live on change.");
+
+    // Cloud aerial perspective (fork — 2026-05-16). Distant cloud samples
+    // attenuate exponentially with march distance, mimicking real atmospheric
+    // extinction. Without this, horizon-grazing rays integrate through ~100 km
+    // of cloud volume and produce a solid white wall at the horizon. Live-
+    // tunable.
+    RTX_OPTION("rtx.atmosphere", float, cloudAerialHazePerKm, 0.05f,
+               "Per-km haze extinction applied to cloud RADIANCE (effect A of "
+               "the aerial-perspective fork). Dims distant cloud samples "
+               "toward atmospheric color so they read as 'softer / duller "
+               "with distance.' Visual softness control - does NOT prevent "
+               "the horizon white wall by itself. 0 = no haze. Default 0.05.");
+    RTX_OPTION("rtx.atmosphere", float, cloudAerialFadePerKm, 0.15f,
+               "Per-km fade extinction applied to cloud ALPHA accumulation "
+               "(effect B of the aerial-perspective fork). Distant samples "
+               "stop piling up extinction so horizon-grazing rays don't form "
+               "a solid white wall. Does NOT affect cloud appearance close to "
+               "camera. 0 = no fade (legacy white-wall behavior). Default 0.05.");
+
+    // Nubis Cubed 2023 lighting (fork — 2026-05-12).
+    // Tuning knobs for the per-sample lighting equations in cloud_render.comp.slang.
+    // The paper's magic constants for the sigma_ms remap (page 137) are unexplained,
+    // so all six surface as ImGui knobs for in-game tuning. Defaults pulled from
+    // paper renders + the 2026-05-12 spec.
+    RTX_OPTION("rtx.atmosphere", float, cloudPhaseG1, 0.8f,
+               "Primary HG asymmetry; strong forward-scatter, drives silver lining at backlit edges.");
+    RTX_OPTION("rtx.atmosphere", float, cloudPhaseG2, 0.3f,
+               "Secondary HG asymmetry; mild forward-scatter, drives broader in-scatter envelope.");
+    // Energy conservation of the direct dual-lobe (fork — 2026-06-19). The legacy
+    // direct term summed two full-amplitude phase lobes (T_primary*HG1 + M*HG2),
+    // whose combined phase integrated to up to ~2 over the sphere — the cloud
+    // scattered up to ~2x the energy a single event can redistribute, brightest
+    // exactly at the sunlit edge, which is why lit clouds out-brightened the
+    // physical sky LUT regardless of the ambient sliders. cloudEnergyConserve
+    // lerps that additive sum toward a convex (1-w)*HG1 + w*HG2 blend whose phase
+    // integrates to exactly 1; cloudMsLobeWeight is w.
+    RTX_OPTION("rtx.atmosphere", float, cloudEnergyConserve, 1.0f,
+               "[0,1] Energy conservation of the cloud direct lighting. 0 = legacy additive "
+               "dual-lobe (phase integral up to 2, brighter-than-sky look). 1 = convex blend "
+               "(phase integral 1, energy-conserving). Set 0 to A/B against the old look.");
+    RTX_OPTION("rtx.atmosphere", float, cloudMsLobeWeight, 0.5f,
+               "[0,1] Convex weight between the forward single-scatter lobe (silver lining, "
+               "weight 1-w) and the broader multi-scatter body fill (weight w) when "
+               "cloudEnergyConserve > 0. Higher = flatter/softer body, dimmer silver lining.");
+    RTX_OPTION("rtx.atmosphere", float, cloudMsSunDotMax, 0.9f,
+               "Nubis Cubed sigma_ms remap upper bound on sun_dot. Lower = wider 'shallow extinction' zone.");
+    RTX_OPTION("rtx.atmosphere", float, cloudMsSigmaShallow, 0.25f,
+               "Nubis Cubed sigma_ms value at cloud surface / shallow penetration.");
+    RTX_OPTION("rtx.atmosphere", float, cloudMsSigmaDeep, 0.05f,
+               "Nubis Cubed sigma_ms value deep inside cloud (sdf <= -cloudMsSdfDepth).");
+    RTX_OPTION("rtx.atmosphere", float, cloudMsSdfDepth, 128.0f,
+               "Nubis Cubed SDF depth in meters at which sigma_ms saturates to deep value.");
+
+    // Sunset ambient warm/cool blend (fork — 2026-05-21).
+    // At low sun, the ambient sky color used for cloud volumetric scattering is
+    // sampled both in the sun direction (warm) and the anti-sun horizon (cool),
+    // and per-sample blended by the D_sun voxel grid so shadowed cloud interiors
+    // pick up the cool side while sun-lit edges stay warm. The effect smoothly
+    // ramps off above cloudSunsetAmbientRampHighSun so daytime clouds are
+    // unaffected. cloudSunsetAmbientStrength = 0 disables the feature entirely.
+    RTX_OPTION("rtx.atmosphere", float, cloudSunsetAmbientStrength, 1.0f,
+               "Master strength of the sunset warm/cool ambient blend. 0 = feature off, "
+               "1 = baseline contrast, >1 = exaggerated cool side.");
+    RTX_OPTION("rtx.atmosphere", float, cloudSunsetAmbientReachInvKm, 1.0f,
+               "How aggressively D_sun (self-shadow optical depth, km) penetrates the cool blend. "
+               "Higher = clouds turn cool faster with shadow depth.");
+    RTX_OPTION("rtx.atmosphere", float, cloudSunsetAmbientRampHighSun, 0.4f,
+               "sin(sun elevation) at which the sunset ambient effect smooth-fades to zero. "
+               "Default 0.4 (~24 degrees above horizon). Effect is at full strength when sun is at the horizon.");
+
+    // Half-res cloud render RT (fork — 2026-06-11, perf). The visible cloud
+    // march runs once per cloud-RT pixel; clouds are soft, low-frequency
+    // content, so marching at a fraction of the DLSS-input resolution and
+    // bilinearly upsampling at the sky-miss composite cuts the pass cost
+    // by ~1/scale^2 with little visible difference. The temporal smoothing
+    // path runs AFTER the upsample, at full downscale resolution, so its
+    // stabilization is unaffected.
+    RTX_OPTION("rtx.atmosphere", float, cloudRenderResolutionScale, 0.5f,
+               "Resolution scale of the cloud render target relative to the "
+               "internal (DLSS-input) resolution [0.25..1]. 0.5 = quarter the "
+               "pixels (~4x cheaper cloud march); 1.0 = native (legacy, "
+               "bit-exact). Applies on the next frame; live-tunable.");
+
+    // Secondary-ray cloud LUT (fork — 2026-06-10, perf). Every indirect /
+    // PSR / reflection ray that reaches sky-miss would otherwise run a full
+    // per-ray cloud march — a hidden per-ray cost rivaling the visible cloud
+    // pass. With this on, those rays sample a 256x128 dome LUT baked once per
+    // frame with the same Nubis Cubed march the visible clouds use
+    // (cloud_secondary_lut.comp.slang). With it off, secondary sky-miss rays
+    // are cloudless.
+    RTX_OPTION("rtx.atmosphere", bool, cloudSecondaryLutEnable, true,
+               "Supply clouds to secondary rays (indirect bounces, PSR, "
+               "reflections) from a small per-frame baked dome LUT instead of a "
+               "per-ray cloud march. Large performance win on cloudy skies, and "
+               "reflected/indirect clouds match the primary Nubis look. Disable "
+               "to make secondary sky-miss rays cloudless.");
+
+    // Cloud voxel-grid re-bake granularity (fork — 2026-06-11, perf). The
+    // D_sun / D_ambient grids re-baked every frame; the perf-bisect freeze
+    // showed a large win with only slowly-accumulating staleness (the bake
+    // inputs — wind scroll, camera position, sun direction — move slowly).
+    // Quantizing those inputs inside a cache key re-bakes once per step of
+    // actual motion instead of once per frame, bounding staleness by the
+    // step. Sun direction shares skyViewRebakeGranularityDeg (same 0.1 deg
+    // perceptual class); this option is the distance step for wind + camera.
+    // Cloud parameter changes and noise-volume re-bakes always force an
+    // immediate grid re-bake.
+    RTX_OPTION("rtx.atmosphere", float, cloudVoxelGridRebakeGranularityKm, 0.1f,
+               "Distance (km) the cloud wind scroll or camera must travel "
+               "before the D_sun/D_ambient cloud lighting grids re-bake. "
+               "Default 0.1 (in-game validated 2026-06-11: ~0.7 ms saved, "
+               "no visible stepping in cloud lighting or terrain shadows). "
+               "0 = legacy: re-bake every frame.");
+
+    // Sky perf bisect toggles (fork — 2026-06-11, diagnostic). The
+    // atmosphere pass runs several per-frame dispatches that no production
+    // option can skip — so frame-time A/B tests (skyMode, cloudEnabled)
+    // mis-attribute their cost. These default-ON toggles let a live ImGui
+    // session bisect the per-dispatch cost: uncheck one, read the
+    // frame-time delta, re-check. Skipping a dispatch leaves its consumer
+    // reading STALE data (frozen clouds / shadows) — diagnostic only, not
+    // a production setting.
+    RTX_OPTION("rtx.atmosphere", bool, debugDispatchCloudVoxelGrids, true,
+               "Diagnostic: dispatch the per-frame D_sun + D_ambient cloud "
+               "voxel-grid bakes (256x256x32 x 8/6 taps each). Uncheck to "
+               "skip both and read the frame-time delta; cloud lighting and "
+               "cumulus terrain shadows freeze at their last state while "
+               "unchecked.");
+    RTX_OPTION("rtx.atmosphere", bool, debugDispatchCloudRender, true,
+               "Diagnostic: dispatch the per-frame screen-space cloud render "
+               "pass. NOTE this pass runs even when cloudRenderRTEnable is "
+               "off, so this toggle is the only way to remove its cost. "
+               "Uncheck to skip; primary-ray clouds freeze in place while "
+               "unchecked.");
+    RTX_OPTION("rtx.atmosphere", bool, debugDispatchCloudSkyTransmittance, true,
+               "Diagnostic: dispatch the per-frame 32x16 cloud-sky-"
+               "transmittance bake (volumetric sky-ambient occlusion). "
+               "Uncheck to skip; expected to be near-free.");
+    RTX_OPTION("rtx.atmosphere", bool, debugDispatchSkyLuts, true,
+               "Diagnostic: run the sky LUT bake cascade (transmittance / "
+               "multiscatter / sky-view). With a continuously-animating "
+               "time-of-day sun the sky-view LUT legitimately re-bakes every "
+               "frame; uncheck to freeze all three LUTs at their last state "
+               "and read the frame-time delta. Sky colors stop tracking the "
+               "sun while unchecked.");
+    RTX_OPTION("rtx.atmosphere", bool, debugEnableSkyMissShading, true,
+               "Diagnostic: run the full evalSkyRadiance miss path. Uncheck "
+               "to return flat grey for every sky-miss ray and read the "
+               "frame-time delta (isolates the per-ray sky shading cost: "
+               "LUT taps, night sky, moons, cloud composite, temporal "
+               "smoothing I/O). Sky renders grey while unchecked.");
+
+    // Sky-view re-bake granularity (fork — 2026-06-11, perf). With a
+    // continuously-animating time-of-day sun, the sky-view LUT re-bakes
+    // every frame because its cache key sees a new sun direction each
+    // frame — bisect-measured as the last reducible chunk of the sky cost,
+    // and an in-game frozen-cascade test confirmed no visual hit from far
+    // sparser re-bakes (the sun moves ~0.1 deg/sec at FNV's default
+    // timescale). Quantizing the sun/moon directions inside the cache key
+    // re-bakes only when they have moved past the granularity step; all
+    // other parameter changes (sliders, presets) still re-bake immediately.
+    RTX_OPTION("rtx.atmosphere", float, skyViewRebakeGranularityDeg, 0.1f,
+               "Angular granularity (degrees) of sun/moon motion that "
+               "triggers a sky-view LUT re-bake. Default 0.1 (in-game "
+               "validated 2026-06-11: ~one re-bake per second of game time "
+               "at default timescale, sky tracks the sun smoothly, objective "
+               "frame-time win). 0 = legacy: re-bake every frame while the "
+               "sun animates. Non-direction parameter changes always "
+               "re-bake immediately.");
+
+    // Split sky-LUT cache keys (fork — 2026-06-11, perf). The three sky LUT
+    // bakes (transmittance / multiscatter / sky-view) were gated by ONE
+    // memcmp over the whole normalized arg struct, with two per-frame
+    // failure modes: the game-driven sidereal starRotation (animated every
+    // frame at night, feeds no LUT bake) re-baked the full cascade every
+    // frame, and a moving time-of-day sun re-baked the heavy transmittance +
+    // multiscatter pair even though neither depends on sun direction.
+    RTX_OPTION("rtx.atmosphere", bool, skyLutCacheKeySplitEnable, true,
+               "Re-bake each atmosphere LUT only when its actual inputs "
+               "change: star-field animation no longer re-bakes any LUT, and "
+               "sun/moon motion re-bakes only the small sky-view LUT instead "
+               "of the full transmittance + multiscatter cascade. No visual "
+               "difference; disable to restore the legacy single-gate "
+               "re-bake behavior for comparison.");
+
+    // Nubis Cubed sky-miss composite gate (fork — 2026-05-12, C5).
+    // When true, the primary-ray sky-miss path samples the AtmosphereCloudRender
+    // RT (written by cloud_render.comp.slang each frame); when false, primary
+    // sky-miss is cloudless. Indirect, PSR, and reflection rays instead use the
+    // secondary dome LUT (cloudSecondaryLutEnable) — the cloud RT is at
+    // primary-ray pixel coordinates, so sampling it for a non-primary ray
+    // direction would return the wrong cloud. Default false; flip after in-game
+    // visual confirmation.
+    RTX_OPTION("rtx.atmosphere", bool, cloudRenderRTEnable, true,
+               "Composite the Nubis Cubed cloud render RT at primary sky-miss. "
+               "When off, primary sky-miss is cloudless. Indirect/PSR/reflection "
+               "rays get clouds from the secondary dome LUT instead. Default on "
+               "as of C7 (2026-05-13) -- in-game validation confirmed Nubis Cubed "
+               "lighting produces the expected perceptual wins across "
+               "day/sunset/night.");
+
+    // Voxel-grid cloud-on-terrain shadows at NEE entry points (fork — 2026-05-12, C6).
+    // When true, sampleAtmosphereSunLight / sampleAtmosphereSunLightVolume apply
+    // a multiplicative ratio correction that replaces the legacy
+    // evalCloudGroundShadow uniform-dimmer with the rich 3D D_sun voxel-grid
+    // lookup (via sampleCloudGroundShadow_OptionB). Terrain shows cumulus-
+    // shaped drifting shadow patches that match cloud positions overhead.
+    // Default false; flip after in-game visual confirmation (C7 ship pass).
+    RTX_OPTION("rtx.atmosphere", bool, cloudVoxelShadowsEnable, true,
+               "Use the D_sun voxel grid for cloud-on-terrain shadows at NEE "
+               "entry points (sampleAtmosphereSunLight + volume variant). "
+               "Replaces the 2D coverage proxy evalCloudGroundShadow for the "
+               "NEE path only. Default on as of C7 (2026-05-13) -- terrain "
+               "now shows cumulus-shaped drifting shadow patches matching "
+               "cloud positions overhead.");
+    RTX_OPTION("rtx.atmosphere", float, cloudShadowMarchStrength, 1.0f,
+               "Beer-Lambert exponent multiplier applied to the D_sun voxel "
+               "grid lookup inside sampleCloudGroundShadow_OptionB. 1.0 = "
+               "physical baseline (transmittance = exp(-OD * density)); higher "
+               "values darken cloud-on-terrain shadows, lower values lighten "
+               "them. Only consumed when cloudVoxelShadowsEnable is on.");
+
+    // Post-denoise shadow-strength knob applied at composite time. The
+    // per-pixel cloud shadow factor written by integrate_direct is in [0, 1],
+    // where 1.0 means "no occlusion" and 0.0 means "fully shadowed". Composite
+    // applies `pow(factor, cloudShadowFactorStrength)` before multiplying it
+    // into the denoised direct radiance. Exponent rather than linear so the
+    // factor=1 (no-cloud) invariant is preserved at any strength value:
+    //   1.0 = unchanged (matches the raw factor from the wire-in)
+    //   > 1 = darker shadows (factor^2 at strength=2 → cumulus pixels at
+    //         factor=0.5 read as 0.25, a 2x deepening)
+    //   < 1 = fainter shadows (factor^0.5 at strength=0.5)
+    // Independent of cloudShadowMarchStrength (which acts pre-denoise inside
+    // the exp(-OD * density * march) call); this is a perception-side knob.
+    RTX_OPTION("rtx.atmosphere", float, cloudShadowFactorStrength, 4.0f,
+               "Post-denoise pow exponent applied to the per-pixel cloud "
+               "shadow factor in composite. 1.0 = unchanged, higher values "
+               "deepen cumulus-on-terrain shadows, lower values fade them. "
+               "Default 4.0 chosen against the FNV reference scene on "
+               "2026-05-19 after the ratio->newShadow simplification — the "
+               "raw newShadow alone reads too faint, strength=4 lands the "
+               "cumulus-shadow contrast in the visible-but-not-aggressive "
+               "range. Lets the shadow strength be tuned independently of "
+               "the bake magnitude (cloudShadowMarchStrength) without re-baking.");
+
+    // cloudShadowIndirectStrength REMOVED (fork — 2026-06-18, was issue #37).
+    // This knob fed a screen-space multiply of the per-pixel cloud shadow factor
+    // onto the primary INDIRECT lobes in composite. It was removed because it
+    // double-counted the cloud occlusion already carried physically by
+    // evalSkyRadiance on indirect rays that escape to the sky, and — being
+    // geometry-blind (the factor projects straight up with no roof knowledge) —
+    // it was the actual root cause of interiors darkening under overcast for
+    // every surface type. See the removal note in composite.comp.slang. The
+    // legitimate outdoor whole-mesh-ambient dimming under a cumulus is preserved
+    // through evalSkyRadiance; no replacement knob is needed.
+
+    // Cloud Height LUT (slide 3 lift — RDR2 SIGGRAPH 2019, fork — 2026-05-15).
+    // 64x128 R8 lookup table indexed by (cloud type slice, height fraction).
+    // Replaces the 3-keypoint procedural trapezoid in cloudTypeProfile() with a
+    // baked curve family — stratus / stratocumulus / cumulus stay close to the
+    // procedural shape so default-on doesn't regress the shipped Nubis Cubed
+    // look, but the high-type end gains an anvil lift and the low-type end can
+    // be re-tuned per weather without rebuilding shaders.
+    RTX_OPTION("rtx.atmosphere", bool, cloudHeightLutEnable, true,
+               "When true, cloud_render.comp.slang samples a 64x128 baked "
+               "height LUT to determine the per-altitude shape modulator "
+               "instead of the procedural cloudTypeProfile trapezoid. The LUT "
+               "is baked once at startup and keyed by (typeSlice, heightFrac). "
+               "The voxel grid bakers still use the procedural curve, so this "
+               "flag affects only the cloud render and secondary-LUT passes.");
+
+    // Two-layer cloud map (slide 1 lift — RDR2 SIGGRAPH 2019, fork — 2026-05-15).
+    // Adds an independent second cloud slab at a higher altitude (cirrus deck
+    // by default) on top of the existing cumulus layer. cloud_render marches
+    // the lower slab first and composites layer 2 onto residual transmittance.
+    // Default off so today's look is preserved bit-for-bit.
+    RTX_OPTION("rtx.atmosphere", bool, cloudLayer2Enable, true,
+               "When true, cloud_render.comp.slang marches a second 'echo' "
+               "cloud deck above the primary slab — the same cloud-slab density "
+               "model at a higher, gapped altitude, marched cheaply (low step "
+               "budget, analytic sun shadow, no moon path). Layer 2 has its own "
+               "altitude / thickness / type / coverage / density-scale / "
+               "noise-seed knobs (the cloudLayer2* options below); the seed "
+               "decorrelates the deck's coverage/type field from layer 1 so it "
+               "reads as a related-but-different cloudscape. Voxel-grid terrain "
+               "shadows + ground-shadow NEE remain layer-1-only.");
+    RTX_OPTION("rtx.atmosphere", float, cloudLayer2Altitude, 5.5f,
+               "Altitude (km) of the layer-2 deck base. The gap between the "
+               "layer-1 top (cloudAltitude + cloudThickness) and this value is "
+               "the clear-sky band separating the two decks.");
+    RTX_OPTION("rtx.atmosphere", float, cloudLayer2Thickness, 2.0f,
+               "Vertical depth (km) of the layer-2 deck.");
+    RTX_OPTION("rtx.atmosphere", float, cloudLayer2TypeMean, 0.6f,
+               "[0,1] mean cloud type for layer 2. Low values (~0.05) sample "
+               "the LUT's stratus-shaped column — appropriate for cirrus.");
+    RTX_OPTION("rtx.atmosphere", float, cloudLayer2CoverageMean, 0.85f,
+               "[0,1] mean coverage for layer 2. Defaults sparser than layer 1 "
+               "so cirrus reads as wispy patches rather than overcast.");
+    RTX_OPTION("rtx.atmosphere", float, cloudLayer2TypeSpread, 1.0f,
+               "[0,1] cloud-type variation for layer 2. Independent of layer 1's spread.");
+    RTX_OPTION("rtx.atmosphere", float, cloudLayer2NoiseSeed, 1000.0f,
+               "Seed offset added to layer 2's 2D coverage/type noise. Layer 2's smoothNoise2D "
+               "hash receives (200/250 + this), producing a fully decorrelated noise pattern at "
+               "the same XZ. 0 = layer 2 shares layer 1's noise pattern exactly. Any non-zero "
+               "value produces decorrelation; the magnitude itself does not matter beyond ~10. "
+               "Default 1000.");
+    RTX_OPTION("rtx.atmosphere", float, cloudLayer2DensityScale, 0.65f,
+               "Per-step density multiplier applied to layer 2 only. Lower "
+               "values keep the echo deck from competing visually with the "
+               "cumulus deck below.");
+    RTX_OPTION("rtx.atmosphere", uint32_t, cloudLayer2StepFloor, 8,
+               "Minimum ray-march steps through the layer-2 echo deck [2..64]. "
+               "The deck is marched more cheaply than layer 1 (which floors at "
+               "cloudViewSamples = 32); this is the deck's own floor, hit on "
+               "short (near-zenith) sightlines. Raise for a smoother deck at "
+               "higher cost. Applies live.");
+    RTX_OPTION("rtx.atmosphere", uint32_t, cloudLayer2StepMax, 32,
+               "Hard cap on layer-2 echo-deck samples per ray [2..128] — the "
+               "deck's performance governor, analogous to cloudViewSamplesMax "
+               "for layer 1. Between the floor and this cap the step count "
+               "follows the cloudViewStepKm step-length target. Applies live.");
+    RTX_OPTION("rtx.atmosphere", Vector3, cloudLayer2Color, Vector3(0.89f, 0.92f, 1.0f),
+               "Base color (albedo) of the layer-2 echo deck, independent of the "
+               "main cloudColor. Defaults to the same near-white so the deck "
+               "matches layer 1 until changed; tint it to differentiate the upper "
+               "deck (e.g. cooler high cirrus). The deck shares all other look "
+               "knobs with layer 1 (phase, multi-scatter, detail, etc.).");
+
+    // TODO (REMIX-656): Remove this once we can transition content to new hash
+    RTX_OPTION("rtx", bool, logLegacyHashReplacementMatches, false, "");
+
+    RTX_OPTION("rtx", FusedWorldViewMode, fusedWorldViewMode, FusedWorldViewMode::None, "Set if game uses a fused World-View transform matrix.");
+
+    RTX_OPTION("rtx", bool, useBuffersDirectly, true, "When enabled Remix will use the incoming vertex buffers directly where possible instead of copying data. Note: setting the d3d11.allowDiscard to False will disable this option.");
+    RTX_OPTION("rtx", bool, alwaysCopyDecalGeometries, true, "When set to True tells the geometry processor to always copy decals geometry. This is an optimization flag to experiment with when rtx.useBuffersDirectly is True.");
+
+    RTX_OPTION("rtx", bool, ignoreLastTextureStage, false, 
+               "Removes the last texture bound to a draw call, when using fixed-function pipeline. Primary textures are untouched.\n"
+               "Might be set to true, if a game applies a lightmap as last shading step, to omit the original lightmap data.");
+
+    RTX_OPTION("rtx.terrain", bool, terrainAsDecalsEnabledIfNoBaker, false, "If terrain baker is disabled, attempt to blend with the decals.");
+    RTX_OPTION("rtx.terrain", bool, terrainAsDecalsAllowOverModulate, false, "Set to true, if it's known that terrain layers with ModulateX2 / ModulateX4 flags do not contain a lighting info, but ModulateX2 / ModulateX4 are used only to blend layers.");
+
+    RTX_OPTION_ARGS("rtx.userBrightness", int, userBrightness, 50, "How bright the final image should be. [0,100] range.",
+                    args.flags = RtxOptionFlags::UserSetting);
+    RTX_OPTION("rtx.userBrightnessEVRange", float, userBrightnessEVRange, 3.f, "The exposure value (EV) range for \'rtx.userBrightness\' slider, i.e. how much of EV there is between 0 and 100 slider values.");
+
+    struct Eye {
+      RTX_OPTION("rtx.eye", bool, showOptions, false, "Show eye options in the developer menu.");
+      RTX_OPTION("rtx.eye", bool, enable, false, "Enable shader code for eye drawing (eyeball normals, iris blending).");
+      RTX_OPTION("rtx.eye", bool, assumeViewTexgenModeAsEye, true, 
+                 "Used to detect eyes and its vectors, by assuming that a draw call with D3DTSS_TCI_CAMERASPACEPOSITION and specific texture transform is an eye draw call.");
+      RTX_OPTION("rtx.eye", float, eyeballSphereOffset, 0.18F,
+                 "How much to offset a sphere origin when calculating the eye normals on Whites. "
+                 "The larger the value, the more pronounced the ambient shadowing is on an eyeball, to better ground the eyes on a face.");
+      RTX_OPTION("rtx.eye", float, corneaSphereOffset, 0.1F,
+                 "How much to offset a sphere origin when calculating the eye normals on Cornea. "
+                 "Positive values make the eye cornea appear more spherical. Negative values - more flat.");
+      RTX_OPTION("rtx.eye", float, eyeWhitesAlbedoScale, 0.5F, "Brightness multiplier for the eye whites.");
+      RTX_OPTION("rtx.eye", float, irisRadius, 0.165F,
+                 "Size of an iris in the iris texture. "
+                 "If the iris texture is sampled outside of this radius, it's assumed that that area is a transition to the eye whites, "
+                 "so iris depth gradually goes to 0.");
+      RTX_OPTION("rtx.eye", float, irisDepth, 0.06F,
+                 "How deep should the iris (colored part of an eye) be placed behind the cornea (eye lens). "
+                 "The larger the value the more distortion there is, because of the lens.");
+    };
+
+    // Automation Options
+    struct Automation {
+      RTX_OPTION_FLAG_ENV("rtx.automation", bool, disableBlockingDialogBoxes, false, RtxOptionFlags::NoSave, "RTX_AUTOMATION_DISABLE_BLOCKING_DIALOG_BOXES",
+                          "Disables various blocking blocking dialog boxes (such as popup windows) requiring user interaction when set to true, otherwise uses default behavior when set to false.\n"
+                          "This option is typically meant for automation-driven execution of Remix where such dialog boxes if present may cause the application to hang due to blocking waiting for user input.");
+      RTX_OPTION_FLAG_ENV("rtx.automation", bool, disableDisplayMemoryStatistics, false, RtxOptionFlags::NoSave, "RTX_AUTOMATION_DISABLE_DISPLAY_MEMORY_STATISTICS",
+                          "Disables display of memory statistics in the Remix window.\n"
+                          "This option is typically meant for automation of tests for which we don't want non-deterministic runtime memory statistics to be shown in GUI that is included as part of test image output.");
+      RTX_OPTION_FLAG_ENV("rtx.automation", bool, disableUpdateUpscaleFromDlssPreset, false, RtxOptionFlags::NoSave, "RTX_AUTOMATION_DISABLE_UPDATE_UPSCALER_FROM_DLSS_PRESET",
+                          "Disables updating upscaler from DLSS preset.\n"
+                          "This option is typically meant for automation of tests for which we don't want upscaler to be updated based on a DLSS preset.");
+      RTX_OPTION_FLAG_ENV("rtx.automation", bool, suppressAssetLoadingErrors, false, RtxOptionFlags::NoSave, "RTX_AUTOMATION_SUPPRESS_ASSET_LOADING_ERRORS",
+                          "Suppresses asset loading errors by turning them into warnings.\n"
+                          "This option is typically meant for automation of tests for which acceptable asset loading issues are known.");
+      RTX_OPTION_FLAG_ENV("rtx.automation", bool, enableTestTrace, false, RtxOptionFlags::NoSave, "RTX_TEST_TRACE",
+                          "Enables opt-in frame trace artifacts for automation-driven image tests.\n"
+                          "When enabled, Remix records a bounded frame window around the configured screenshot frame, writes frame_trace.jsonl, and appends dxvk_trace_* summary fields to metrics.txt.");
+    };
+
+  public:
+    LegacyMaterialDefaults legacyMaterial;
+    OpaqueMaterialOptions opaqueMaterialOptions;
+    TranslucentMaterialOptions translucentMaterialOptions;
+    ViewDistanceOptions viewDistanceOptions;
+
+    static const HashRule& geometryHashGenerationRule() {
+      return s_geometryHashGenerationRule;
+    }
+    static const HashRule& geometryAssetHashRule() {
+      return s_geometryAssetHashRule;
+    }
+
+  private:
+    static HashRule s_geometryHashGenerationRule;
+    static HashRule s_geometryAssetHashRule;
+
+    RTX_OPTION("rtx", Vector3, effectLightColor, Vector3(1, 1, 1), "Colour of the effect light, if not using plasma ball mode.  Effect lights can be attached to materials from the remix runtime menu, using the `Add Light to Texture` texture tag in game setup.");
+    RTX_OPTION("rtx", float, effectLightIntensity, 1.f, "The intensity of the effect light.  Effect lights can be attached to materials from the remix runtime menu, using the `Add Light to Texture` texture tag in game setup.");
+    RTX_OPTION("rtx", float, effectLightRadius, 5.f, "The sphere radius of the effect light.  Effect lights can be attached to materials from the remix runtime menu, using the `Add Light to Texture` texture tag in game setup.");
+    RTX_OPTION("rtx", bool, effectLightPlasmaBall, false, "Use plasma ball mode, in this mode the effect light color is ignored.  Effect lights can be attached to materials from the remix runtime menu, using the `Add Light to Texture` texture tag in game setup.");
+
+    RTX_OPTION("rtx", bool, useObsoleteHashOnTextureUpload, false,
+               "Whether or not to use slower XXH64 hash on texture upload.\n"
+               "New projects should not enable this option as this solely exists for compatibility with older hashing schemes.");
+
+    RTX_OPTION("rtx", uint32_t, applicationId, 102100511, "Used to uniquely identify the application to DLSS. Generally should not be changed without good reason.");
+
+    static RtxOptions* s_instance;
+
+  public:
+
+    RtxOptions(const RtxOptions&) = delete;
+    RtxOptions(RtxOptions&&) = delete;
+    RtxOptions& operator=(const RtxOptions&) = delete;
+    RtxOptions& operator=(RtxOptions&&) = delete;
+
+  private:
+
+    RtxOptions() {
+      Logger::info("Initializing RtxOptions...");
+
+      // Optionally write documentation (captures code-defined defaults from RTX_OPTION macros)
+      if (env::getEnvVar("DXVK_DOCUMENTATION_WRITE_RTX_OPTIONS_MD") == "1") {
+        RtxOptionManager::writeMarkdownDocumentation("RtxOptions.md");
+      }
+
+      // Initialize all system layers (creates layers from config files)
+      RtxOptionLayer::initializeSystemLayers();
+
+      // Need to set this to true after conf files are parsed, but before any options are accessed.
+      RtxOptionImpl::setInitialized(true);
+
+      // Replacement options
+      if (env::getEnvVar("DXVK_DISABLE_ASSET_REPLACEMENT") == "1") {
+        enableReplacementAssets.setDeferred(false);
+        enableReplacementLights.setDeferred(false);
+        enableReplacementMeshes.setDeferred(false);
+        enableReplacementMaterials.setDeferred(false);
+      }
+
+      // Mark all options with onChange callbacks as dirty. This ensures that options with derived
+      // settings (like NRC's qualityPreset which sets trainingMaxPathBounces) are properly 
+      // initialized even when using default values.
+      RtxOptionManager::markOptionsWithCallbacksDirty();
+
+      // Ensure all of the above values are promoted before the first frame starts.
+      // DxvkDevice hasn't been created yet, so pass nullptr here.
+      RtxOptionManager::applyPendingValues(nullptr, /* forceOnChange */ true);
+
+      // Log effective RtxOption values after all initialization and migrations are complete
+      RtxOptionManager::logEffectiveValues();
+    }
+
+  public:
+    static void updateUpscalerFromDlssPreset();
+    static void updateUpscalerFromNisPreset();
+    static void updateUpscalerFromTaauPreset();
+    static void updateUpscalerFromXeSSPreset();
+    static void updatePresetFromUpscaler();
+    static NV_GPU_ARCHITECTURE_ID getNvidiaArch();
+    static NV_GPU_ARCH_IMPLEMENTATION_ID getNvidiaChipId();
+    static void updateGraphicsPresets(DxvkDevice* device);
+    static void updateLightingSetting(bool preserveCustomSettings = false);
+    static void updatePathTracerPreset(PathTracerPreset preset, bool preserveCustomSettings = false);
+    static void updateRaytraceModePresets(const uint32_t vendorID, const VkDriverId driverID);
+
+    static void resetUpscaler();
+
+    static void Create() {
+      if (s_instance == nullptr) {
+        s_instance = new RtxOptions();
+      }
+      // If called a second time, nothing to do - singleton already exists with all options initialized.
+    }
+
+    // Returns the merged configuration for DXKV Options. This includes all config files loaded from DXVK_CONFIG_FILE and DXVK_RTX_CONFIG_FILE.
+    // This is available after Create() is called and can be used for DxvkOptions, etc.
+    static const Config& getMergedConfig() {
+      return RtxOptionLayer::getMergedConfig();
+    }
+
+    static bool getRayPortalTextureIndex(const XXH64_hash_t& h, std::size_t& index) {
+      const auto findResult = std::find(rayPortalModelTextureHashes().begin(), rayPortalModelTextureHashes().end(), h);
+
+      if (findResult == rayPortalModelTextureHashes().end()) {
+        return false;
+      }
+
+      index = std::distance(rayPortalModelTextureHashes().begin(), findResult);
+
+      return true;
+    }
+
+    static bool useReSTIRGI() {
+      return integrateIndirectMode() == IntegrateIndirectMode::ReSTIRGI;
+    }
+
+    static bool shouldConvertToLight(const XXH64_hash_t& h) {
+      return lightConverter().find(h) != lightConverter().end();
+    }
+
+
+    static bool isRayReconstructionEnabled() {
+      return upscalerType() == UpscalerType::DLSS && enableRayReconstruction();
+    }
+
+    static bool showRayReconstructionOption() {
+      return RtxOptions::upscalerType() == UpscalerType::DLSS;
+    }
+
+    static bool isDLSSEnabled() {
+      // Note: DLSS-RR performs both denoising and upscaling so DLSS-SR should be disabled when it is enabled.
+      return upscalerType() == UpscalerType::DLSS && !enableRayReconstruction();
+    }
+
+    static bool isDLSSOrRayReconstructionEnabled() {
+      return upscalerType() == UpscalerType::DLSS;
+    }
+    static bool isNISEnabled() { return upscalerType() == UpscalerType::NIS; }
+    static bool isTAAEnabled() { return upscalerType() == UpscalerType::TAAU; }
+    static bool isXeSSEnabled() { return upscalerType() == UpscalerType::XeSS; }
+    
+    static float getUniqueObjectDistanceSqr() { return uniqueObjectDistance() * uniqueObjectDistance(); }
+    static uint32_t getNumFramesToPutLightsToSleep() { return numFramesToKeepLights() /2; }
+    static float getMeterToWorldUnitScale() { return 100.f * sceneScale(); } // RTX Remix world unit is in 1cm 
+
+    // Returns shared enablement composed of multiple enablement inputs
+    static bool needsMeshBoundingBox();
+    
+    static bool isShaderExecutionReorderingInPathtracerGbufferEnabled() { return enableShaderExecutionReorderingInPathtracerGbuffer() && enableShaderExecutionReordering; }
+    static bool isShaderExecutionReorderingInPathtracerIntegrateIndirectEnabled() { return enableShaderExecutionReorderingInPathtracerIntegrateIndirect() && enableShaderExecutionReordering; }
+
+    // Developer Options
+    static bool areValidationLayersEnabled() {
+#ifndef _DEBUG
+      return enableValidationLayers();
+#else
+      return true;
+#endif
+    }
+
+    static bool getIsOpacityMicromapSupported() { return s_instance->opacityMicromap.isSupported; }
+    static void setIsOpacityMicromapSupported(bool enabled) { s_instance->opacityMicromap.isSupported = enabled; }
+    static bool getEnableOpacityMicromap() { return s_instance->opacityMicromap.enable() && s_instance->opacityMicromap.isSupported; }
+
+    static bool getEnableAnyReplacements() { return enableReplacementAssets() && (enableReplacementLights() || enableReplacementMeshes() || enableReplacementMaterials()); }
+    static bool getEnableReplacementLights() { return enableReplacementAssets() && enableReplacementLights(); }
+    static bool getEnableReplacementMeshes() { return enableReplacementAssets() && enableReplacementMeshes(); }
+    static bool getEnableReplacementMaterials() { return enableReplacementAssets() && enableReplacementMaterials(); }
+
+    // Capture Options
+    //   General
+    static bool getCaptureInstances() {
+      if (captureNoInstance() != captureNoInstance.getDefaultValue()) {
+        Logger::warn("rtx.captureNoInstance has been deprecated, but will still be respected for the time being, unless rtx.captureInstances is set.");
+        if (captureInstances() != captureInstances.getDefaultValue()) {
+          return captureInstances();
+        }
+        return !captureNoInstance();
+      }
+      return captureInstances();
+    }
+    
+    static std::string getCurrentDirectory();
+
+    static float calcUserEVBias() {
+      return (float(RtxOptions::userBrightness() - 50) / 100.f)
+        * RtxOptions::userBrightnessEVRange();
+    }
+  };
+}

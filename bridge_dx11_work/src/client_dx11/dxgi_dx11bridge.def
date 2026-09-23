@@ -1,0 +1,6 @@
+LIBRARY "dxgi"
+EXPORTS
+  CreateDXGIFactory
+  CreateDXGIFactory1
+  CreateDXGIFactory2
+  DX11BridgeInstallPendingSwapChains

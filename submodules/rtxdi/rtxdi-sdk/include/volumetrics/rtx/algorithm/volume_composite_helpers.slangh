@@ -1,0 +1,215 @@
+/***************************************************************************
+ # Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+ #
+ # NVIDIA CORPORATION and its licensors retain all intellectual property
+ # and proprietary rights in and to this software, related documentation
+ # and any modifications thereto.  Any use, reproduction, disclosure or
+ # distribution of this software and related documentation without an express
+ # license agreement from NVIDIA CORPORATION is strictly prohibited.
+ **************************************************************************/
+
+#include "rtx/utility/common.slangh"
+#include "rtx/utility/procedural_noise.slangh"
+#include "rtx/utility/brdf.slangh"
+#include "rtx/utility/froxel.slangh"
+#include "rtx/utility/packing.slangh"
+#include "rtx/concept/camera/camera.slangh"
+#include "rtx/concept/light/spherical_harmonics.slangh"
+
+#include "rtx/utility/procedural_noise.slangh"
+#define VOLUME_LIGHTING_NO_NEE
+#include "rtx/algorithm/volume_lighting.slangh"
+
+float3 froxelIndexToTranslatedWorldPosition(uint3 voxelIndex, VolumeArgs volumeArgs, VolumeDefinitionCamera camera)
+{
+  const float3 froxelCoordinate = froxelIndexToFroxelCoordinate(voxelIndex);
+  return froxelCoordinateToTranslatedWorldPosition(
+    camera.projectionToTranslatedWorld, camera.viewToProjection, packedFlagGet(camera.flags, rightHandedFlag),
+    volumeArgs.inverseFroxelGridDimensions, volumeArgs.froxelDepthSlices,
+    volumeArgs.froxelDepthSliceDistributionExponent, volumeArgs.froxelMaxDistance, camera.nearPlane,
+    froxelCoordinate);
+}
+
+// Returns the T value of a ray intersecting a portal, or a negative value if there is no valid intersection.
+float getRayPortalIntersection(float3 origin, float3 direction, RayPortalHitInfo portal)
+{
+  const float NdotD = dot(direction, portal.normal);
+  float t = dot(portal.centroid - origin, portal.normal) / NdotD;
+  if (isinf(t) || isnan(t))
+    return -1.0;
+  
+  if (t > 0 && NdotD < 0)
+  {
+    // Compute the UV coordinates of the ray-portal intersection
+    vec3 p = origin + direction * t;
+    vec3 cToP = p - portal.centroid.xyz;
+    vec2 uv;
+    uv.x = dot(cToP, portal.xAxis.xyz) * portal.inverseHalfWidth;
+    uv.y = dot(cToP, portal.yAxis.xyz) * portal.inverseHalfHeight;
+
+    // Consider only rays that fall inside the portal oval to be intersecting with the portal.
+    // This minimizes interpolation artifacts when the preintegrated volumetric texture is sampled
+    // near the edge of the portal, or rather, hides them under the burning portal edge mask.
+    if (length(uv) < 0.95)
+      return t;
+  }
+
+  return -1.0;
+}
+
+void integrateVolumetricNEE(
+  inout RNG randomState,
+  Sampler3D<float> volumeFilteredRadianceAge, Sampler3D<float4> volumeFilteredRadianceY, Sampler3D<float2> volumeFilteredRadianceCoCg,
+  const VolumeArgs volumeArgs, const float timeMS,
+  const uint2 pixelCoordinate, float2 screenUV, bool primaryMiss,
+  float3 startPosition, const float hitDistance, const float3 viewDir,
+  inout float3 preintegratedRadiance, inout float3 accumulatedTransmittance)
+{
+  // Check if the global volumetrics are enabled
+  // Note: This ensures inscattering is not read and light is not attenuated by the global volumetric medium when
+  // it's not desired.
+  if (!volumeArgs.enable)
+  {
+    preintegratedRadiance = vec3(0.0f, 0.0f, 0.0f);
+    accumulatedTransmittance = vec3(1.0f, 1.0f, 1.0f);
+    return;
+  }
+  
+  const uvec3 froxelDimensions = uvec3(volumeArgs.froxelGridDimensions, volumeArgs.froxelDepthSlices);
+  
+  uint2 froxelCoordinate = screenUV * volumeArgs.froxelGridDimensions;
+  
+  // Todo: This code is definately wrong as it is using the same camera across all the integration iterations despite the possibility
+  // of passing into different Portal spaces (which require different volumetric cameras to translate positions into froxels properly).
+  // This issue among others in this function are filed under REMIX-4162.
+  const VolumeDefinitionCamera camera = volumeArgs.cameras[froxelVolumeMain];
+
+  // Set up for a portal transition
+  float portalIntersectionT = -1.0;
+  uint froxelVolumeAfterPortal = 0;
+  int currentFroxelVolume = froxelVolumeMain;
+
+  // Evaluate parameters for a portal transition if there are multiple volumes
+  if (volumeArgs.numActiveFroxelVolumes > 1)
+  {
+    // Construct a ray that represents the current column of froxels
+    const float3 lastFroxelTranslatedWorldPosition = froxelIndexToTranslatedWorldPosition(
+      uint3(froxelCoordinate, froxelDimensions.z - 1), volumeArgs, camera);
+  
+    const float3 rayOrigin = camera.translatedWorldOffset;
+    const float3 rayDirection = normalize(lastFroxelTranslatedWorldPosition);
+  
+    // Find a portal that is intersected by the ray
+    for (uint portalIndex = 0; portalIndex < cb.numActiveRayPortals; ++portalIndex)
+    {
+      portalIntersectionT = getRayPortalIntersection(rayOrigin, rayDirection, cb.rayPortalHitInfos[portalIndex]);
+      if (portalIntersectionT > 0)
+      {
+        froxelVolumeAfterPortal = portalIndex + froxelVolumePortal0;
+        break;
+      }
+    }
+  }
+
+  
+  // Raymarch over the froxel grid
+  
+  // Apply some depth offset to minimize bleeding
+  float volumetricMaxPathDistance =
+    primaryMiss
+      ? volumeArgs.froxelMaxDistance
+      : hitDistance - (volumeArgs.froxelMaxDistance / volumeArgs.froxelDepthSlices) * volumeArgs.depthOffset;
+  // Ensure we only integrate until the end of the volume
+  // TODO: Could intersect ray with atmosphere plane for performance
+  volumetricMaxPathDistance = clamp(volumetricMaxPathDistance, 0, volumeArgs.froxelMaxDistance);
+  const float3 targetPosition = viewDir * volumetricMaxPathDistance + startPosition;
+  
+  // Setup some constants we'll use throughout integration
+  const uint numSteps = froxelDimensions.z/4; // TODO: Expose this as a fraction of # depth slices - performance parameter?
+  const float3 startPositionTranslated = worldToTranslatedWorld(camera, startPosition);
+  const float3 targetPositionTranslated = worldToTranslatedWorld(camera, targetPosition);
+  const float3 targetVector = targetPositionTranslated - startPositionTranslated;
+
+  float3 previousTranslatedWorldPosition = startPositionTranslated;
+
+  // Perform the integration
+  for (uint z = 0; z < numSteps; z++)
+  {
+    // Step forward through the volume
+
+    // Note: Apply blue noise dithering to sample through all the froxels within the current step's span temporally (as
+    // currently the step count is a fraction of the number of froxels for performance reasons).
+    // Additionally, z+1 and numSteps+1 used here to find the position of the first step away from the origin.
+    const float t = (float(z + 1) + getNextSampleBlueNoise(randomState)) / float(numSteps + 1);
+    const float nonlinearT = pow(t, volumeArgs.froxelDepthSliceDistributionExponent);
+    const vec3 currentTranslatedWorldPosition = startPositionTranslated + targetVector * nonlinearT;
+    const float currentFroxelDistance = length(currentTranslatedWorldPosition);
+
+    const float stepSize = length(currentTranslatedWorldPosition - previousTranslatedWorldPosition);
+
+    float3 virtualFroxelUVW = translatedWorldPositionToFroxelUVW(
+                                      camera.translatedWorldToView, camera.translatedWorldToProjectionJittered, packedFlagGet(camera.flags, rightHandedFlag),
+                                      volumeArgs.froxelDepthSlices, volumeArgs.froxelDepthSliceDistributionExponent, volumeArgs.froxelMaxDistance, camera.nearPlane,
+                                      currentTranslatedWorldPosition);
+    
+    // Use the age as a guide for filtering, Larger footprint for early samples
+    
+    const float3 centerPhysicalFroxelUVW = virtualFroxelUVWToPhysicalFroxelUVW(virtualFroxelUVW, currentFroxelVolume, volumeArgs.minFilteredRadianceU, volumeArgs.maxFilteredRadianceU, volumeArgs.inverseNumFroxelVolumes);
+    const float age = volumeFilteredRadianceAge.SampleLevel(centerPhysicalFroxelUVW, 0);
+    const float filterKernel = lerp(1.5f, 15.f, saturate(1.f - age));
+    virtualFroxelUVW = calculateJitteredFroxelUvw(volumeArgs, virtualFroxelUVW, filterKernel);
+    
+    // See if the ray has crossed a portal
+    if (currentFroxelDistance > portalIntersectionT && portalIntersectionT > 0)
+    {
+      // Switch to the volume that represents this portal.
+      // This is sufficient to get correct lighting sampled from that volume, as long as
+      // the per-portal volumes have the same projection parameters as the main volume.
+      // No froxel reprojection is necessary because the volume is constructed using this portal.
+      currentFroxelVolume = froxelVolumeAfterPortal;
+      // Prevent further switches
+      portalIntersectionT = -1;
+    }
+
+    // Sample density field, for this we should use the actual world position (not translated)
+
+    const float density = sampleDensityField(
+      volumeArgs,
+      camera,
+      previousTranslatedWorldPosition,
+      currentTranslatedWorldPosition,
+      stepSize,
+      timeMS
+    ); 
+    
+    // Calculate new radiance for this marching step
+    
+    const float3 physicalFroxelUVW = virtualFroxelUVWToPhysicalFroxelUVW(virtualFroxelUVW, currentFroxelVolume, volumeArgs.minFilteredRadianceU, volumeArgs.maxFilteredRadianceU, volumeArgs.inverseNumFroxelVolumes);
+    
+    const SphericalHarmonic sh = HarmonicsHelpers::loadFiltered3D<SphericalHarmonic>(volumeFilteredRadianceY, volumeFilteredRadianceCoCg, physicalFroxelUVW);
+    
+    const float3 accumulatedRadianceSample = sh.evaluateHenyeyGreenstein(viewDir, volumeArgs.volumetricFogAnisotropy);
+    
+    const float3 inScattering = accumulatedRadianceSample + volumeArgs.multiScatteringEstimate;
+    const float3 outScattering = volumeArgs.scatteringCoefficient * density;
+  
+    preintegratedRadiance += inScattering * outScattering * accumulatedTransmittance * stepSize ;
+    accumulatedTransmittance *= calcVolumetricAttenuation(volumeArgs, camera, false, stepSize, previousTranslatedWorldPosition, viewDir, density);
+
+    // Set the previous world position
+
+    previousTranslatedWorldPosition = currentTranslatedWorldPosition;
+  }
+  
+  // Since volumetrics are only calculated for a fraction of the frustum volume, we need to calculate the remaining attenuation assuming homogonous media
+  // starting at the last translated world position the integration steps ended on (previousTranslatedWorldPosition).
+  // This handles both the large hit distance case, and the miss case which do require separate solutions.
+  if (primaryMiss)
+  {
+    accumulatedTransmittance *= calcVolumetricAttenuation(volumeArgs, camera, true, 0.f, previousTranslatedWorldPosition, viewDir);
+  }
+  else if(hitDistance > volumeArgs.froxelMaxDistance)
+  {
+    accumulatedTransmittance *= calcVolumetricAttenuation(volumeArgs, camera, false, hitDistance - volumeArgs.froxelMaxDistance, previousTranslatedWorldPosition, viewDir);
+  }
+}

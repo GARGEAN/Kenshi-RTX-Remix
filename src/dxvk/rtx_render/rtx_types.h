@@ -1,0 +1,1183 @@
+/*
+* Copyright (c) 2021-2023, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+#include "rtx/dx11/dx11_material_fog_state.h"
+#include "rtx_constants.h"
+#include "rtx_utils.h"
+#include "rtx_materials.h"
+#include "rtx_hashing.h"
+#include "rtx_camera.h"
+#include "../dxvk_resource.h"
+#include "vulkan/vulkan_core.h"
+#include "../../util/util_bounding_box.h"
+#include "../../util/util_threadpool.h"
+#include "../../util/util_spatial_map.h"
+
+#include <inttypes.h>
+#include <memory>
+#include <vector>
+#include <future>
+
+using remixapi_MaterialHandle = struct remixapi_MaterialHandle_T*;
+using remixapi_MeshHandle = struct remixapi_MeshHandle_T*;
+
+namespace dxvk 
+{
+class RtCamera;
+class RtInstance;
+struct RtLight;
+class GraphInstance;
+struct D3D11FixedFunctionVS;
+struct DrawCallState;
+struct AssetReplacement;
+struct ReplacementInstance;
+namespace ommcache { struct Layout; }
+
+using RasterBuffer = GeometryBuffer<Raster>;
+using RaytraceBuffer = GeometryBuffer<Raytrace>;
+
+// DLFG async compute overlap: max of 2 frames in flight
+// (set to 1 to serialize graphics and async compute queues)
+constexpr uint32_t kDLFGMaxGPUFramesInFlight = 2;
+
+// A container for the runtime instance that maps to a prim in a replacement heirarchy.
+class PrimInstance {
+public:
+  enum class Type : uint8_t {
+    Instance,
+    Light,
+    Graph,
+    None
+  };
+  // Use `Entity()` to create a nullptr Entity.
+  PrimInstance() {}
+
+  // Default copy/move/destructors are fine - this just contains typed weak pointers.
+  PrimInstance(const PrimInstance&) = default;
+  PrimInstance(PrimInstance&&) noexcept = default;
+  PrimInstance& operator=(const PrimInstance&) = default;
+  PrimInstance& operator=(PrimInstance&&) noexcept = default;
+  ~PrimInstance() = default;
+
+  // Instance constructor, getter
+  explicit PrimInstance(RtInstance* instance);
+  RtInstance* getInstance() const;
+
+  // Light constructor, getter
+  explicit PrimInstance(RtLight* light);
+  RtLight* getLight() const;
+
+  // Graph constructor, getter
+  explicit PrimInstance(GraphInstance* graph);
+  GraphInstance* getGraph() const;
+
+  // Untyped utilities.
+  PrimInstance(void* owner, Type type);
+
+  Type getType() const;
+  void* getUntyped() const;
+  void setReplacementInstance(ReplacementInstance* replacementInstance, size_t replacementIndex);
+
+private:
+  union EntityPtr {
+    void* untyped = nullptr;
+    RtInstance* instance;
+    RtLight* light;
+    GraphInstance* graph;
+  } m_ptr;
+  Type m_type = Type::None;
+};
+std::ostream& operator << (std::ostream& os, PrimInstance::Type type);
+
+struct ReplacementInstance {
+  // Lifecycle note:
+  // All ReplacementInstances are owned by DrawCallTracker and tracked via two-level hash
+  // lookup (identity hash + tracking hash + proximity). PrimInstanceOwner stores a non-owning
+  // pointer; DrawCallTracker::destroyReplacementInstance() handles destruction.
+
+  static constexpr uint32_t kInvalidReplacementIndex = UINT32_MAX;
+
+  // Bundled hash/position/transform parameters used to look up or create a
+  // ReplacementInstance. Constructed by callers from whatever source they have
+  // (DrawCallState, D3DLIGHT9, ExternalDrawState).
+  struct LookupKey {
+    XXH64_hash_t identityHash;
+    // The hash to identify which spatial map to search for the replacementInstance.
+    XXH64_hash_t spatialMapHash;
+    XXH64_hash_t materialHash;
+    XXH64_hash_t vertexPositionHash;
+    Vector3 worldPos;
+    Matrix4 transform;
+  };
+
+  ReplacementInstance() = delete;
+
+  ReplacementInstance(const LookupKey& key, uint32_t newId, uint32_t frameId);
+
+  // Bit indices describing which fields of this RI changed in the most recent
+  // submission relative to the previously cached data. Computed immediately
+  // after a drawcall is matched to a ReplacementInstance.
+  //
+  // Note: distinct from boundingBoxDirty. That flag is a "pending work" signal
+  // set externally and cleared by the consumer (recalculateBoundingBox).
+  // dirtyFlags is a snapshot of "what changed in the last update", overwritten
+  // on the next submission. Different semantics, different lifetimes.
+  enum class DirtyFlag : uint32_t {
+    Transform,
+    VertexPosHash,
+    MaterialHash,
+    Any,           // Catch-all bit that is set if anything at all has changed
+  };
+  using DirtyFlags = Flags<DirtyFlag>;
+
+  ~ReplacementInstance();
+
+  // Mark all prim entities for GC, drop the prim/root slots, reset cached
+  // aggregate bounding boxes, and clear activeReplacements. Returns the RI to
+  // the same shape it had immediately after construction.
+  void clear();
+
+  std::vector<PrimInstance> prims;
+  PrimInstance root;
+
+  // Reset the RI and re-initialize it with the given root, prim count, and
+  // tracking pointer to the replacement vector that owns those prims (pass
+  // nullptr for non-replacement contexts -- e.g. standalone draws or external
+  // mesh submissions). The stored pointer is used by drawReplacements to
+  // detect when the underlying replacement data has changed across frames.
+  void setup(PrimInstance newRoot, size_t numPrims,
+             const std::vector<AssetReplacement>* replacements);
+
+  // Frame-to-frame tracking fields (used by SceneManager two-level lookup)
+  uint32_t id = 0;
+  XXH64_hash_t identityHash = kEmptyHash;
+  XXH64_hash_t spatialMapHash = kEmptyHash;
+  XXH64_hash_t materialHash = kEmptyHash;
+  XXH64_hash_t vertexPositionHash = kEmptyHash;
+  Vector3 centroid = Vector3(0.f);
+  uint32_t frameCreated = 0;
+  uint32_t frameLastSeen = 0;
+  XXH64_hash_t spatialCacheTransformHash = kEmptyHash;
+  XXH64_hash_t materialSpatialCacheTransformHash = kEmptyHash;
+
+  // Pointer to the replacement data this RI was set up with. Used to detect when
+  // replacements change (async load, hot reload) and the RI needs reinitialization.
+  const std::vector<AssetReplacement>* activeReplacements = nullptr;
+
+  // Draw call properties that affect anti-culling GC decisions.
+  // Set from the original DrawCallState each time the RI is matched.
+  // Stored as raw bits because CategoryFlags is defined later in this file.
+  uint32_t categoryFlags = 0;
+  bool isSkinned = false;
+
+  // When true, the aggregate object-space bounding boxes (geometryBoundingBox,
+  // lightBoundingBox) will be recomputed from the replacement mesh/light data
+  // on the next drawReplacements call. Defaults to true so the initial frame
+  // computes the AABB. Set back to true by clear() or dirtyBoundingBox().
+  bool boundingBoxDirty = true;
+
+  void dirtyBoundingBox() { boundingBoxDirty = true; }
+
+  // Recompute the aggregate object-space bounding boxes from the replacement data,
+  // if boundingBoxDirty is set. Always updates objectToWorld (the game object may
+  // move each frame). Clears boundingBoxDirty after computation.
+  // originalGeometryBBox is the original draw call's geometry bbox, used for
+  // includeOriginal replacements (pass nullptr when there is no original geometry,
+  // e.g. light-only replacements in addLight).
+  void recalculateBoundingBox(const Matrix4& newObjectToWorld,
+                              const std::vector<AssetReplacement>& replacements,
+                              const AxisAlignedBoundingBox* originalGeometryBBox = nullptr);
+
+  // Anti-culling bounding boxes, both in the space defined by objectToWorld.
+  // For mesh draw calls, this is the original draw call's object space.
+  // For light replacements, this is the D3D11 light's local space.
+  // objectToWorld transforms these to world space for the frustum check.
+  // geometryBoundingBox covers mesh geometry (checked against main camera frustum).
+  // lightBoundingBox covers light positions expanded by radius (checked against
+  // the wider light anti-culling frustum). If either check passes, the RI is kept alive.
+  AxisAlignedBoundingBox geometryBoundingBox;
+  AxisAlignedBoundingBox lightBoundingBox;
+  Matrix4 objectToWorld;
+
+  // Snapshot of which fields of this RI changed in the most recent submission.
+  // Initialized by setup() (all bits set, so the first frame's update runs every
+  // step) and updated by findOrCreateReplacementInstance on each subsequent
+  // match. Used downstream to gate update work and to identify animated
+  // entities for anti-culling.
+  DirtyFlags dirtyFlags;
+};
+
+// Wrapper utility to share the code for handling replacementInstance ownership.
+class PrimInstanceOwner {
+public:
+  PrimInstanceOwner() = default;
+  // NOTE: primInstanceOwner is not safe to copy - the RtInstance, RtLight, etc that holds the PrimInstanceOwner
+  //       would have a different address after copying, so the PrimInstanceOwner would point to the wrong object.
+  PrimInstanceOwner(const PrimInstanceOwner& other) = delete;
+  PrimInstanceOwner& operator=(const PrimInstanceOwner& other) = delete;
+
+  ~PrimInstanceOwner() {
+    // m_replacementInstance should always be properly cleaned up before the PrimInstanceOwner 
+    // is destroyed. If this is hit, then whatever deleted the object holding the
+    // primInstanceOwner needs to call setReplacementInstance(nullptr...) before doing that 
+    // deletion.  If not, there will probably be use-after-free bugs later on.
+    assert(m_replacementInstance == nullptr);
+  }
+
+  bool isRoot(const void* owner) const;
+  void setReplacementInstance(ReplacementInstance* replacementInstance, size_t replacementIndex, void* owner, PrimInstance::Type type);
+  ReplacementInstance* getReplacementInstance() const { return m_replacementInstance; }
+  size_t getReplacementIndex() const { return m_replacementIndex; }
+  bool isSubPrim() const {
+    if (m_replacementInstance == nullptr) {
+      return false;
+    } else {
+      return m_replacementIndex != ReplacementInstance::kInvalidReplacementIndex &&
+        m_replacementInstance->root.getUntyped() != m_replacementInstance->prims[m_replacementIndex].getUntyped();
+    }
+  }
+private:
+  ReplacementInstance* m_replacementInstance = nullptr;
+  size_t m_replacementIndex = ReplacementInstance::kInvalidReplacementIndex;
+};
+
+// NOTE: Needed to move this here in order to avoid
+// circular includes.  This probably requires a 
+// general cleanup.
+struct SkinningData {
+  std::vector<Matrix4> pBoneMatrices;
+  uint32_t numBones = 0;
+  uint32_t numBonesPerVertex = 0;
+  XXH64_hash_t boneHash = 0;
+  uint32_t minBoneIndex = 0; // This is the smallest index of all bones actually used by vertex data
+  // V734: native OGRE weights are explicit; palette capacity is not pose identity.
+  bool explicitWeights = false;
+  uint64_t usedBoneMask = 0; // Zero means CPU usage was unavailable: keep full hash.
+  XXH64_hash_t paletteHash = 0; // Full palette, for capture comparison with boneHash.
+
+  void computeHash() {
+    if (numBones > 0) {
+      assert(minBoneIndex >= 0);
+      const Matrix4* firstBone = &pBoneMatrices[minBoneIndex];
+      assert(numBones > minBoneIndex);
+      boneHash = XXH3_64bits(firstBone, (numBones - minBoneIndex) * sizeof(Matrix4));
+    } else {
+      boneHash = 0;
+    }
+  }
+};
+
+
+// Stores the geometry data representing a raytracable object
+// Valid until the object is destroyed.
+struct RaytraceGeometry {
+  // Cached hashes from draw call on last update
+  GeometryHashes hashes;
+
+  XXH64_hash_t lastBoneHash = 0;
+
+  uint32_t vertexCount = 0;
+  uint32_t indexCount = 0;
+  VkCullModeFlags cullMode = VkCullModeFlags(0);
+  VkFrontFace frontFace = VkFrontFace(0);
+
+  RaytraceBuffer positionBuffer;
+  RaytraceBuffer previousPositionBuffer;
+  RaytraceBuffer normalBuffer;
+  RaytraceBuffer texcoordBuffer;
+  RaytraceBuffer color0Buffer;
+  RaytraceBuffer indexBuffer;
+
+  uint32_t positionBufferIndex = kSurfaceInvalidBufferIndex;
+  uint32_t previousPositionBufferIndex = kSurfaceInvalidBufferIndex;
+  uint32_t normalBufferIndex = kSurfaceInvalidBufferIndex;
+  uint32_t texcoordBufferIndex = kSurfaceInvalidBufferIndex;
+  uint32_t color0BufferIndex = kSurfaceInvalidBufferIndex;
+  uint32_t indexBufferIndex = kSurfaceInvalidBufferIndex;
+
+  Rc<DxvkBuffer> historyBuffer[2] = {nullptr};
+  Rc<DxvkBuffer> indexCacheBuffer = nullptr;
+
+  // Set to true after the smooth normals compute pass has been applied to this geometry.
+  // Used to avoid redundant recomputation on subsequent frames for static geometry.
+  bool smoothNormalsApplied = false;
+
+  bool usesIndices() const { 
+    return indexBuffer.defined();
+  }
+
+  uint32_t calculatePrimitiveCount() const {
+    return (usesIndices() ? indexCount : vertexCount) / 3;
+  }
+};
+
+// Stores a snapshot of the geometry state for a draw call.
+// WARNING: Usage is undefined after the drawcall this was 
+//          generated from has finished executing on the GPU
+struct RasterGeometry {
+  // Immutable UV/index snapshot for device-local OGRE cutout buffers. Captured
+  // from existing upload shadows; never retains application buffer pointers.
+  std::shared_ptr<const ommcache::Layout> opacityMicromapLayout;
+  GeometryHashes hashes;
+  Future<GeometryHashes> futureGeometryHashes;
+
+  // DX11 post-VS capture cannot be read back on the CPU before BLAS
+  // submission. The stable identity lets DrawCallCache distinguish captured
+  // draws without its unsafe material-only heuristic. The output-state seed is
+  // combined with the original IA position hash when the hash future completes;
+  // it may additionally vary per frame for VS-skinned output.
+  XXH64_hash_t postVsCaptureIdentity = 0;
+  XXH64_hash_t postVsPositionHashSeed = 0;
+  bool hasPostVsPositionHashSeed = false;
+  // True only when the vertex contents themselves deform/change (skinning or
+  // a renameable IA stream). Camera/object movement changes instance
+  // placement, not the captured mesh, and must not force another BLAS.
+  bool postVsCapturedPositionsDynamic = false;
+  // Exact SV_Position capture stores homogeneous clip xyzw. The geometry
+  // interleaver applies this inverse projection and divides by w before the
+  // position reaches the BLAS, yielding the rasterizer's true view-space mesh.
+  bool postVsPositionIsHomogeneousClip = false;
+  // A standalone projection is not always present in optimized Unity and
+  // other engine shaders. In that case homogeneous clip W is still the exact
+  // positive camera depth for every visible D3D11 perspective vertex. Rebuild
+  // canonical view positions from clip XYW instead of trying to linearize the
+  // unknown (and possibly reversed-Z) clip Z with a guessed near/far pair.
+  bool postVsClipUsesWDepth = false;
+  Matrix4 postVsClipToPosition = Matrix4();
+
+  // DX11_V329_UNVALIDATED_INDEX_RANGE: set when the submitter could not read
+  // this draw's index values and had to size the vertex range to the whole
+  // vertex buffer. The index VALUES are then unknown, and an index addressing
+  // past vertexCount would make the raytracing hit shaders fetch outside the
+  // interleaved vertex allocation - a DMA page fault and a lost device.
+  //
+  // Rather than scan the indices (impossible for a device-local D3D11 buffer
+  // this bridge never sees written), route the index cache through
+  // generateTriangleList, whose shader already rejects any triangle with an
+  // index above maxVertex and collapses it to a degenerate. See
+  // isTopologyRaytraceReady() below - that one predicate drives the cache
+  // buffer's size, its index format AND the branch that fills it, so gating it
+  // here keeps all three consistent by construction.
+  bool indexRangeUnvalidated = false;
+
+  // Actual vertex/index count (when applicable) as calculated by geo-engine
+  uint32_t vertexCount = 0;
+  uint32_t indexCount = 0;
+
+  // Copy of the bones per vertex from SkinningState.
+  // This allows replacements to have different values from the original.
+  uint32_t numBonesPerVertex = 0;
+
+  // Hashed values
+  VkPrimitiveTopology topology = VkPrimitiveTopology(0);
+  VkCullModeFlags cullMode = VkCullModeFlags(0);
+  VkFrontFace frontFace = VkFrontFace(0);
+
+  // Used by replacements mostly, to force the cull bit to that set by the geometry data
+  bool forceCullBit = false;
+
+  RasterBuffer positionBuffer;
+  RasterBuffer normalBuffer;
+  RasterBuffer texcoordBuffer;
+  RasterBuffer color0Buffer;
+  RasterBuffer indexBuffer;
+  RasterBuffer blendWeightBuffer;
+  RasterBuffer blendIndicesBuffer;
+  // DX11_V631_KENSHI_PART_MASK. The body shader clips triangles selected by
+  // partData.y & hiddenMask. The RT index-normalization pass consumes these.
+  RasterBuffer kenshiPartMaskBuffer;
+  uint32_t kenshiHiddenMask = 0;
+  // Static bind-pose cylindrical projection used by Kenshi's dynamic blood
+  // overlay. It is deliberately independent of the RT vertex interleaver.
+  RasterBuffer kenshiBloodProjectionBuffer;
+
+  AxisAlignedBoundingBox boundingBox;
+  Future<AxisAlignedBoundingBox> futureBoundingBox;
+
+  remixapi_MaterialHandle externalMaterial = nullptr;
+
+  template<uint32_t rule>
+  const XXH64_hash_t getHashForRule() const {
+    return hashes.getHashForRule<rule>();
+  }
+
+  const XXH64_hash_t getHashForRule(const HashRule& rule) const {
+    return hashes.getHashForRule(rule);
+  }
+
+  const XXH64_hash_t getHashForRuleLegacy(const HashRule& rule) const {
+    // Note: Only information relating to how the geometry is structured should be included here.
+    XXH64_hash_t h = getHashForRule(rule);
+    h = XXH64(&indexCount, sizeof(indexCount), h);
+    h = XXH64(&vertexCount, sizeof(vertexCount), h);
+    h = XXH64(&topology, sizeof(topology), h);
+    const uint32_t vertexStride = positionBuffer.stride();
+    h = XXH64(&vertexStride, sizeof(vertexStride), h);
+    const VkIndexType indexType = indexBuffer.indexType();
+    h = XXH64(&indexType, sizeof(indexType), h);
+    return h;
+  }
+  
+  uint32_t calculatePrimitiveCount() const;
+
+  bool usesIndices() const {
+    return indexBuffer.defined();
+  }
+
+  bool isVertexDataInterleaved() const {
+    if (normalBuffer.defined() && (!positionBuffer.matches(normalBuffer) || positionBuffer.stride() != normalBuffer.stride()))
+      return false;
+
+    if (texcoordBuffer.defined() && (!positionBuffer.matches(texcoordBuffer) || positionBuffer.stride() != texcoordBuffer.stride()))
+      return false;
+
+    if (color0Buffer.defined() && (!positionBuffer.matches(color0Buffer) || positionBuffer.stride() != color0Buffer.stride()))
+      return false;
+
+    return true;
+  }
+
+  bool areFormatsGpuFriendly() const {
+    assert(positionBuffer.defined());
+
+    if (positionBuffer.vertexFormat() != VK_FORMAT_R32G32B32_SFLOAT && positionBuffer.vertexFormat() != VK_FORMAT_R32G32B32A32_SFLOAT)
+      return false;
+
+    if (normalBuffer.defined() && (normalBuffer.vertexFormat() != VK_FORMAT_R32G32B32_SFLOAT && normalBuffer.vertexFormat() != VK_FORMAT_R32G32B32A32_SFLOAT && normalBuffer.vertexFormat() != VK_FORMAT_R32_UINT))
+      return false;
+
+    if (texcoordBuffer.defined() && (texcoordBuffer.vertexFormat() != VK_FORMAT_R32G32_SFLOAT && texcoordBuffer.vertexFormat() != VK_FORMAT_R32G32B32_SFLOAT && texcoordBuffer.vertexFormat() != VK_FORMAT_R32G32B32A32_SFLOAT))
+      return false;
+
+    if (color0Buffer.defined() && (color0Buffer.vertexFormat() != VK_FORMAT_B8G8R8A8_UNORM))
+      return false;
+
+    return true;
+  }
+
+  bool isTopologyRaytraceReady() const {
+    // Unsupported BVH builder topology
+    if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
+      return false;
+
+    // Unsupported BVH builder topology
+    if (topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN)
+      return false;
+
+    // No index buffer so must create one (BVH builder does support this mode, our RT code does not)
+    if (indexCount == 0)
+      return false;
+
+    // DX11_V329_UNVALIDATED_INDEX_RANGE: the raytrace-ready path is a raw
+    // copyBuffer of the application's indices - it validates nothing. When the
+    // submitter could not establish the index range, take the generation path
+    // instead: identical output for in-range data (minVertex is 0, so the
+    // shader's rebase is a no-op), but out-of-range triangles become
+    // degenerates instead of out-of-bounds vertex fetches.
+    if (indexRangeUnvalidated)
+      return false;
+
+    // PT cannot reproduce the body pixel shader's clip after geometry enters
+    // the BLAS, so route masked bodies through the triangle-list generator.
+    if (kenshiHiddenMask != 0 && kenshiPartMaskBuffer.defined())
+      return false;
+
+    return true;
+  }
+
+  const void printDebugInfo(const char* name = "", uint32_t numTrisToPrint = 0) const {
+    Logger::warn(str::format(
+      "GeometryData ", name, " address: ", this,
+      " vertexCount: ", vertexCount,
+      " indexCount: ", indexCount,
+      " topology: ", topology,
+      " cullMode: ", cullMode,
+      " frontFace: ", frontFace,
+      " currentVertexHash: 0x", hashes[HashComponents::VertexPosition],
+      " drawIndexHash: 0x", hashes[HashComponents::Indices], std::dec));
+
+    // Print Triangles:
+    if (numTrisToPrint > 0) {
+      uint16_t* indexPtr = (uint16_t*) indexBuffer.mapPtr();
+      for (uint32_t i = 0; i < indexCount && i < numTrisToPrint * 3; i += 3) {
+        Vector3* position1 = (Vector3*) ((uint8_t*) positionBuffer.mapPtr() + positionBuffer.stride() * indexPtr[i]);
+        Vector3* position2 = (Vector3*) ((uint8_t*) positionBuffer.mapPtr() + positionBuffer.stride() * indexPtr[i + 1]);
+        Vector3* position3 = (Vector3*) ((uint8_t*) positionBuffer.mapPtr() + positionBuffer.stride() * indexPtr[i + 2]);
+        Logger::warn(str::format(
+          "[", std::setw(5), indexPtr[i], ", ", std::setw(5), indexPtr[i + 1], ", ", std::setw(5), indexPtr[i + 2], "] : ", std::setprecision(6),
+          "(", std::setw(9), position1->x, ", ", std::setw(9), position1->y, ", ", std::setw(9), position1->z, "),   ",
+          "(", std::setw(9), position2->x, ", ", std::setw(9), position2->y, ", ", std::setw(9), position2->z, "),   ",
+          "(", std::setw(9), position3->x, ", ", std::setw(9), position3->y, ", ", std::setw(9), position3->z, "), "));
+      }
+    }
+  }
+};
+
+struct GeometryBufferData {
+  uint16_t* indexData;
+  size_t indexStride;
+
+  float* positionData;
+  size_t positionStride;
+
+  float* texcoordData;
+  size_t texcoordStride;
+
+  float* normalData;
+  size_t normalStride;
+
+  uint32_t* vertexColorData;
+  size_t vertexColorStride;
+
+  GeometryBufferData(const RasterGeometry& geometryData) {
+    if (geometryData.indexBuffer.defined()) {
+      constexpr size_t indexSize = sizeof(uint16_t);
+      indexStride = geometryData.indexBuffer.stride() / indexSize;
+      indexData = (uint16_t*) geometryData.indexBuffer.mapPtr();
+    } else {
+      indexStride = 0;
+      indexData = nullptr;
+    }
+
+    if (geometryData.positionBuffer.defined()) {
+      constexpr size_t positionSubElementSize = sizeof(float);
+      positionStride = geometryData.positionBuffer.stride() / positionSubElementSize;
+      positionData = (float*) geometryData.positionBuffer.mapPtr((size_t) geometryData.positionBuffer.offsetFromSlice());
+    } else {
+      positionStride = 0;
+      positionData = nullptr;
+    }
+
+    texcoordStride = 0;
+    texcoordData = nullptr;
+    // Only float32 texcoord formats can be safely read as Vector2 on the CPU.
+    // R16G16_SFLOAT and other non-float32 formats are converted to R32G32_SFLOAT by the GPU interleaver;
+    // treat them as absent here to avoid mis-reading packed half-float data as float2.
+    if (geometryData.texcoordBuffer.defined()) {
+      const VkFormat texFmt = geometryData.texcoordBuffer.vertexFormat();
+      if (texFmt == VK_FORMAT_R32G32_SFLOAT || texFmt == VK_FORMAT_R32G32B32_SFLOAT || texFmt == VK_FORMAT_R32G32B32A32_SFLOAT) {
+        constexpr size_t texcoordSubElementSize = sizeof(float);
+        texcoordStride = geometryData.texcoordBuffer.stride() / texcoordSubElementSize;
+        texcoordData = (float*) geometryData.texcoordBuffer.mapPtr((size_t) geometryData.texcoordBuffer.offsetFromSlice());
+      }
+    }
+
+    if (geometryData.normalBuffer.defined()) {
+      constexpr size_t normalSubElementSize = sizeof(std::uint32_t);
+      normalStride = geometryData.normalBuffer.stride() / normalSubElementSize;
+      normalData = (float*) geometryData.normalBuffer.mapPtr((size_t) geometryData.normalBuffer.offsetFromSlice());
+    } else {
+      normalStride = 0;
+      normalData = nullptr;
+    }
+
+    if (geometryData.color0Buffer.defined()) {
+      constexpr size_t colorSubElementSize = sizeof(std::uint32_t);
+      vertexColorStride = geometryData.color0Buffer.stride() / colorSubElementSize;
+      vertexColorData = (uint32_t*) geometryData.color0Buffer.mapPtr((size_t) geometryData.color0Buffer.offsetFromSlice());
+    } else {
+      vertexColorStride = 0;
+      vertexColorData = nullptr;
+    }
+  }
+
+  uint16_t getIndex(uint32_t i) const {
+    return indexData[i * indexStride];
+  }
+
+  uint32_t getIndex32(uint32_t i) const {
+    return (uint32_t)indexData[i * indexStride];
+  }
+
+  Vector3& getPosition(uint32_t index) const {
+    return *(Vector3*) (positionData + index * positionStride);
+  }
+
+  Vector2& getTexCoord(uint32_t index) const {
+    return *(Vector2*) (texcoordData + index * texcoordStride);
+  }
+
+  uint32_t& getVertexColor(uint32_t index) const {
+    return vertexColorData[index * vertexColorStride];
+  }
+};
+
+
+struct DrawCallTransforms {
+  Matrix4 objectToWorld = Matrix4();
+  Matrix4 objectToView = Matrix4();
+  Matrix4 worldToView = Matrix4();
+  Matrix4 viewToProjection = Matrix4();
+  Matrix4 textureTransform = Matrix4();
+  bool enableClipPlane = false;
+  // DX11_V225: set by the DX11 layer when the projection came from a synthesized
+  // viewport fallback (no real game projection yet). Read by d3d11_rtx heuristics
+  // and CameraManager so fallback frames are not treated as a stable scene camera.
+  bool usedViewportFallbackProjection = false;
+  // Some D3D11 engines render in camera-relative world space. In that layout
+  // the real main-camera view is intentionally identity when the camera has no
+  // rotation; geometry has already had the high-precision camera origin
+  // removed before it reaches the vertex shader. This flag is set only after
+  // the identity view has been proven by a coherent View/Projection/ViewProj/
+  // inverse camera block, so an unresolved camera is never mistaken for a
+  // valid camera-relative one.
+  bool cameraRelativeView = false;
+  // The DX11 vertex-capture path has recovered the rasterizer's exact
+  // homogeneous SV_Position and reconstructed it into a replacement
+  // view-space world. This candidate must outrank inferred raster-pass
+  // cameras, otherwise CameraManager's first-touch rule can lock the path
+  // tracer to a shadow/reflection/helper view for the entire frame.
+  bool exactReplacementCamera = false;
+  // DX11_V285: set by the DX11 layer when the draw renders into an offscreen
+  // color target (water reflection, environment cubemap, mirror pass) whose
+  // extent matches neither the swapchain output nor the established scene
+  // viewport. Such passes carry their OWN camera; CameraManager must not let
+  // them claim the Main camera (RtCamera::update is first-touch-wins per frame
+  // and these passes render BEFORE the main scene in most engines).
+  bool offscreenRenderTarget = false;
+  Vector4 clipPlane{ 0.f };
+  TexGenMode texgenMode = TexGenMode::None;
+  std::shared_ptr<const std::vector<Matrix4>> instancesToObject;
+
+  void sanitize() {
+    if (objectToWorld[3][3] == 0.f) objectToWorld[3][3] = 1.f;
+    if (objectToView[3][3] == 0.f) objectToView[3][3] = 1.f;
+    if (worldToView[3][3] == 0.f) worldToView[3][3] = 1.f;
+  }
+
+  Matrix4 calcFirstInstanceObjectToWorld() const {
+    if (instancesToObject && !instancesToObject->empty()) {
+      return objectToWorld * (*instancesToObject)[0];
+    } else {
+      return objectToWorld;
+    }
+  }
+};
+
+struct FogState {
+  uint32_t mode = DX11_FOG_NONE;
+  Vector3 color = Vector3();
+  float scale = 0.f;
+  float end = 0.f;
+  float density = 0.f;
+
+  XXH64_hash_t getHash() const {
+    return XXH3_64bits(this, sizeof(FogState));
+  }
+};
+
+enum class InstanceCategories : uint32_t {
+  WorldUI,
+  WorldMatte,
+  Sky,
+  Ignore,
+  IgnoreLights,
+  IgnoreAntiCulling,
+  IgnoreMotionBlur,
+  IgnoreOpacityMicromap,
+  IgnoreAlphaChannel,
+  Hidden,
+  Particle,
+  Beam,
+  DecalStatic,
+  DecalDynamic,
+  DecalSingleOffset,
+  DecalNoOffset,
+  AlphaBlendToCutout,
+  Terrain,
+  AnimatedWater,
+  ThirdPersonPlayerModel,
+  ThirdPersonPlayerBody,
+  IgnoreBakedLighting,
+  IgnoreTransparencyLayer,
+  ParticleEmitter,
+  SmoothNormals,
+
+  Count,
+};
+
+using CategoryFlags = Flags<InstanceCategories>;
+
+#define DECAL_CATEGORY_FLAGS InstanceCategories::DecalStatic, InstanceCategories::DecalDynamic, InstanceCategories::DecalSingleOffset, InstanceCategories::DecalNoOffset
+
+// DX11_V225: lightweight shader-model version (major.minor) recorded by the DX11
+// layer, parsed from each shader's DXBC version token. D3D11 shaders are always SM 4.0+.
+struct ShaderProgramInfo {
+  uint32_t majorVersion = 0;
+  uint32_t minorVersion = 0;
+};
+
+struct DrawCallState {
+  DrawCallState() = default;
+  DrawCallState(const DrawCallState& _input) = default;
+  DrawCallState& operator=(const DrawCallState& drawCallState) = default;
+
+  // Note: This uses the original material for the hash, not the replaced material
+  const XXH64_hash_t getHash(const HashRule& rule) const {
+    return geometryData.getHashForRule(rule) ^ materialData.getHash();
+  }
+
+  [[deprecated("(REMIX-656): Remove this once we can transition content to new hash")]]
+  const XXH64_hash_t getHashLegacy(const HashRule& rule) const {
+    return geometryData.getHashForRuleLegacy(rule) ^ materialData.getHash();
+  }
+
+  const RasterGeometry& getGeometryData() const {
+    return geometryData;
+  }
+
+  const LegacyMaterialData& getMaterialData() const {
+    return materialData;
+  }
+
+  const DrawCallTransforms& getTransformData() const {
+    return transformData;
+  }
+
+  const SkinningData& getSkinningState() const {
+    return skinningData;
+  }
+
+  bool hasSkinnedWorldAnchor() const {
+    return m_hasSkinnedWorldAnchor;
+  }
+
+  const Vector3& getSkinnedWorldAnchor() const {
+    return m_skinnedWorldAnchor;
+  }
+
+  const FogState& getFogState() const {
+    return fogState;
+  }
+
+  const CategoryFlags getCategoryFlags() const {
+    return categories;
+  }
+
+  // A true value snapshots an empty geometry-sky tag set at frontend submission.
+  bool finalizePendingFutures(const RtCamera* pLastCamera, bool geometrySkyDisabledAtSubmission = false);
+
+  bool hasTextureCoordinates() const {
+    return getGeometryData().texcoordBuffer.defined() || getTransformData().texgenMode != TexGenMode::None;
+  }
+  bool isEye() const;
+
+  bool stencilEnabled = false;
+
+  // Camera type associated with the draw call
+  CameraType::Enum cameraType = CameraType::Unknown;
+
+  // Uses programmamble VS/PS
+  bool usesVertexShader = false, usesPixelShader = false;
+
+  // DX11_V225: D3D11/DXGI shader-model version recorded by the DX11 layer.
+  // Contains valid values only if usesVertex/PixelShader is set.
+  ShaderProgramInfo vertexShaderInfo;
+  ShaderProgramInfo pixelShaderInfo;
+
+  // Bytecode hash of the bound programmable vertex shader (0 when unavailable); lets camera-manager
+  // log lines be correlated back to the originating draw.
+  XXH64_hash_t programmableVertexShaderBytecodeHash = 0;
+
+  // False when the camera matrices came from unverified fallback shader constants rather than
+  // reflection-named view-projection/camera-position constant buffer variables (see
+  // rtx.d3d11.requireReflectedCameraConstants). Such draws render normally but must not update
+  // the Main camera: engine utility passes (e.g. shadow depth) upload light-space matrices
+  // through those registers that can reconstruct as a plausible camera.
+  bool allowMainCameraUpdate = true;
+
+  // Material identity hashes this draw would have produced under lightmap policy permutations
+  // that reference fewer material symbols; tried against the replacement database when the
+  // draw's own identity tiers miss (see rtx.d3d11.lightmapPermutationBridgeLookup). Shared
+  // immutable list, memoized per material identity; null when inapplicable.
+  std::shared_ptr<const std::vector<XXH64_hash_t>> lightmapPermutationAlternateHashes;
+
+  // Render-pass classification for diagnostics (points to a static string).
+  const char* passDescription = "Unknown";
+
+  float minZ = 0.0f;
+  float maxZ = 1.0f;
+
+  bool zWriteEnable = false;
+  bool zEnable = false;
+
+  uint32_t drawCallID = 0;
+
+  bool isDrawingToRaytracedRenderTarget = false;
+  bool isUsingRaytracedRenderTarget = false;
+
+  // Set when the Sky category was assigned by skyAutoDetect heuristic
+  // (as opposed to explicit methods like skyBoxTextures/skyBoxGeometries/skyMinZThreshold).
+  // Used by tryHandleSky to optionally bypass cubemap rasterization for autoDetected sky,
+  // since it may be world geometry that should go through reprojection instead.
+  bool skyAutoDetected = false;
+
+  void setupCategoriesForTexture();
+  void setupCategoriesForGeometry();
+
+  // REMIX-231: rebuilds the merged hash->category-bits lookup table used by
+  // setupCategoriesForTexture when any category option set changed. Called once per
+  // frame (D3D11Rtx::EndFrame) and lazily on first use; must only be called from the
+  // thread that submits draw calls.
+  static void refreshCategoryLookupTable();
+  void setupCategoriesForHeuristics(uint32_t prevFrameSeenCamerasCount,
+                                    std::vector<Vector3>& seenCameraPositions);
+
+  template<typename... InstanceCategories>
+  bool testCategoryFlags(InstanceCategories... cat) const { return categories.any(cat...); }
+
+  void printDebugInfo(const char* name = "") const {
+#ifdef REMIX_DEVELOPMENT
+    Logger::warn(str::format(
+      "DrawCallState ", name, "\n",
+      "  address: ", this, "\n",
+      "  drawCallID: ", drawCallID, "\n",
+      "  cameraType: ", static_cast<int>(cameraType), "\n",
+      "  usesVertexShader: ", usesVertexShader, "\n",
+      "  usesPixelShader: ", usesPixelShader, "\n",
+      "  stencilEnabled: ", stencilEnabled, "\n",
+      "  zWriteEnable: ", zWriteEnable, "\n",
+      "  zEnable: ", zEnable, "\n",
+      "  minZ: ", minZ, "\n",
+      "  maxZ: ", maxZ, "\n",
+      "  isDrawingToRaytracedRenderTarget: ", isDrawingToRaytracedRenderTarget, "\n",
+      "  isUsingRaytracedRenderTarget: ", isUsingRaytracedRenderTarget, "\n",
+      "  categoryFlags: ", categories.raw(), "\n",
+      "  hasTextureCoordinates: ", hasTextureCoordinates(), "\n",
+      "  materialHash: 0x", std::hex, materialData.getHash(), std::dec));
+    
+    // Print geometry info
+    Logger::warn("=== Geometry Info ===");
+    Logger::warn(str::format(
+      "  vertexCount: ", geometryData.vertexCount, "\n",
+      "  indexCount: ", geometryData.indexCount, "\n",
+      "  numBonesPerVertex: ", geometryData.numBonesPerVertex, "\n",
+      "  topology: ", static_cast<int>(geometryData.topology), "\n",
+      "  cullMode: ", static_cast<int>(geometryData.cullMode), "\n",
+      "  frontFace: ", static_cast<int>(geometryData.frontFace), "\n",
+      "  forceCullBit: ", geometryData.forceCullBit, "\n",
+      "  externalMaterial: ", (geometryData.externalMaterial != nullptr ? "valid" : "null")));
+    
+    // Print transform info
+    Logger::warn("=== Transform Info ===");
+    Logger::warn(str::format(
+      "  enableClipPlane: ", transformData.enableClipPlane, "\n",
+      "  clipPlane: (", transformData.clipPlane.x, ", ", transformData.clipPlane.y, ", ", transformData.clipPlane.z, ", ", transformData.clipPlane.w, ")"));
+    
+    // Print skinning info
+    Logger::warn("=== Skinning Info ===");
+    Logger::warn(str::format(
+      "  numBones: ", skinningData.numBones, "\n",
+      "  numBonesPerVertex: ", skinningData.numBonesPerVertex, "\n",
+      "  minBoneIndex: ", skinningData.minBoneIndex, "\n",
+      "  boneHash: 0x", std::hex, skinningData.boneHash, std::dec));
+    
+    // Print fog info
+    Logger::warn("=== Fog Info ===");
+    Logger::warn(str::format(
+      "  fogMode: ", fogState.mode, "\n",
+      "  fogColor: (", fogState.color.x, ", ", fogState.color.y, ", ", fogState.color.z, ")\n",
+      "  fogScale: ", fogState.scale, "\n",
+      "  fogEnd: ", fogState.end, "\n",
+      "  fogDensity: ", fogState.density));
+    
+    // Print material info
+    Logger::warn("=== Material Info ===");
+    materialData.printDebugInfo("(from DrawCallState)");
+#endif
+  }
+
+private:
+  friend class RtxContext;
+  friend class SceneManager;
+  friend struct D3D11Rtx;
+  friend class TerrainBaker;
+  friend struct RemixAPIPrivateAccessor;
+  friend class RtxParticleSystemManager;
+
+  bool finalizeGeometryHashes();
+  void finalizeGeometryBoundingBox();
+  void finalizeSkinningData(const RtCamera* pLastCamera);
+
+  // NOTE: 'setCategory' can only add a category, it will not unset a bit
+  void setCategory(InstanceCategories category, bool set);
+  void removeCategory(InstanceCategories category);
+
+  RasterGeometry geometryData;
+
+  // Note: This represents the original material from the D3D11 side, which will always be a LegacyMaterialData
+  // whereas the replacement material data used for rendering will be a full MaterialData.
+  LegacyMaterialData materialData;
+
+  DrawCallTransforms transformData;
+
+  // Note: Set these pointers to nullptr when not used
+  SkinningData skinningData;
+  Future<SkinningData> futureSkinningData;
+
+  // For vertex-shader skinned (GPU skinning) draws, objectToWorld is identity and both the
+  // geometry position hash and the bounding box are derived from the static bindpose source
+  // buffer - that makes every instance of a shared skeletal mesh look identical to the BLAS
+  // cache, which then cross-assigns BlasEntries between unrelated instances. This is a
+  // worldspace anchor derived from the bone matrices in the VS constants, giving the cache a
+  // per-instance, frame-stable position so it can tell simultaneous skinned instances apart
+  // and rematch them across frames.
+  Vector3 m_skinnedWorldAnchor = Vector3(0.0f, 0.0f, 0.0f);
+  bool m_hasSkinnedWorldAnchor = false;
+
+  FogState fogState;
+
+  CategoryFlags categories = 0;
+};
+
+// The BLAS retains these resources even when its OMM cache entry is reset.
+struct OpacityMicromapBinding {
+  XXH64_hash_t sourceHash = kEmptyHash;
+  Rc<DxvkResource> resource;
+};
+
+ // A BLAS and its data buffer that can be pooled and used for various geometries
+struct PooledBlas : public RcObject {
+  Rc<DxvkAccelStructure> accelStructure;
+  uint64_t accelerationStructureReference = 0;
+
+  // Frame when this BLAS was last used in a TLAS
+  uint32_t frameLastTouched = kInvalidFrameIndex;
+
+  // Hash of a bound opacity micromap
+  // Note: only used for tracking of OMMs for static BLASes
+  XXH64_hash_t opacityMicromapSourceHash = kEmptyHash;
+  std::vector<OpacityMicromapBinding> opacityMicromaps;
+
+  // Keep a copy of the build info so we can validate BLAS update compatibility
+  VkAccelerationStructureBuildGeometryInfoKHR buildInfo = {};
+  std::vector<uint32_t> primitiveCounts {};
+
+  // Content hash of the geometry data that was last built into this BLAS.
+  // When the merged BLAS content (geometry addresses + primitive counts) is
+  // unchanged, the GPU build can be skipped entirely.
+  XXH64_hash_t contentHash = kEmptyHash;
+
+  explicit PooledBlas();
+  ~PooledBlas();
+};
+
+// Information about a geometry, such as vertex buffers, and possibly a static BLAS for that geometry
+struct BlasEntry {
+  // input contains legacy or replacements (the data can be on CPU or GPU)
+  //  - Data on CPU is guaranteed to be alive during draw call's submission.
+  //  - Data can be made alive on CPU for longer with an explicit ref hold on it
+  //  - For shader based games the data may contain various unsupported formats a game might deliver the data in. 
+  //    That is converted and optimized in RtxGeometryUtils::interleaveGeometry. 
+  //    Fixed function games always use supported buffer formats/encodings etc...
+  DrawCallState input; 
+  // modifiedGeometryData contains the same geometry as "input" but it (may) have been transformed (i.e.interleaved vertex data, 
+  // converted to optimal vertex formats [we prefer float32], will always be a triangle list and could be skinned)
+  // - Data is on GPU 
+  // - Data is not directly mappable on CPU
+  RaytraceGeometry modifiedGeometryData;
+
+  // Frame when this geometry was seen for the first time
+  uint32_t frameCreated = kInvalidFrameIndex;
+
+  // Frame when this geometry was last used in a TLAS
+  uint32_t frameLastTouched = kInvalidFrameIndex;
+
+  // Frame when the vertex data of this geometry was last updated, used to detect static geometries
+  uint32_t frameLastUpdated = kInvalidFrameIndex;
+
+  Rc<PooledBlas> dynamicBlas = nullptr;
+
+  std::vector<VkAccelerationStructureGeometryKHR> buildGeometries;
+  std::vector<VkAccelerationStructureBuildRangeInfoKHR> buildRanges;
+
+  BlasEntry() = default;
+
+  BlasEntry(const DrawCallState& input_);
+
+  void cacheMaterial(const LegacyMaterialData& newMaterial) {
+    if (input.getMaterialData().getHash() != newMaterial.getHash()) {
+      m_materials.emplace(newMaterial.getHash(), newMaterial);
+    }
+  }
+
+  // `input` is overwritten by whichever draw touched the entry last and the material cache is
+  // cleared once per frame, so a linked instance that wasn't re-drawn recently can hold a
+  // hash this BlasEntry no longer knows - returns nullptr in that case.
+  const LegacyMaterialData* tryGetMaterialData(XXH64_hash_t matHash) const {
+    if (input.getMaterialData().getHash() == matHash) {
+      return &input.getMaterialData();
+    }
+    auto iter = m_materials.find(matHash);
+    if (iter != m_materials.end()) {
+      return &iter->second;
+    }
+    return nullptr;
+  }
+
+  const LegacyMaterialData& getMaterialData(XXH64_hash_t matHash) const {
+    const LegacyMaterialData* pMaterial = tryGetMaterialData(matHash);
+    if (pMaterial != nullptr) {
+      return *pMaterial;
+    }
+    assert(false); // tried to get a material that the BlasEntry doesn't know about.
+    return input.getMaterialData();
+  }
+
+  void clearMaterialCache() {
+    m_materials.clear();
+  }
+
+  void linkInstance(RtInstance* instance) {
+    m_linkedInstances.push_back(instance);
+  }
+
+  void unlinkInstance(RtInstance* instance);
+
+  const std::vector<RtInstance*>& getLinkedInstances() const { return m_linkedInstances; }
+
+  void printDebugInfo(const char* name = "") const {
+#ifdef REMIX_DEVELOPMENT
+    Logger::warn(str::format(
+      "BlasEntry ", name, "\n",
+      "  address: ", this, "\n",
+      "  frameCreated: ", frameCreated, "\n",
+      "  frameLastTouched: ", frameLastTouched, "\n",
+      "  frameLastUpdated: ", frameLastUpdated, "\n",
+      "  vertexCount: ", modifiedGeometryData.vertexCount, "\n",
+      "  indexCount: ", modifiedGeometryData.indexCount, "\n",
+      "  linkedInstances: ", m_linkedInstances.size(), "\n",
+      "  cachedMaterials: ", m_materials.size(), "\n",
+      "  buildGeometries: ", buildGeometries.size(), "\n",
+      "  buildRanges: ", buildRanges.size(), "\n",
+      "  dynamicBlas: ", (dynamicBlas != nullptr ? "valid" : "null")));
+    
+    // Print main material info
+    Logger::warn("=== Main Material Info ===");
+    input.getMaterialData().printDebugInfo("(main)");
+    
+    // Print cached materials info
+    if (!m_materials.empty()) {
+      Logger::warn("=== Cached Materials Info ===");
+      for (const auto& [hash, material] : m_materials) {
+        Logger::warn(str::format("Cached Material Hash: 0x", std::hex, hash, std::dec));
+        material.printDebugInfo("(cached)");
+      }
+    }
+#endif
+  }
+
+private:
+  std::vector<RtInstance*> m_linkedInstances;
+  std::unordered_map<XXH64_hash_t, LegacyMaterialData> m_materials;
+};
+
+// Top-level acceleration structure
+struct Tlas {
+  enum Type : size_t {
+    Opaque,
+    Unordered,
+    SSS,
+
+    Count
+  };
+
+  VkBuildAccelerationStructureFlagsKHR flags = 0;
+  Rc<DxvkAccelStructure> accelStructure = nullptr;
+  Rc<DxvkAccelStructure> previousAccelStructure = nullptr;
+};
+
+enum class RtxGeometryStatus {
+  Ignored,
+  RayTraced,
+  Rasterized
+};
+
+struct DxvkRaytracingInstanceState {
+  Rc<DxvkBuffer> vsFixedFunctionCB;
+  Rc<DxvkBuffer> psSharedStateCB;
+  Rc<DxvkBuffer> vertexCaptureCB;
+};
+
+enum class RtxFramePassStage {
+  FrameBegin,
+  Volumetrics,
+  VolumeIntegrateRestirInitial,
+  VolumeIntegrateRestirVisible,
+  VolumeIntegrateRestirTemporal,
+  VolumeIntegrateRestirSpatialResampling,
+  VolumeIntegrateRaytracing,
+  GBufferPrimaryRays,
+  ReflectionPSR,
+  TransmissionPSR,
+  RTXDI_InitialTemporalReuse,
+  RTXDI_SpatialReuse,
+  NEE_Cache,
+  DirectIntegration,
+  RTXDI_ComputeGradients,
+  IndirectIntegration,
+  NEE_Integration,
+  NRC,
+  RTXDI_FilterGradients,
+  RTXDI_ComputeConfidence,
+  ReSTIR_GI_TemporalReuse,
+  ReSTIR_GI_SpatialReuse,
+  ReSTIR_GI_FinalShading,
+  Demodulate,
+  NRD,
+  CompositionAlphaBlend,
+  Composition,
+  DLSS,
+  DLSSRR,
+  NIS,
+  XeSS,
+  TAA,
+  DustParticles,
+  Bloom,
+  PostFX,
+  AutoExposure_Histogram,
+  AutoExposure_Exposure,
+  ToneMapping,
+  FrameEnd
+};
+
+enum class RtxTextureExtentType {
+  DownScaledExtent,
+  TargetExtent,
+  Custom
+};
+
+// Category of texture format base on the doc: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap46.html#formats-compatibility-classes
+// Note: We currently only categorize the uncompressed color textures
+enum class RtxTextureFormatCompatibilityCategory : uint32_t {
+  Color_Format_8_Bits,
+  Color_Format_16_Bits,
+  Color_Format_32_Bits,
+  Color_Format_64_Bits,
+  Color_Format_128_Bits,
+  Color_Format_256_Bits,
+
+  Count,
+  InvalidFormatCompatibilityCategory = UINT32_MAX
+};
+
+} // namespace dxvk

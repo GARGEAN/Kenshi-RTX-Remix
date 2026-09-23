@@ -1,0 +1,11 @@
+﻿DX11_V219_LAUNCHER_ONLY_DIRECT_BUILD
+
+Build-DX11ClientDirect now builds only:
+  NvRemixLauncher32.exe
+
+It intentionally does NOT link:
+  d3d11.dll
+  dxgi.dll
+
+The proxy DLLs are built by Meson because they need dx11_bridge_client.cpp and its bridge dependencies.
+This prevents LNK2019 unresolved dx11_bridge_client::SetModule/Attach/EnsureServer/Detach/LoadSystemDll.

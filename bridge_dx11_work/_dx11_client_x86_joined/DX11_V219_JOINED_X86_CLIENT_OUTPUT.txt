@@ -1,0 +1,14 @@
+﻿DX11_V219_JOINED_X86_CLIENT_OUTPUT
+
+This folder is the x86 launcher-client output used for staging.
+
+NvRemixLauncher32.exe = x86 DX11 bridge client / entrypoint
+d3d11.dll             = x86 DX11 bridge client/interposer DLL
+dxgi.dll              = x86 DXGI bridge client/interposer DLL
+
+Meson output source:
+  d3d11.dll = C:\Users\icetr\Downloads\dxvk-remix-DX11\bridge_dx11_work\_Comp32Release\src\client_dx11\d3d11.dll
+  dxgi.dll  = C:\Users\icetr\Downloads\dxvk-remix-DX11\bridge_dx11_work\_Comp32Release\src\client_dx11\dxgi.dll
+
+Direct launcher source:
+  NvRemixLauncher32.exe = C:\Users\icetr\Downloads\dxvk-remix-DX11\bridge_dx11_work\_dx11_launcher_x86\NvRemixLauncher32.exe

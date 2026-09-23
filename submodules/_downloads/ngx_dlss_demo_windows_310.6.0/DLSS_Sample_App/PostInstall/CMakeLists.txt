@@ -1,0 +1,1 @@
+install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E tar \"cfv\" \"ngx_dlss_demo.zip\" --format=zip \"${CMAKE_INSTALL_PREFIX}\" WORKING_DIRECTORY \"${PROJECT_SOURCE_DIR}\")")

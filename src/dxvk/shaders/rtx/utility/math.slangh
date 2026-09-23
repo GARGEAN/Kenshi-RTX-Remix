@@ -1,0 +1,824 @@
+/*
+* Copyright (c) 2023-2024, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+
+static const float pi = 3.1415926535897932384626433832795f;
+static const float twoPi = 2.0f * pi;
+static const float fourPi = 4.0f * pi;
+static const float goldenRatio = 1.61803398875f;
+static const float silverRatio = 0.61803398875f;
+
+static const float float16Max = 65504.f;
+static const float floatMax = 3.402823466e+38f;
+
+static const int int16Max = 32767;
+static const int intMax = 2147483647;
+static const uint uintMax = 4294967295;
+
+// Clamps a value to the range [0, 1]
+#define GENERIC_SATURATE(type)       \
+type saturate(type x)                \
+{                                    \
+  return clamp(x, type(0), type(1)); \
+}
+
+GENERIC_SATURATE(float16_t)
+GENERIC_SATURATE(float)
+GENERIC_SATURATE(f16vec3)
+GENERIC_SATURATE(vec3)
+
+// Squares a value
+#define GENERIC_SQUARE(type) \
+type square(type x)          \
+{                            \
+  return x * x;              \
+}
+
+GENERIC_SQUARE(float16_t)
+GENERIC_SQUARE(float)
+GENERIC_SQUARE(f16vec3)
+GENERIC_SQUARE(vec3)
+
+// Cubes a value
+#define GENERIC_CUBE(type) \
+type cube(type x)          \
+{                          \
+  return square(x) * x;    \
+}
+
+GENERIC_CUBE(float16_t)
+GENERIC_CUBE(float)
+
+// Raises a value to the fifth power
+#define GENERIC_POW5(type)    \
+type pow5(type x)             \
+{                             \
+  return square(x) * cube(x); \
+}
+
+GENERIC_POW5(float16_t)
+GENERIC_POW5(float)
+
+// Calculates the sign of a floating point value, but treating 0 as a positive value
+#define GENERIC_SIGN_NOT_ZERO(type)        \
+type signNotZero(type x)                   \
+{                                          \
+  return x < type(0) ? type(-1) : type(1); \
+}
+
+GENERIC_SIGN_NOT_ZERO(float16_t)
+GENERIC_SIGN_NOT_ZERO(float)
+
+#define GENERIC_INV_CLAMP_POW_5(type)                  \
+type invClampPow5(type x)                              \
+{                                                      \
+  return pow5(clamp(type(1) - x, type(0), type(1)));   \
+}
+
+GENERIC_INV_CLAMP_POW_5(float16_t)
+GENERIC_INV_CLAMP_POW_5(float)
+
+// Performs a "safe" division operation avoiding division by zero by clamping the denominator
+// to a specified epsilon. May still result in infinities due to overflow use clampedMaximumPositiveDivide
+// or saferPositiveDivide to guard against infinities on overflow if desired.
+// Requirements:
+// Denominator must be greater than or equal to 0.
+#define GENERIC_SAFE_POSITIVE_DIVIDE(type, epsilonType)           \
+type safePositiveDivide(                                          \
+  type numerator, type denominator, epsilonType epsilon)          \
+{                                                                 \
+  return numerator / max(denominator, epsilon);                   \
+}
+
+GENERIC_SAFE_POSITIVE_DIVIDE(float16_t, float16_t)
+GENERIC_SAFE_POSITIVE_DIVIDE(float, float)
+GENERIC_SAFE_POSITIVE_DIVIDE(f16vec3, float16_t)
+GENERIC_SAFE_POSITIVE_DIVIDE(vec3, float)
+
+// Performs a division operation which clamps the result based on a specified maximum value to guard against overflows to infinity.
+// May still result in NaNs if divison by zero occurs, use saferPositiveDivide to guard against division by zero if desired.
+// Requirements:
+// Numerator must be greater than or equal to 0.
+// Denominator must be greater than 0.
+#define GENERIC_CLAMPED_MAXIMUM_POSITIVE_DIVIDE(type, clampType) \
+type clampedMaximumPositiveDivide(                               \
+  type numerator, type denominator, clampType maximum)           \
+{                                                                \
+  /* Note: Relying on proper infinity behavior with the minimum function such that overflowing divisions */ \
+  /* will properly be clamped to the maximum value. This should be gauranteed, but in case it is not on  */ \
+  /* some implementations, the old approach of min(numerator, denominator * maximum) / denominator can   */ \
+  /* be used to avoid the overflow in most typical cases (though it still has the possibility to).       */ \
+  return min(numerator, denominator * maximum) / denominator;    \
+}
+
+GENERIC_CLAMPED_MAXIMUM_POSITIVE_DIVIDE(float16_t, float16_t)
+GENERIC_CLAMPED_MAXIMUM_POSITIVE_DIVIDE(float, float)
+GENERIC_CLAMPED_MAXIMUM_POSITIVE_DIVIDE(f16vec3, float16_t)
+GENERIC_CLAMPED_MAXIMUM_POSITIVE_DIVIDE(vec3, float)
+
+// Performs a "safer" division operation than the safe division function by guarding
+// against both divisions by zero via a specified epsilon and most overflows to infinity
+// via a clamped maximum division.
+// Requirements:
+// Numerator and denominator must be greater than or equal to 0.
+#define GENERIC_SAFER_POSITIVE_DIVIDE(type, clampType)                      \
+type saferPositiveDivide(                                                   \
+  type numerator, type denominator, clampType epsilon, clampType maximum)   \
+{                                                                           \
+  const type safeDenominator = max(denominator, epsilon);                   \
+                                                                            \
+  return clampedMaximumPositiveDivide(numerator, safeDenominator, maximum); \
+}
+
+GENERIC_SAFER_POSITIVE_DIVIDE(float16_t, float16_t)
+GENERIC_SAFER_POSITIVE_DIVIDE(float, float)
+GENERIC_SAFER_POSITIVE_DIVIDE(f16vec3, float16_t)
+GENERIC_SAFER_POSITIVE_DIVIDE(vec3, float)
+
+// Performs a multiplication operation which clamps the result based on a specified maximum value to guard against overflows to infinity.
+// Requirements:
+// a and b must be greater than or equal to 0.
+#define GENERIC_CLAMPED_MAXIMUM_POSITIVE_MULTIPLY(type, clampType)     \
+type clampedMaximumPositiveMultiply(type a, type b, clampType maximum) \
+{                                                                      \
+  return min(a * b, type(maximum));                                    \
+}
+
+GENERIC_CLAMPED_MAXIMUM_POSITIVE_MULTIPLY(float16_t, float16_t)
+GENERIC_CLAMPED_MAXIMUM_POSITIVE_MULTIPLY(float, float)
+GENERIC_CLAMPED_MAXIMUM_POSITIVE_MULTIPLY(f16vec3, float16_t)
+GENERIC_CLAMPED_MAXIMUM_POSITIVE_MULTIPLY(vec3, float)
+
+// Normalizes a vector "safely" by falling back to another (ideally normalized) vector in the case of
+// an inability to normalize (to avoid NaNs from normalization). Also calculates
+// and outputs the length of the input vector. If the vector is invalid (the zero vector)
+// then the length will be 0.
+#define GENERIC_SAFE_NORMALIZE_GET_LENGTH(type, lengthType)                                  \
+type safeNormalizeGetLength(type vector, type fallbackVector, inout lengthType vectorLength) \
+{                                                                                            \
+  vectorLength = length(vector);                                                             \
+                                                                                             \
+  if (vectorLength == lengthType(0.0f))                                                      \
+  {                                                                                          \
+    return fallbackVector;                                                                   \
+  }                                                                                          \
+                                                                                             \
+  return vector / vectorLength;                                                              \
+}
+
+GENERIC_SAFE_NORMALIZE_GET_LENGTH(f16vec3, float16_t)
+GENERIC_SAFE_NORMALIZE_GET_LENGTH(vec3, float)
+
+// Same as the get length variant of the safe normalize function, just without a length output.
+#define GENERIC_SAFE_NORMALIZE(type, lengthType)                      \
+type safeNormalize(type vector, type fallbackVector)                  \
+{                                                                     \
+  lengthType dummyLength;                                             \
+                                                                      \
+  return safeNormalizeGetLength(vector, fallbackVector, dummyLength); \
+}
+
+GENERIC_SAFE_NORMALIZE(f16vec3, float16_t)
+GENERIC_SAFE_NORMALIZE(vec3, float)
+
+#define GENERIC_SQUARE_LENGTH(type, vectorType) \
+type squareLength(vectorType x)                 \
+{                                               \
+  return dot(x, x);                             \
+}
+
+GENERIC_SQUARE_LENGTH(float16_t, f16vec2)
+GENERIC_SQUARE_LENGTH(float16_t, f16vec3)
+GENERIC_SQUARE_LENGTH(float16_t, f16vec4)
+GENERIC_SQUARE_LENGTH(float, vec2)
+GENERIC_SQUARE_LENGTH(float, vec3)
+GENERIC_SQUARE_LENGTH(float, vec4)
+
+float2 cartesianDirectionToLatLongSphere(float3 direction)
+{
+  float theta = acos(direction.z);
+  float phi = atan2(direction.x, direction.y);
+  return float2(0.5 + phi / twoPi, theta / pi);
+}
+
+// Calculates an orthonormal basis from a specified normal vector
+// [Duff et al. 17, Building An Orthonormal Basis, Revisited]
+void calcOrthonormalBasis(f16vec3 normal, out f16vec3 tangent, out f16vec3 bitangent)
+{
+  const float16_t sign = signNotZero(normal.z);
+
+  const float16_t a = float16_t(-1.0f) / (sign + normal.z);
+  const float16_t b = normal.x * normal.y * a;
+
+  tangent = f16vec3(float16_t(1.0f) + sign * normal.x * normal.x * a, sign * b, -sign * normal.x);
+  bitangent = f16vec3(b, sign + normal.y * normal.y * a, -normal.y);
+}
+
+void calcOrthonormalBasis(vec3 normal, out vec3 tangent, out vec3 bitangent)
+{
+  const float sign = signNotZero(normal.z);
+
+  const float a = -1.0f / (sign + normal.z);
+  const float b = normal.x * normal.y * a;
+
+  tangent = vec3(1.0f + sign * normal.x * normal.x * a, sign * b, -sign * normal.x);
+  bitangent = vec3(b, sign + normal.y * normal.y * a, -normal.y);
+}
+
+// Calculates spherical coordinates to cartesian coordinates given either the standard or a custom basis.
+#define GENERIC_CALC_SPHERICAL_DIRECTION(type, vectorType)                  \
+vectorType calcSphericalDirection(type sinTheta, type cosTheta,             \
+                                  type sinPhi, type cosPhi)                 \
+{                                                                           \
+  return vectorType(sinTheta * cosPhi, sinTheta * sinPhi, cosTheta);        \
+}                                                                           \
+                                                                            \
+vectorType calcSphericalDirection(type sinTheta, type cosTheta,             \
+                                  type sinPhi, type cosPhi,                 \
+                                  vectorType x, vectorType y, vectorType z) \
+{                                                                           \
+  return sinTheta * cosPhi * x + sinTheta * sinPhi * y + cosTheta * z;      \
+}
+
+GENERIC_CALC_SPHERICAL_DIRECTION(float16_t, f16vec3)
+GENERIC_CALC_SPHERICAL_DIRECTION(float, vec3)
+
+f16vec3 alignHemisphereWithCoordinateSystem(f16vec3 hemisphere, f16vec3 up)
+{
+  f16mat3 tbn;
+
+  tbn[2] = up;
+
+  calcOrthonormalBasis(up, tbn[0], tbn[1]);
+
+  return normalize(mul(tbn, hemisphere));
+}
+
+// Gram-Schmidt Orthogonalization
+#define GENERIC_ORTHOGONALIZE(type) \
+type orthogonalize(type x, type y)  \
+{                                   \
+  return x - y * dot(x, y);         \
+}
+
+GENERIC_ORTHOGONALIZE(f16vec3)
+GENERIC_ORTHOGONALIZE(vec3)
+
+// Normalization variant of orthogonalization function
+#define GENERIC_ORTHONORMALIZE(type)     \
+type orthonormalize(type x, type y)      \
+{                                        \
+  return normalize(orthogonalize(x, y)); \
+}
+
+GENERIC_ORTHONORMALIZE(f16vec3)
+GENERIC_ORTHONORMALIZE(vec3)
+
+// Safe normalization variant of orthogonalization function
+#define GENERIC_SAFE_ORTHONORMALIZE(type)                    \
+type safeOrthonormalize(type x, type y, type fallbackVector) \
+{                                                            \
+  return safeNormalize(orthogonalize(x, y), fallbackVector); \
+}
+
+GENERIC_SAFE_ORTHONORMALIZE(f16vec3)
+GENERIC_SAFE_ORTHONORMALIZE(vec3)
+
+
+// invert a 3x3 matrix
+mat3 inverse(mat3 m)
+{
+  float det = m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) -
+              m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+              m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+
+  float invdet = 1.f / det;
+
+  mat3 result; // inverse of matrix m
+  result[0][0] = (m[1][1] * m[2][2] - m[2][1] * m[1][2]) * invdet;
+  result[0][1] = (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * invdet;
+  result[0][2] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * invdet;
+  result[1][0] = (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * invdet;
+  result[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * invdet;
+  result[1][2] = (m[1][0] * m[0][2] - m[0][0] * m[1][2]) * invdet;
+  result[2][0] = (m[1][0] * m[2][1] - m[2][0] * m[1][1]) * invdet;
+  result[2][1] = (m[2][0] * m[0][1] - m[0][0] * m[2][1]) * invdet;
+  result[2][2] = (m[0][0] * m[1][1] - m[1][0] * m[0][1]) * invdet;
+  return result;
+}
+
+bool isQuatRightHanded(float16_t q)
+{
+  return float16BitsToUint16(q) & 0x8000;
+}
+
+bool isQuatRightHanded(float q)
+{
+  return asuint(q) & 0x80000000;
+}
+
+// Calculates the quaternion which transforms the normalized vector src to normalized vector dst
+// Note: returns a zero quat if src == -dst, case when dot(src, dst) == -1 needs to be handled if this is expected.
+vec4 quaternionCreateOrientation(vec3 src, vec3 dst)
+{
+  // https://stackoverflow.com/questions/1171849/finding-quaternion-representing-the-rotation-from-one-vector-to-another
+  vec4 q;
+  q.xyz = cross(src, dst);
+  q.w = 1.0 + dot(src, dst);
+
+  // Normalize the quaternion
+  float len = length(q);
+  q = (len > 0.0f) ? q / len : vec4(1.0, 0.0, 0.0, 0.0);
+
+  // Quaternions returned here are always positive
+  return (q.w < 0.0f) ? -q : q;
+}
+
+// Transform a vector v with a quaternion q, v doesn't need to be normalized
+f16vec3 quaternionTransformVector(vec4 q, f16vec3 v, bool signBitIsParity = false)
+{
+  vec3 newVector = vec3(v) + 2.0f * cross(q.xyz, cross(q.xyz, vec3(v)) + q.w * vec3(v));
+
+  // In cases where we encode the sign bit of the quaternion representing an improper rotation...
+  if (signBitIsParity)
+  {
+    newVector = (isQuatRightHanded(q.w) ? -1.0f : 1.0f) * newVector;
+  }
+
+  return f16vec3(newVector);
+}
+
+vec3 quaternionTransformVector(vec4 q, vec3 v, bool signBitIsParity = false)
+{
+  vec3 newVector = v + 2.0f * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+
+  // In cases where we encode the sign bit of the quaternion representing an improper rotation...
+  if (signBitIsParity)
+  {
+    newVector = (isQuatRightHanded(q.w) ? -1.0f : 1.0f) * newVector;
+  }
+
+  return newVector;
+}
+
+vec4 quaternionInverse(vec4 q)
+{
+  return vec4(-q.xyz, q.w);
+}
+
+vec4 quaternionMultiply(vec4 q1, vec4 q2, bool signBitIsParity = false)
+{
+  vec4 q;
+
+  // q1 * q2
+  q.w = q1.w * q2.w - dot(q1.xyz, q2.xyz);
+  q.xyz = q1.w * q2.xyz + q2.w * q1.xyz + cross(q1.xyz, q2.xyz);
+
+  // Quaternions returned here are always positive
+  q = isQuatRightHanded(q.w) ? -q : q;
+
+  // In cases where we encode the sign bit of the quaternion representing an improper rotation...
+  if (signBitIsParity)
+  {
+    return (isQuatRightHanded(q1) ? -1.0f : 1.0f) * (isQuatRightHanded(q2.w) ? -1.0f : 1.0f) * q;
+  }
+  else
+  {
+    return q;
+  }
+}
+
+// Tangent Space calculation from PBRT
+// Calculates a tangent and bitangent vector in the direction of the U and V coordinates of a triangle orthonormal to a
+// specified normal (this may be a triangle normal or an interpolated normal depending on the use case).
+// Note that the vectors this function returns may form an improper rotation when converted to a transformation due to a swap of
+// handedness. No guarantees for left or right handedness are made as it depends on the triangle's UV layout.
+void genTangSpace(vec2 uvs[3],
+                  vec3 pos[3],
+                  vec3 normal,
+                  out vec3 tangent,
+                  out vec3 bitangent,
+                  out vec3 rawTangentOut,
+                  out vec3 rawBitangentOut)
+{
+  // Compute triangle partial derivatives
+
+  const vec3 p0 = pos[0];
+  const vec3 p1 = pos[1];
+  const vec3 p2 = pos[2];
+  const vec2 duv02 = uvs[0] - uvs[2], duv12 = uvs[1] - uvs[2];
+  const vec3 dp02 = p0 - p2, dp12 = p1 - p2;
+  const float determinant = duv02[0] * duv12[1] - duv02[1] * duv12[0];
+
+  // Calculate the raw tangent and bitangent from the derivatives
+
+  // Note: 32 bit floats used for these tangent vectors as they can get very large in some of this process (>300), which
+  // causes overflows for 16 bit floats when calculating the length for normalization (due to needing to get their squared length first).
+  // Having them 32 bit floats all the way through is slightly more expensive but should benefit from the greater precision and
+  // not need as many conversions back and forth.
+  vec3 rawTangent;
+  vec3 rawBitangent;
+
+  const bool degenerateUV = abs(determinant) < 1e-8f;
+
+  if (!degenerateUV)
+  {
+    const float invdet = 1.0f / determinant;
+
+    rawTangent = (duv12[1] * dp02 - duv02[1] * dp12) * invdet;
+    rawBitangent = (-duv12[0] * dp02 + duv02[0] * dp12) * invdet;
+  }
+  // rawTangent and rawBitangent are too large for fp16, but we need the non-uniform component of the scale for POM.
+  // Here, we scale both down by the length of the larger vector.
+  float largerRawLength = sqrt(max(squareLength(rawTangent), squareLength(rawBitangent)));
+  
+  rawTangentOut = rawTangent / largerRawLength;
+  rawBitangentOut = rawBitangent / largerRawLength;
+
+  const vec3 newNormal = cross(rawTangent, rawBitangent);
+  const bool degenerateBasis = all(newNormal == vec3(0.0f));
+
+  // Gram-Schmidt Orthogonalization
+
+  // Note: Orthogonalizing here will not change the cross product's direction (relevant for later when the bitangent is derived)
+  // or the overall general direction the tangent is facing as the orthogonalized vector is a linear combination of the two input
+  // vectors and thus will stay as part of the plane spanned by the two vectors. Additionally, this must be done as the tangent
+  // vector calculated from the texture coordinates/positions may not be orthogonal to the specified normal.
+  const vec3 newTangent = orthogonalize(rawTangent, normal);
+  // Note: This process creates a new bitangent vector orthogonal to the normal and newly orthogonalized tangent but potentially not
+  // in the same direction as the calculated bitangent from the texture coordinates/positions (and this will be corrected for later).
+  const vec3 newBitangent = cross(normal, newTangent);
+
+  // Handle invalid cases with a fallback basis generation
+
+  const bool degenerateNewTangent = all(newTangent == vec3(0.0f));
+  const bool degenerateNewBitangent = all(newBitangent == vec3(0.0f));
+
+  if (degenerateUV || degenerateBasis || degenerateNewTangent || degenerateNewBitangent)
+  {
+    // Note: Using the same normal the rest of the code uses to generate an orthonormal basis from. Previously we always used the triangle
+    // normal here but this caused non-smooth interpolated tangents and bitangents on meshes invoking this case which also broke the orthogonalization
+    // property of the tangent space (as the interpolated tangent/bitangent for instance were being generated around the triangle normal rather
+    // than the interpolated normal, thus causing them to not be orthogonal).
+    // Not entierly sure why the triangle normal was used here originally, perhaps it is more reliable in some cases or this may just have been
+    // enough for PBRT's implementation, or our implementation misinterpreted how PBRT's tangent space generation functioned in this case. This
+    // implementation seems to work fine though.
+    calcOrthonormalBasis(normal, tangent, bitangent);
+
+    // Note: calcOrthonormalBasis is already orthonormal and does not need orthogonalization/normalization
+    return;
+  }
+
+  // Normalize and perform final vector corrections
+
+  // Note: This sign factor corrects the bitangent vector to point in the same direction as the calculated bitangent from the texture
+  // coordinates/positions. Note that this step will result in a swap of coordinate handedness occasionally (as triangle tangent
+  // spaces may be either left handed or right handed in Remix).
+  const float bitangentSign = signNotZero(dot(newBitangent, rawBitangent));
+
+  tangent = normalize(newTangent);
+  bitangent = normalize(bitangentSign * newBitangent);
+}
+
+// Smart bent normal for ray tracing
+// See appendix A.3 in https://arxiv.org/pdf/1705.01263.pdf
+vec3 getBentNormal(vec3 geometryNormal, vec3 shadingNormal, vec3 viewDirection)
+{
+  // Specular reflection in shading normal
+  const vec3 R = reflect(viewDirection, shadingNormal);
+  const float a = dot(geometryNormal, R);
+
+  if (a < 0.0f) // Perturb normal
+  {
+    const float b = max(0.0001f, dot(shadingNormal, geometryNormal));
+    const vec3 newVector = -viewDirection + normalize(R - shadingNormal * a / b);
+
+    // Note: Fall back to the geometry normal if if normalization is not possible.
+    return safeNormalize(newVector, geometryNormal);
+  }
+  
+  return shadingNormal;
+}
+
+f16mat3 getReflectionMatrix(f16vec3 normal)
+{
+  // https://en.wikipedia.org/wiki/Transformation_matrix#Reflection_2
+  // Note: This matrix is involutory, meaning it is equal to its own inverse. This means it can
+  // be used in either direction for a transformation without issue.
+
+  const float16_t a = normal.x;
+  const float16_t b = normal.y;
+  const float16_t c = normal.z;
+
+  return f16mat3(
+    float16_t(1)-float16_t(2)*a*a, float16_t(-2)*a*b, float16_t(-2)*a*c,
+    float16_t(-2)*a*b, float16_t(1)-float16_t(2)*b*b, float16_t(-2)*b*c,
+    float16_t(-2)*a*c, float16_t(-2)*b*c, float16_t(1)-float16_t(2)*c*c
+  );
+}
+
+vec4 getReflectionQuaternion(vec3 normal)
+{
+  // Half-angle for quaternion calculation
+  float halfAngle = pi * 0.5f;
+
+  // Calculate the quaternion components
+  float sinHalfAngle = sin(halfAngle);
+    
+  vec4 q;
+  q.x = normal.x * sinHalfAngle;
+  q.y = normal.y * sinHalfAngle;
+  q.z = normal.z * sinHalfAngle;
+  q.w = cos(halfAngle);
+
+  // Normalize the quaternion to ensure it's a unit quaternion, also negate the result
+  // Reflection quaternions have a determinant = -1, we'll utilize the q = -q property 
+  // of quaternions to encode the accumulated parity of reflections.
+  return -normalize(q);
+}
+
+vec4 getRefractionQuaternion(vec3 normal)
+{
+  // Todo
+  return vec4(0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+f16mat3 getIdentityMatrix()
+{
+  return f16mat3(1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+f16mat3 quaternionToRotMat3(vec4 q)
+{
+  return f16mat3(
+    quaternionToTangent(q),
+    quaternionToBitangent(q),
+    quaternionToNormal(q));
+}
+
+vec3 quaternionToTangent(vec4 q)
+{
+  return quaternionTransformVector(q, vec3(1, 0, 0));
+}
+
+vec3 quaternionToBitangent(vec4 q)
+{
+  if (isQuatRightHanded(q)) {
+    return quaternionTransformVector(q, vec3(0, 1, 0));
+  } else {
+    return quaternionTransformVector(q, vec3(0, -1, 0));
+  }
+}
+
+vec3 quaternionToNormal(vec4 q)
+{
+  return quaternionTransformVector(q, vec3(0, 0, 1));
+}
+
+// Because quaternion == -quaternion, we can use the sign bit of the w
+// component of the quaternion to encode the handedness of the original TBN matrix.
+bool isQuatRightHanded(f16vec4 q)
+{
+  return isQuatRightHanded(q.w);
+}
+
+bool isQuatRightHanded(vec4 q)
+{
+  return isQuatRightHanded(q.w);
+}
+
+// This produces a quaternion with a positive w, then inverts the quaternion if the input
+// TBN was right handed.  As q == -q for rotation purposes, this is a safe way to store
+// an extra flag along with the quaternion.
+// `isQuatRightHanded` can be used to easily check if the input TBN was right handed.
+vec4 tbnFrameToQuaternion(vec3 tangent, vec3 biTangent, vec3 normal)
+{
+  const bool rightHanded = (dot(cross(tangent,biTangent), normal) >= 0.0);
+  if (!rightHanded)
+  {
+    biTangent = -biTangent;
+  }
+  mat3 rotationMatrix = { tangent, biTangent, normal };
+  rotationMatrix = transpose(rotationMatrix);
+
+  const float tr = rotationMatrix[0][0] + rotationMatrix[1][1] + rotationMatrix[2][2];
+  vec4 quaternion;
+  if (tr > 0)
+  {
+    float s = sqrt(tr + 1.0) * 2; // s=4*qw
+    quaternion.w = 0.25 * s;
+    quaternion.x = (rotationMatrix[2][1] - rotationMatrix[1][2]) / s;
+    quaternion.y = (rotationMatrix[0][2] - rotationMatrix[2][0]) / s;
+    quaternion.z = (rotationMatrix[1][0] - rotationMatrix[0][1]) / s;
+  }
+  else if ((rotationMatrix[0][0] > rotationMatrix[1][1]) && (rotationMatrix[0][0] > rotationMatrix[2][2]))
+  {
+    float s = sqrt(1.0 + rotationMatrix[0][0] - rotationMatrix[1][1] - rotationMatrix[2][2]) * 2; // s=4*qx
+    quaternion.w = (rotationMatrix[2][1] - rotationMatrix[1][2]) / s;
+    quaternion.x = 0.25 * s;
+    quaternion.y = (rotationMatrix[0][1] + rotationMatrix[1][0]) / s;
+    quaternion.z = (rotationMatrix[0][2] + rotationMatrix[2][0]) / s;
+  }
+  else if (rotationMatrix[1][1] > rotationMatrix[2][2])
+  {
+    float s = sqrt(1.0 + rotationMatrix[1][1] - rotationMatrix[0][0] - rotationMatrix[2][2]) * 2; // s=4*qy
+    quaternion.w = (rotationMatrix[0][2] - rotationMatrix[2][0]) / s;
+    quaternion.x = (rotationMatrix[0][1] + rotationMatrix[1][0]) / s;
+    quaternion.y = 0.25 * s;
+    quaternion.z = (rotationMatrix[1][2] + rotationMatrix[2][1]) / s;
+  }
+  else
+  {
+    float s = sqrt(1.0 + rotationMatrix[2][2] - rotationMatrix[0][0] - rotationMatrix[1][1]) * 2; // s=4*qz
+    quaternion.w = (rotationMatrix[1][0] - rotationMatrix[0][1]) / s;
+    quaternion.x = (rotationMatrix[0][2] + rotationMatrix[2][0]) / s;
+    quaternion.y = (rotationMatrix[1][2] + rotationMatrix[2][1]) / s;
+    quaternion.z = 0.25 * s;
+  }
+
+  // If sign bit of w is negative but the original TBN was right handed 
+  // (or vice versa) flip the quaternion.
+  if (isQuatRightHanded(quaternion) != rightHanded)
+  {
+    quaternion = -quaternion;
+  }
+
+  return quaternion;
+}
+
+vec4 getIdentityQuaternion()
+{
+  return vec4(0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+// Calculate a non-normalized gaussian weight for a sample position
+// Returns 1 if sigma is 0 (disabled weighting)
+float calcGaussianWeight(float3 targetPosition, float3 samplePosition, float sigma)
+{
+  if (sigma == 0.0f)
+  {
+    return 1.0f;
+  }
+
+  const float3 vectorToSample = samplePosition - targetPosition;
+  const float distToSampleSq = dot(vectorToSample, vectorToSample);
+  const float s2 = sigma * sigma;
+
+  // Since it's non normalized don't unnecessarily apply constant scale factor
+  const float weight = exp(-(distToSampleSq / (2.0f * s2)));
+
+  return weight;
+}
+
+float3 BicubicSampleCatmullRom(Texture2D tex, SamplerState samp, float2 samplePos, float2 invTextureSize)
+{
+  float2 tc = floor(samplePos - 0.5) + 0.5;
+  float2 f = saturate(samplePos - tc);
+  float2 f2 = f * f;
+  float2 f3 = f2 * f;
+
+  float2 w0 = f2 - 0.5 * (f3 + f);
+  float2 w1 = 1.5 * f3 - 2.5 * f2 + 1;
+  float2 w3 = 0.5 * (f3 - f2);
+  float2 w2 = 1 - w0 - w1 - w3;
+
+  float2 w12 = w1 + w2;
+
+  float2 tc0 = (tc - 1) * invTextureSize;
+  float2 tc12 = (tc + w2 / w12) * invTextureSize;
+  float2 tc3 = (tc + 2) * invTextureSize;
+
+  float3 result =
+    tex.SampleLevel(samp, float2(tc0.x,  tc0.y),  0).rgb * (w0.x  * w0.y)  +
+    tex.SampleLevel(samp, float2(tc0.x,  tc12.y), 0).rgb * (w0.x  * w12.y) +
+    tex.SampleLevel(samp, float2(tc0.x,  tc3.y),  0).rgb * (w0.x  * w3.y)  +
+    tex.SampleLevel(samp, float2(tc12.x, tc0.y),  0).rgb * (w12.x * w0.y)  +
+    tex.SampleLevel(samp, float2(tc12.x, tc12.y), 0).rgb * (w12.x * w12.y) +
+    tex.SampleLevel(samp, float2(tc12.x, tc3.y),  0).rgb * (w12.x * w3.y)  +
+    tex.SampleLevel(samp, float2(tc3.x,  tc0.y),  0).rgb * (w3.x  * w0.y)  +
+    tex.SampleLevel(samp, float2(tc3.x,  tc12.y), 0).rgb * (w3.x  * w12.y) +
+    tex.SampleLevel(samp, float2(tc3.x,  tc3.y),  0).rgb * (w3.x  * w3.y);
+
+  return max(0, result);
+}
+
+float4 calcCubicWeight(float v)
+{
+  float4 n = float4(1.0f, 2.0f, 3.0f, 4.0f) - v;
+  float4 s = n * n * n;
+  float x = s.x;
+  float y = s.y - 4.0f * s.x;
+  float z = s.z - 4.0f * s.y + 6.0f * s.x;
+  float w = 6.0f - x - y - z;
+  return float4(x, y, z, w) * (1.0f / 6.0f);
+}
+
+// Samples a 2D texture with a fast bicubic filtering method using 4 hardware filtered bilinear samples (16 effective texels sampled).
+// Expects the sampler passed in to be using bilinear filtering otherwise this function will not work properly.
+// Expects a sample position in texel coordinates centered at where the sampling is desired, not UVs.
+// Additionally this function does not currently respect mipmaps and only will sample from lod 0.
+// From: https://web.archive.org/web/20180927181721/http://www.java-gaming.org/index.php?topic=35123.0
+float4 BicubicSample(Sampler2D tex, float2 samplePos, float2 invTextureSize)
+{
+  samplePos = samplePos - float2(0.5f);
+
+  const float2 fxy = frac(samplePos);
+  const float2 intCoords = samplePos - fxy;
+
+  const float4 xWeight = calcCubicWeight(fxy.x);
+  const float4 yWeight = calcCubicWeight(fxy.y);
+
+  const float4 c = intCoords.xxyy + float2(-0.5f, +1.5f).xyxy;
+  const float4 s = float4(xWeight.xz + xWeight.yw, yWeight.xz + yWeight.yw);
+
+  float4 offset = c + float4(xWeight.yw, yWeight.yw) / s;
+
+  offset *= invTextureSize.xxyy;
+
+  const float4 sample0 = tex.SampleLevel(offset.xz, 0);
+  const float4 sample1 = tex.SampleLevel(offset.yz, 0);
+  const float4 sample2 = tex.SampleLevel(offset.xw, 0);
+  const float4 sample3 = tex.SampleLevel(offset.yw, 0);
+
+  const float sx = s.x / (s.x + s.y);
+  const float sy = s.z / (s.z + s.w);
+
+  return lerp(
+    lerp(sample3, sample2, sx),
+    lerp(sample1, sample0, sx),
+    sy
+  );
+}
+
+// Samples a 3D texture with a fast tricubic filtering method using 8 hardware filtered trilinear samples (64 effective texels sampled).
+// Expects the sampler passed in to be using bilinear filtering otherwise this function will not work properly.
+// Expects a sample position in texel coordinates centered at where the sampling is desired, not UVs.
+// Additionally this function does not currently respect mipmaps and only will sample from lod 0.
+// From: https://gist.github.com/Fewes/59d2c831672040452aa77da6eaab2234
+float4 TricubicSample(Sampler3D tex, float3 samplePos, float3 invTextureSize)
+{
+  samplePos = samplePos - float3(0.5f);
+
+  const float3 fxyz = frac(samplePos);
+  const float3 intCoords = samplePos - fxyz;
+
+  const float4 xWeight = calcCubicWeight(fxyz.x);
+  const float4 yWeight = calcCubicWeight(fxyz.y);
+  const float4 zWeight = calcCubicWeight(fxyz.z);
+
+  const float2 cx = intCoords.xx + float2(-0.5f, 1.5f);
+  const float2 cy = intCoords.yy + float2(-0.5f, 1.5f);
+  const float2 cz = intCoords.zz + float2(-0.5f, 1.5f);
+  const float2 sx = xWeight.xz + xWeight.yw;
+  const float2 sy = yWeight.xz + yWeight.yw;
+  const float2 sz = zWeight.xz + zWeight.yw;
+
+  float2 offsetx = cx + xWeight.yw / sx;
+  float2 offsety = cy + yWeight.yw / sy;
+  float2 offsetz = cz + zWeight.yw / sz;
+
+  offsetx *= invTextureSize.xx;
+  offsety *= invTextureSize.yy;
+  offsetz *= invTextureSize.zz;
+
+  const float4 sample0 = tex.SampleLevel(float3(offsetx.x, offsety.x, offsetz.x), 0);
+  const float4 sample1 = tex.SampleLevel(float3(offsetx.y, offsety.x, offsetz.x), 0);
+  const float4 sample2 = tex.SampleLevel(float3(offsetx.x, offsety.y, offsetz.x), 0);
+  const float4 sample3 = tex.SampleLevel(float3(offsetx.y, offsety.y, offsetz.x), 0);
+  const float4 sample4 = tex.SampleLevel(float3(offsetx.x, offsety.x, offsetz.y), 0);
+  const float4 sample5 = tex.SampleLevel(float3(offsetx.y, offsety.x, offsetz.y), 0);
+  const float4 sample6 = tex.SampleLevel(float3(offsetx.x, offsety.y, offsetz.y), 0);
+  const float4 sample7 = tex.SampleLevel(float3(offsetx.y, offsety.y, offsetz.y), 0);
+
+  const float gx = sx.x / (sx.x + sx.y);
+  const float gy = sy.x / (sy.x + sy.y);
+  const float gz = sz.x / (sz.x + sz.y);
+
+  const float4 x0 = lerp(sample1, sample0, gx);
+  const float4 x1 = lerp(sample3, sample2, gx);
+  const float4 x2 = lerp(sample5, sample4, gx);
+  const float4 x3 = lerp(sample7, sample6, gx);
+  const float4 y0 = lerp(x1, x0, gy);
+  const float4 y1 = lerp(x3, x2, gy);
+
+  return lerp(y1, y0, gz);
+}

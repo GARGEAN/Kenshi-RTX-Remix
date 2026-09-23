@@ -1,0 +1,4 @@
+LIBRARY "d3d11"
+EXPORTS
+  D3D11CreateDevice
+  D3D11CreateDeviceAndSwapChain

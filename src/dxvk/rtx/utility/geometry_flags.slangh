@@ -1,0 +1,157 @@
+/*
+* Copyright (c) 2022-2024, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+
+#include "rtx/external/NRC.slangh"
+#include "rtx/concept/ray_portal/ray_portal.slangh"
+#include "rtx/utility/packing.slangh"
+
+struct GeometryFlags
+{
+  uint16_t _encodedFlags;
+
+  // GBuffer Flags
+  property bool primarySelectedIntegrationSurface
+  {
+    get { return (_encodedFlags & (1 << 0)) != 0; }
+    set { _encodedFlags = (_encodedFlags & ~(1 << 0)) | (newValue ? (1 << 0) : 0); }
+  }
+
+  property bool secondarySurfaceMask
+  {
+    get { return (_encodedFlags & (1 << 1)) != 0; }
+    set { _encodedFlags = (_encodedFlags & ~(1 << 1)) | (newValue ? (1 << 1) : 0); }
+  }
+
+  // Primary hit is a view model surface
+  property bool isViewModel
+  {
+    get { return (_encodedFlags & (1 << 2)) != 0; }
+    set { _encodedFlags = (_encodedFlags & ~(1 << 2)) | (newValue ? (1 << 2) : 0); }
+  }
+
+  // Portal space the primary hit is in
+  property PortalSpace2BitsType portalSpace
+  {
+    get { return PortalSpace2BitsType((_encodedFlags >> 3) & 0b11); }
+    set { _encodedFlags = (_encodedFlags & ~(0b11 << 3)) | ((newValue & 0b11) << 3); }
+  }
+
+  // Integrator Flags
+  // Note: These are included here as the flags are read regardless by both integrator passes,
+  // making it a useful way to transfer over some flag data without adding additional complexity.
+  property bool insideMedium
+  {
+    get { return (_encodedFlags & (1 << 5)) != 0; }
+    set { _encodedFlags = (_encodedFlags & ~(1 << 5)) | (newValue ? (1 << 5) : 0); }
+  }
+
+  property bool firstSampledLobeIsSpecular
+  {
+    get { return (_encodedFlags & (1 << 6)) != 0; }
+    set { _encodedFlags = (_encodedFlags & ~(1 << 6)) | (newValue ? (1 << 6) : 0); }
+  }
+
+  property bool performPSTR
+  {
+    get { return (_encodedFlags & (1 << 7)) != 0; }
+    set { _encodedFlags = (_encodedFlags & ~(1 << 7)) | (newValue ? (1 << 7) : 0); }
+  }
+
+  property bool performPSRR
+  {
+    get { return (_encodedFlags & (1 << 8)) != 0; }
+    set { _encodedFlags = (_encodedFlags & ~(1 << 8)) | (newValue ? (1 << 8) : 0); }
+  }
+
+  property bool pomOpaqueSurfaceEncountered
+  {
+    get { return (_encodedFlags & (1 << 9)) != 0; }
+    set { _encodedFlags = (_encodedFlags & ~(1 << 9)) | (newValue ? (1 << 9) : 0); }
+  }
+
+#if OBJECT_MASK_ALL_DYNAMIC_NUMBER_OF_ACTIVE_BITS > (16 - 12)
+  "There is not enough bits in the encoded geometry flags for dynamic object mask."
+#endif   
+  property uint8_t objectMask
+  {
+    get
+    {
+      uint dynamicObjectMaskBits = (_encodedFlags >> 11) & ((1 << OBJECT_MASK_ALL_DYNAMIC_NUMBER_OF_ACTIVE_BITS) - 1);
+      return uint8_t(dynamicObjectMaskBits << OBJECT_MASK_ALL_DYNAMIC_FIRST_ACTIVE_BIT_OFFSET);
+    }
+    set
+    {
+      uint dynamicObjectMaskBits = (newValue & OBJECT_MASK_ALL_DYNAMIC) >> OBJECT_MASK_ALL_DYNAMIC_FIRST_ACTIVE_BIT_OFFSET;
+      _encodedFlags = (_encodedFlags & ~(((1 << OBJECT_MASK_ALL_DYNAMIC_NUMBER_OF_ACTIVE_BITS) - 1) << 11)) | (dynamicObjectMaskBits << 11);
+    }
+  }
+
+  // True if any PSR (reflection or transmission) was performed for this pixel.
+  // Does NOT imply a distinct secondary surface exists — single-PSR pixels become the primary surface.
+  bool performedAnyPSR()
+  {
+    return performPSTR || performPSRR;
+  }
+
+  // True only when BOTH PSRR and PSTR fired for this pixel (e.g. glass that both reflects and transmits),
+  // in which case one becomes the primary surface and the other is stored as a distinct secondary surface
+  // with its own GBuffer/attenuation data. See geometry_resolver.slangh where secondarySurfaceMask is set.
+  bool hasSecondarySurface()
+  {
+    return performPSTR && performPSRR;
+  }
+};
+
+void geometryFlagsWriteToGBuffer(
+  GeometryFlags geometryFlags,
+  ivec2 position,
+  RWTexture2D<uint16_t> sharedFlagsTexture)
+{
+  sharedFlagsTexture[position] = geometryFlags._encodedFlags;
+}
+
+GeometryFlags geometryFlagsDecode(uint16_t encodedFlags)
+{
+  GeometryFlags geometryFlags;
+  geometryFlags._encodedFlags = encodedFlags;
+  return geometryFlags;
+}
+
+uint16_t geometryFlagsEncode(GeometryFlags flags)
+{
+  return flags._encodedFlags;
+}
+
+GeometryFlags geometryFlagsReadFromGBuffer(
+  ivec2 position,
+  Texture2D<uint16_t> sharedFlagsTexture)
+{
+  return geometryFlagsDecode(sharedFlagsTexture[position]);
+}
+
+GeometryFlags geometryFlagsReadFromGBuffer(
+  ivec2 position,
+  RWTexture2D<uint16_t> sharedFlagsTexture)
+{
+  return geometryFlagsDecode(sharedFlagsTexture[position]);
+}
