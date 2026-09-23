@@ -90,9 +90,8 @@ namespace dxvk::kenshi_culling {
       std::uint32_t moonBit = 0;
       if (!innerHwInstances) {
         const auto* vtable = *reinterpret_cast<const void* const* const*>(owner);
-        // V784: only the two verified native moon Entities, in their own queue.
-        // Their transforms follow the camera; keep submitting current draws
-        // instead of freezing a last-seen Remix instance. No radius applies.
+        // Only the two verified native moon Entities, in their own queue. Their transforms follow the
+        // camera; keep submitting current draws instead of freezing a last-seen Remix instance. No radius.
         if (staticFeatureEntityVtable && vtable == staticFeatureEntityVtable
             && static_cast<const std::uint8_t*>(owner)[0x30] == 6) {
           moonBit = (owner == moon0 ? 1u : 0u) | (owner == moon1 ? 2u : 0u);

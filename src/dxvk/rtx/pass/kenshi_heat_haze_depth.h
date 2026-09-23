@@ -20,31 +20,19 @@
 * DEALINGS IN THE SOFTWARE.
 */
 #ifndef RTX_PASS_KENSHI_HEAT_HAZE_DEPTH_H_DX11V759
-#define RTX_PASS_KENSHI_HEAT_HAZE_DEPTH_H_DX11V759 // DX11_V759_GUARD
+#define RTX_PASS_KENSHI_HEAT_HAZE_DEPTH_H_DX11V759
 
 #include "rtx/utility/shader_types.h"
 
-// DX11_V759. Re-encodes Remix's primary hit distance into the contract Kenshi's
-// heat-haze post-process expects from its own deferred G-buffer.
-//
-// Kenshi's HeatHaze pass (data/materials/post/heathaze.hlsl) samples
-// global_gbuffer target 2 - an R32_FLOAT full-resolution target the deferred
-// pixel shaders fill with `length(worldPos - cameraPos) / farClip` - and scales
-// the distortion by it:
-//
+// Re-encodes Remix's primary hit distance into the contract Kenshi's heat-haze post-process expects
+// from its deferred G-buffer. HeatHaze (data/materials/post/heathaze.hlsl) samples global_gbuffer
+// target 2 (R32_FLOAT, `length(worldPos - cameraPos) / farClip`) and scales the distortion by it:
 //   float depth = tex2D(depthMap, uv).r;
 //   if (depth == 0.0) depth = 1.0;        // nothing drawn here (sky) -> FULL
 //   normal *= saturate(depth * 6) * 0.002 * heatHaze;
-//
-// Under path tracing the draws that write that target never reach the raster
-// pipeline (DX11_V577_KENSHI_SINGLE_WORLD_PATH), so it keeps the compositor's
-// clear value of 0 and the `depth == 0` branch fires on EVERY pixel. The effect
-// then runs at maximum amplitude everywhere, with no distance falloff at all.
-//
-// This pass reproduces the game's own encoding from the path tracer's depth.
-// Note the miss value: Remix writes -1 for a ray that hit nothing, and the
-// destination contract wants 0 there, which is the same "sky gets full haze"
-// behaviour raster had.
+// Under path tracing the draws that write that target never reach raster, so it stays 0 and the haze
+// runs at full amplitude everywhere. Remix writes -1 for a miss; the target wants 0 there (sky gets
+// full haze, as in raster).
 struct KenshiHeatHazeDepthArgs {
   uint2 extent;      // render (downscaled) extent - the hit distance resolution
   float invFarClip;  // 1 / (farClip * distanceScale)

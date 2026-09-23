@@ -164,24 +164,11 @@ namespace dxvk {
       prepared_terrain::written(this);
     }
 
-    // DX11_V328_INDEX_SHADOW_ON_UPDATE: the same shadow, maintained for index
-    // buffers that are created EMPTY and filled afterwards.
-    //
-    // SetIndexShadow above only runs in the created-with-initial-data case.
-    // OGRE (and therefore Kenshi) allocates its hardware buffers first and
-    // writes them later, so its index buffers never gained a shadow: every
-    // draw reports indexCpuVisible=0 and exactMax=0, the vertex range falls
-    // back to the whole buffer, and any uncaptured draw is dropped. That is
-    // the precise reason ordinary object-space submission of Kenshi's world
-    // geometry could not be made safe - the maximum index was unknowable, so
-    // exempting the drop guard fed unvalidated indices into BLAS triangle
-    // generation and the GPU took a DMA page fault in generateTriangleList.
-    //
-    // Writes arrive here with the data already in system memory, so this
-    // costs one memcpy of bytes the caller is copying anyway - still no GPU
-    // readback and no stall. Partial updates are supported: the shadow is
-    // sized to the whole buffer on first touch so later range queries either
-    // hit written bytes or are declined by GetIndexShadow's bounds check.
+    // Index shadow for buffers created empty and filled later (OGRE allocates first, writes after).
+    // Without it the maximum index is unknown, the vertex range falls back to the whole buffer, and
+    // unvalidated indices reach BLAS triangle generation and fault the GPU.
+    // Costs one memcpy of data already in system memory; no readback. The shadow is sized to the
+    // whole buffer on first touch, so partial updates work and GetIndexShadow bounds-checks queries.
     void UpdateIndexShadow(size_t offset, const void* data, size_t bytes) {
       if (data == nullptr || bytes == 0)
         return;
@@ -202,14 +189,7 @@ namespace dxvk {
       std::memcpy(m_indexShadow.data() + offset, data, bytes);
       prepared_terrain::written(this);
 
-      // Every CPU write route into a D3D11 buffer is now hooked
-      // (UpdateSubresource via both direct-map fast paths and the GPU-copy
-      // path, plus CopyResource/CopySubresourceRegion), the drawn buffers are
-      // confirmed to be created through InitBuffer, and yet draws still report
-      // shadowBytes=0. Log the object identity on store so it can be matched
-      // against the identity the submit path reads - if those differ, the
-      // shadow is being written to a different D3D11Buffer instance than the
-      // one bound at draw time, which no amount of extra hooks would fix.
+      // Diagnostic: log the buffer identity on store, to match against the one the submit path reads.
       static uint32_t sShadowStoreLogs = 0;
       if (bufferSize >= 4096 && sShadowStoreLogs < 32u) {
         ++sShadowStoreLogs;
@@ -238,21 +218,9 @@ namespace dxvk {
       return m_indexShadow.data() + offset;
     }
 
-    // DX11_V473_VERTEX_SHADOW: the same mechanism as the index shadow above, for
-    // POSITION data, serving one consumer - the object-space bounding box that
-    // Remix's anti-culling requires.
-    //
-    // Measured 2026-08-16: 5269 of 5565 instance records carried the +/-FLT_MAX
-    // "no bounding box" sentinel, because the box is computed by sampling
-    // posBuffer.mapPtr() (d3d11_rtx.cpp) and every Kenshi IA vertex buffer is
-    // device-local, so that pointer is null. With no box, DrawCallTracker's
-    // anti-culling keep-alive branch (rtx_draw_call_tracker.cpp, guarded by
-    // `hasMeshes`) can never run, and an object the game stops drawing is
-    // collected immediately. Measured consequence: one wall at
-    // o2wT=[-474.336,1661.04,2115.19] lost and re-created its instance EIGHT
-    // times in 90 frames, absent for 3 to 17 frames at a stretch. That is the
-    // reported building/wall flicker, and it is also why the game's aggressive
-    // culling breaks path-traced lighting.
+    // Vertex shadow: the index-shadow mechanism for POSITION data. Its consumer is the object-space
+    // bounding box anti-culling needs; Kenshi's vertex buffers are device-local, so posBuffer.mapPtr()
+    // is null. Without a box, anti-culling cannot keep an object alive once the game stops drawing it.
     void UpdateVertexShadow(size_t offset, const void* data, size_t bytes) {
       if (data == nullptr || bytes == 0)
         return;
@@ -327,9 +295,7 @@ namespace dxvk {
     D3D11_COMMON_BUFFER_MAP_MODE  m_mapMode;
     std::vector<uint8_t>          m_indexShadow;
 
-    // DX11_V473_VERTEX_SHADOW / DX11_V474. Kept for the life of the buffer, as
-    // the index shadow is: one buffer serves many draws at different slice
-    // offsets, so the bytes cannot be released after any single one of them.
+    // Kept for the life of the buffer: one buffer serves many draws at different offsets.
     std::vector<uint8_t>          m_vertexShadow;
     uint64_t                      m_vertexShadowRevision = 0;
     // Owned by the source buffer: no stale pointer identity or retained resource.

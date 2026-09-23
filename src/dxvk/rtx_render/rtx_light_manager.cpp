@@ -187,27 +187,15 @@ namespace dxvk {
     m_lightDebugUILock.unlock();
   }
 
-  // DX11_V765_KENSHI_LIGHT_GC, fix 2 and probe tiers A+B.
-  //
-  // Kenshi's local lights are harvested from the game's own deferred
-  // light-volume draws, so "not submitted this frame" is ambiguous: the game
-  // either culled the volume or switched the light off. Stock Remix cannot
-  // separate those and resolves it by holding EVERY light for
-  // numFramesToKeepLights (100) frames.
-  //
-  // Here they ARE separable. Kenshi draws a light volume exactly when that
-  // volume intersects the view, so a light we still hold whose own volume still
-  // reaches the view, and which the game did not submit, was switched off. Note
-  // this tests the light's REACH against the view, not whether its position is
-  // on screen - which is what covers a distant lightning flash whose radius
-  // spans the scene. A light whose volume does NOT reach the view is genuinely
-  // ambiguous and is left to the stock timer; that is what preserves off-screen
-  // lights for indirect lighting.
-  //
-  // The inference is checked, not assumed. Every light the game DID submit must
-  // test as reaching the view, because the game drew it - `violations` counts
-  // the ones that do not, and a non-zero count means the frustum or the radius
-  // is too tight for the drop decision to be trusted.
+  // Kenshi's local lights come from the game's deferred light-volume draws, so "not submitted this
+  // frame" is ambiguous (culled or switched off); stock Remix holds every light for
+  // numFramesToKeepLights (100) frames. Here the cases separate: Kenshi draws a light volume exactly when
+  // it intersects the view, so a held light whose own volume still reaches the view but was not
+  // submitted was switched off. This tests the light's reach, not whether its position is on screen,
+  // which covers a distant lightning flash. A light whose volume does not reach the view is left to the
+  // stock timer (off-screen lights still matter for indirect lighting).
+  // Checked, not assumed: every light the game did submit must test as reaching the view; `violations`
+  // counts the ones that do not, and a non-zero count means the drop decision cannot be trusted.
   namespace {
     uint32_t s_klgFrames = 0;
     uint32_t s_klgSeen = 0;
@@ -706,13 +694,10 @@ namespace dxvk {
       break;
     }
 
-    // DX11_V765_KENSHI_LIGHT_GC. A Kenshi harvest carries the game's own volume
-    // radius; park it in the anti-culling union so kenshiLightSweep can ask
-    // whether the game would still be drawing this light. The union only
-    // survives RtLight::copyFrom under the GameLight type, hence GameLight here
-    // for spots as well as points - which is also the truer answer for stock
-    // light anti-culling, since that path otherwise tests the fixed 4.0 sphere
-    // radius rather than the light's actual reach.
+    // A Kenshi harvest carries the game's own volume radius; park it in the anti-culling union so
+    // kenshiLightSweep can ask whether the game would still draw this light. The union only survives
+    // RtLight::copyFrom under the GameLight type, hence GameLight for spots as well as points (also truer
+    // for stock light anti-culling, which would otherwise test the fixed 4.0 radius).
     const bool carryKenshiRadius =
       kenshiCullRadius > 0.0f && rtLight.getType() == RtLightType::Sphere;
 
@@ -730,14 +715,10 @@ namespace dxvk {
       added = addLight(rtLight, RtLightAntiCullingType::Ignore);
     }
 
-    // DX11_V765_KENSHI_LIGHT_GC, fix 1. Hold the light one step below the sleep
-    // threshold. A sleeping light is never updated again (its radiance freezes)
-    // AND garbageCollectionInternal's erase test requires isStaticCount <
-    // framesToSleep, so sleep makes it PERMANENT - it outlives the game
-    // removing it, forever. Sleep exists to stop games ramping intensity, but
-    // the light hash excludes radiance entirely (rtx_lights_data.cpp), so what
-    // isStaticCount actually measures here is "position unchanged", and the
-    // stability it is supposed to buy was never on offer.
+    // Hold the light one step below the sleep threshold. A sleeping light is never updated again, and
+    // garbageCollectionInternal's erase test requires isStaticCount < framesToSleep, so sleep would make
+    // it permanent. The light hash excludes radiance (rtx_lights_data.cpp), so isStaticCount only measures
+    // "position unchanged".
     if (added != nullptr && KenshiOptions::kenshiLightNoSleep()) {
       const uint32_t sleepAt = RtxOptions::getNumFramesToPutLightsToSleep();
       if (sleepAt > 0u && added->isStaticCount >= sleepAt) {

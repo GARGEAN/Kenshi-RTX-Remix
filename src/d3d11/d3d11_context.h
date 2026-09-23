@@ -830,13 +830,8 @@ namespace dxvk {
         // Provide a fast path for mapped buffer updates since some
         // games use UpdateSubresource to update constant buffers.
         if (likely(bufferResource->GetMapMode() == D3D11_COMMON_BUFFER_MAP_MODE_DIRECT) && likely(!pDstBox)) {
-          // DX11_V328_INDEX_SHADOW_ON_UPDATE (direct-write path). THIS is how
-          // Kenshi fills its index buffers, and why every earlier hook missed
-          // them: UpdateResource only reaches UpdateBuffer (and the copy path
-          // only handles CopyResource) after these DIRECT map-mode fast paths
-          // return early. The creation audit shows 2264 index buffers, all
-          // created empty, and the drawn ones are never copied into - they are
-          // written straight into mapped memory here.
+          // Index shadow, direct-write path. This is how Kenshi fills its index buffers: these direct map-mode
+          // fast paths return before UpdateBuffer or the copy path would see the data.
           bufferResource->UpdateIndexShadow(0, pSrcData, size_t(bufferSize));
           pContext->UpdateMappedBuffer(bufferResource, 0, bufferSize, pSrcData, 0);
           return;

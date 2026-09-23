@@ -81,21 +81,11 @@ namespace dxvk {
                "Use for uber-shaders whose bound texture set varies frame to frame (dynamic atlases, streaming feedback), where including it in the identity would mint a new material hash every frame.\n"
                "Excluded shaders fall back to primary-texture identity.");
 
-    // DX11_V384_FAMILY_ISOLATION: attribution by removal, for when no probe can
-    // answer "which draw owns those pixels".
-    //
-    // Reading a per-pixel identity out of the path tracer keeps failing for
-    // transparent geometry: alpha-blended and unordered surfaces never become
-    // the committed surface, so object picking returns EMPTY and the GPU-print
-    // probe reports no hit. Removing one shader family and looking at what
-    // disappears has none of that trouble, and it is decisive in one run.
-    //
-    // Comma-separated fragments matched against the bridge's vertex shader name
-    // (`VS_<sha1>`, the same string the logs print). A draw whose VS name
-    // contains ANY listed fragment stays on raster and never enters the RTX
-    // scene. An 8-hex prefix like "eda75c5b" is the natural granularity.
-    //
-    // Diagnostic only - empty by default, and it changes nothing when empty.
+    // Attribution by removal: a draw whose VS name contains any listed fragment stays on raster and never
+    // enters the RTX scene. Useful where per-pixel identity fails (alpha-blended and unordered surfaces
+    // never become the committed surface, so picking and the GPU-print probe see nothing). Fragments
+    // match the bridge's `VS_<sha1>` names; an 8-hex prefix like "eda75c5b" is the natural granularity.
+    // Diagnostic only; empty by default.
     RTX_OPTION("rtx.d3d11", std::string, kenshiIsolateVertexShaders, "",
                "Comma-separated vertex-shader name fragments to EXCLUDE from the RTX scene (kept on the raster layer).\n"
                "Matched as a substring against the bridge's shader name, e.g. 'eda75c5b' or 'eda75c5b,1efe737d'.\n"
@@ -125,10 +115,8 @@ namespace dxvk {
     // Queue one full internal RTX diagnostic capture. Unlike the normal
     // screenshot, this is consumed only at Kenshi's verified scene boundary.
     void RequestKenshiDebugScreenshot();
-    // DX11_V329_ON_DEMAND_DIAGNOSTICS: arm one frame of verbose diagnostics
-    // (Ctrl+Alt+D). No data members are added for this - the state lives in
-    // translation-unit statics in d3d11_rtx.cpp, because adding fields to this
-    // class changes its layout and silently kills startup.
+    // Arm one frame of verbose diagnostics (Ctrl+Alt+D). The state lives in TU statics in d3d11_rtx.cpp:
+    // adding fields to this class changes its layout and silently kills startup.
     void ArmOnDemandDiagnostics();
     // The single user-facing safety baseline. It keeps D3D11 capture and
     // rigid-world-instance submission plus frontend-state-restore active, but preserves the game's
@@ -321,12 +309,9 @@ namespace dxvk {
       // per-frame GPU work/allocation budget. Kept separate from structural
       // capture failures so field logs show whether a scene needs more budget.
       uint32_t positionCaptureBudgetRejected = 0;
-      // NOTE: capture attempt/failure counters deliberately live as
-      // translation-unit state in d3d11_rtx.cpp, NOT here. Adding fields to
-      // this struct changes the D3D11Rtx object layout, and this project has
-      // already shipped one build that exited silently just after Kenshi's
-      // pre-game menu for exactly that reason. Diagnostics must not alter
-      // this class's layout.
+      // Capture attempt/failure counters live as TU state in d3d11_rtx.cpp, not here: adding fields to this
+      // struct changes the D3D11Rtx object layout, which has made builds exit silently after Kenshi's
+      // pre-game menu.
       uint32_t position2D = 0;
       uint32_t noPositionBuffer = 0;
       uint32_t noIndexBuffer = 0;
@@ -501,13 +486,9 @@ namespace dxvk {
                                          UINT replayFirstInstance,
                                          UINT replayInstanceCount,
                                          bool requireIndexedFlatten);
-    // DX11_V322_CAPTURE_FAILURE_VISIBILITY: the real work lives in Impl; the
-    // public entry point above only counts attempts/successes and records a
-    // state snapshot for the first few failures. Capture can stop producing
-    // geometry entirely while every admission counter still reports the draw
-    // as accepted (observed: scene=221, zero rejections, posCapture=0, and
-    // the raster layer showing through the path-traced view). Attempt and
-    // failure counts make that condition self-evident in the submit summary.
+    // The real work lives in Impl; this entry point counts attempts/successes and records a state snapshot
+    // for the first few failures, so capture producing nothing while admission reports success shows up in
+    // the submit summary.
     bool TryCapturePositionsViaStreamOutImpl(DrawCallState& dcs, RasterGeometry& geo,
                                          bool indexed, UINT count, UINT start, INT base,
                                          bool hasExternalInstanceTransform,

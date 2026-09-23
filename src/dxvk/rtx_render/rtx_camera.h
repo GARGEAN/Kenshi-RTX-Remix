@@ -279,42 +279,12 @@ namespace dxvk
     const Vector3& getArtificialWorldOffset() const { return m_artificalWorldOffset; }
     const Vector3& getPreviousArtificialWorldOffset() const { return m_previousArtificalWorldOffset; }
 
-    // DX11_V354_CAMERA_ONE_FRAME_TOLERANCE: accept a camera updated on the
-    // immediately preceding frame as well as the current one.
-    //
-    // This bridge injects RTX MID-FRAME, at Kenshi's composite boundary, while
-    // the camera is set during draw submission. The device frame id can advance
-    // between the two, leaving the camera stale by exactly one frame - and an
-    // exact-match test then refuses to raytrace a scene that is completely
-    // valid. Measured: of 24 raytracer decisions in one run, 7 reported
-    // cameraValid=0 and EVERY ONE was stale by exactly 1 frame, while the same
-    // frames reported surfaces=135 instances=135 surfaceBuffer=1. Those frames
-    // fall back to the game's raster - the "raster bleed" - and, before
-    // sceneKeepAliveFrames was raised, also destroyed the entire scene.
-    //
-    // A one-frame-old camera is a bookkeeping artefact of mid-frame injection,
-    // not a real camera loss: the matrices are the ones the frame was drawn
-    // with. Anything older still fails, so genuine camera loss (menus, level
-    // transitions) is still detected.
-    // The one-frame tolerance cut cameraValid=0 from 7-of-24 decisions to
-    // 4-of-60, and every remaining failure was stale by exactly 2 - the same
-    // defect one step further out. The lag is variable because the camera is
-    // only processed once a draw's geometry work finalises
-    // (rtx_context.cpp: `if (drawCallState.finalizePendingFutures(...))`), and
-    // geometry hashing runs on worker threads. Angles carrying more of the
-    // large whole-vertex-buffer building meshes take longer to hash, so the
-    // camera update lands later relative to mid-frame injection. That is why
-    // the bleed appears only in runs where the unstable geometry is visible,
-    // and worsens at particular angles.
-    //
-    // MITIGATION, not the root fix. The root fix is to stop making camera
-    // processing wait on per-draw geometry hashing - the camera comes from
-    // transform data and needs the hash only for sky classification. Until
-    // then, tolerate a few frames: a camera 1-3 frames old still describes the
-    // view the frame was drawn with, and using it costs a slight lag, whereas
-    // rejecting it drops the entire frame to raster. Genuine camera loss
-    // (menus, level transitions) lasts far longer than this and is still
-    // detected.
+    // Accept a camera updated up to kMaxCameraStaleFrames ago. RTX is injected mid-frame at Kenshi's
+    // composite boundary while the camera is set during draw submission, and it is only processed once a
+    // draw's geometry work finalises (hashing runs on worker threads), so it can lag the device frame id by
+    // a few frames. Rejecting it drops the whole frame to raster; a camera 1-3 frames old still describes
+    // the view the frame was drawn with. Genuine camera loss (menus, level transitions) lasts far longer
+    // and is still detected. The root fix would be to stop camera processing waiting on geometry hashing.
     static constexpr uint32_t kMaxCameraStaleFrames = 4u;
 
     bool isValid(const uint32_t frameIdx) const {

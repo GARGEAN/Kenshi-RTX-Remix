@@ -1,4 +1,4 @@
-// V708: included inside dxvk before FillMaterialData. No renderer layout changes.
+// Included inside namespace dxvk before FillMaterialData. No renderer layout changes.
 namespace material_reuse {
   using prepared_terrain::Key;
   struct TextureRegistration {
@@ -16,34 +16,22 @@ namespace material_reuse {
     explicit RecordScope(std::vector<TextureRegistration>& out) : previous(recording) { recording = &out; }
     ~RecordScope() { recording = previous; }
   };
-  // Exact named reads in FillMaterialData, except wetness/waterHeightRel, which
-  // affect only frame publication and are read again on every hit. Water falls back.
-  // DX11_V762: quantisation of Kenshi's build progress, shared by the reuse key
-  // here, the value stored on the material, and the V565 material identity. All
-  // three must agree or the caches disagree about what "the same material" means.
-  // MEASURED, V763: Kenshi advances `constructionState` every 0.122-0.126 s -
-  // ~8/sec - and a full build of a 55-unit building takes ~25 s, so it emits
-  // ~197 distinct raw values. That is the ceiling on useful granularity.
-  //
-  // 64 steps put a visible step every ~0.39 s, three game updates apart, which
-  // read as choppy against the game's own smooth fill. 128 halves that to
-  // ~0.19 s. 256 would exceed 197 and match the game exactly, with nothing finer
-  // possible - but each step costs one material-reuse MISS plus one entry in
-  // that 512-slot LRU for 600 frames after last use, so steady-state stale
-  // entries per building under construction run ~26 / ~52 / ~80 at 64 / 128 /
-  // 256. 128 is the chosen balance; the constraint is LRU pressure when several
-  // buildings are under construction at once, not CPU time.
+  // Exact named reads in FillMaterialData, except wetness/waterHeightRel, which only affect frame
+  // publication and are re-read on every hit. Water falls back.
+  // Build-progress quantisation, shared by the reuse key, the value stored on the material and the
+  // material identity (KenshiMaterialConstants); all three must agree. The game advances
+  // constructionState ~8 times a second (~200 distinct values over a typical build). Each step costs
+  // a reuse miss and an entry in the 512-slot LRU, so 128 steps balances smoothness against LRU
+  // pressure when several buildings are under construction.
   static constexpr uint32_t kKenshiConstructionSteps = 128u;
   static inline float quantizeConstructionState(float progress) {
     return float(int(std::lround(std::clamp(progress, 0.0f, 1.0f)
       * float(kKenshiConstructionSteps)))) / float(kKenshiConstructionSteps);
   }
-  // DX11_V766: `muscleBlend` joins this list. A per-draw constant recovered in
-  // FillMaterialData is INVISIBLE unless it is here - the whole of that function
-  // is gated behind a cache whose key hashes exactly these names, so a constant
-  // missing from the list freezes at whatever it was on the first draw and a
-  // second character sharing shader, textures and these constants inherits it.
-  // NOTE: `Layout::constants` below is sized from this array and must match.
+  // Every per-draw constant FillMaterialData recovers must be listed here: the whole function is gated
+  // behind a cache keyed on exactly these names, so a missing constant freezes at its first-draw value
+  // and is shared by every draw with the same shader, textures and constants.
+  // `Layout::constants` below is sized from this array and must match.
   static constexpr const char* names[] = {
     "color1", "color2", "colour1", "colour2", "glossMult", "dustColour", "dustAmount",
     "diffuseChannel", "alphaChannel", "color", "skintone", "hairColor", "hairMult",
@@ -69,17 +57,14 @@ namespace material_reuse {
     k.add(available);
     if (available) k.data(static_cast<const uint8_t*>(mapped.mapPtr) + base + offset, available);
   }
-  // V710: shader metadata is immutable. Retain its owner, never mapped CB values.
+  // Shader metadata is immutable. Retain its owner, never mapped constant-buffer values.
   struct Layout {
     Com<D3D11PixelShader> owner;
     std::array<D3D11NamedConstantProfile::Location,
                sizeof(names) / sizeof(names[0])> constants {};
     D3D11OpacityCutoutProfile alpha;
-    // DX11_V762: build progress. Deliberately NOT in `names` above: that loop
-    // hashes a constant's raw bytes, and this one ramps continuously while a
-    // building is built, so it would mint a fresh cache entry EVERY FRAME for
-    // the whole construction - the exact hazard V565 refuses to hash the dust
-    // amount for. Quantised instead, in `input` below.
+    // Build progress. Not in `names`: that loop hashes raw bytes and progress ramps continuously, so it
+    // would mint a cache entry every frame. Quantised in `input` below instead.
     D3D11NamedConstantProfile::Location construction {};
     std::vector<uint32_t> slots;
     uint64_t lastUsed = 0;
@@ -122,17 +107,9 @@ namespace material_reuse {
       k.add(v.used);
       if (v.used) constantBytes(k, s.ps.constantBuffers[0], v.offset, std::min(v.size, 16u));
     }
-    // DX11_V762_KENSHI_CONSTRUCTION_PROGRESS. Without this term a building under
-    // construction is a permanent cache HIT: `FillMaterialData` never re-runs,
-    // the entry keeps the `constructionState` captured when the building was
-    // placed, and the scaffold never rises. It also made a second building of
-    // the same type inherit the first one's frozen progress, because every other
-    // component of this key matched - the same "whichever drew first wins"
-    // failure V565 documents for dust colour.
-    //
-    // Quantised: one cache entry per visible step of the build line instead of
-    // one per frame. 0xFFFFFFFF distinguishes "this shader has no progress
-    // constant" from step 0, which is a real and very common state.
+    // Build progress. Without it a building under construction is a permanent cache hit: the entry keeps
+    // the progress captured at placement, and other buildings of the same type inherit it. Quantised to
+    // one entry per visible step; 0xFFFFFFFF means "no progress constant", distinct from step 0.
     {
       uint32_t constructionStep = 0xFFFFFFFFu;
       if (metadata.construction.used && metadata.construction.size >= sizeof(float)) {

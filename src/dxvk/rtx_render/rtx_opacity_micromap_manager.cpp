@@ -1622,8 +1622,8 @@ namespace dxvk {
     if (!insertToUnprocessedList(ommRequest, cacheStateListIter))
       return false;
 
-    // V772: successful admission ends staging even for filter-exempt compact
-    // requests. Failed admission retains its history for the next attempt.
+    // Successful admission ends staging even for filter-exempt compact requests. Failed admission keeps
+    // its history for the next attempt.
     m_ommBuildRequestStatistics.erase(ommSrcHash);
 
     // Place the element to the end of the LRU list, and thus marking it as most recent 
@@ -2078,9 +2078,9 @@ namespace dxvk {
 
     // OMM is not available in the cache
     if (ommCacheItemIter == m_ommCache.end()) {
-      // V773: a surviving instance may still remember successful registration
-      // after its unused map was evicted. Requeue only when binding is requested
-      // again; doing this during eviction would immediately refill cold entries.
+      // A surviving instance may still remember successful registration after its unused map was evicted.
+      // Requeue only when binding is requested again; doing it during eviction would immediately refill cold
+      // entries.
       if (!instance.isCreatedByRenderer() && m_blackListedList.find(ommRequest.ommSrcHash) == m_blackListedList.end()) {
         auto& data = getOmmInstanceData(instance);
         data.ommBuildRequested = false;
@@ -2386,8 +2386,8 @@ namespace dxvk {
     item.bakingState.initialized = true;
     item.bakingState.numMicroTrianglesToBake = item.bakingState.numMicroTrianglesBaked =
       count * calculateNumMicroTriangles(item.subdivisionLevel);
-    // V748 tracks this binding through commands/BLASes; its strong owner keeps
-    // the shared VkMicromap alive and charged even after the source is evicted.
+    // This binding is tracked through commands/BLASes; its strong owner keeps the shared VkMicromap alive
+    // and charged even after the source is evicted.
     ctx->getCommandList()->trackResource<DxvkAccess::Read>(binding);
     availableUploadBytes -= bytes;
     ++s_ommReuseStats.gpuShares;
@@ -3192,8 +3192,8 @@ namespace dxvk {
     {
       m_memoryManager.updateMemoryBudget(ctx);
 
-      // V774: every frame gets a small, time-sliced part of the ownership
-      // census, ordering, eviction or planner cleanup. No full-cache sort.
+      // Every frame gets a small, time-sliced part of the ownership census, ordering, eviction or planner
+      // cleanup. No full-cache sort.
       {
         const auto maintenanceStart = std::chrono::steady_clock::now();
         const auto deadline = maintenanceStart + std::chrono::microseconds(200);

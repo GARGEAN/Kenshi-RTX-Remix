@@ -101,8 +101,7 @@ StructuredBuffer<uint16_t> lightMapping;
 layout(binding = BINDING_BILLBOARDS_BUFFER) 
 StructuredBuffer<MemoryBillboard> billboards;
 
-// DX11_V399_KENSHI_TERRAIN_BUFFER: one entry per distinct Kenshi terrain
-// parameter set; the surface material stores its index.
+// One entry per distinct Kenshi terrain parameter set; the surface material stores its index.
 layout(binding = BINDING_KENSHI_TERRAIN_BUFFER)
 StructuredBuffer<KenshiTerrainArgs> kenshiTerrainArgsBuffer;
 

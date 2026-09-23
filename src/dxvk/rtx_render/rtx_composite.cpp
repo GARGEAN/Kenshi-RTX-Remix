@@ -374,11 +374,7 @@ namespace dxvk {
 
     const DomeLightArgs& domeLightArgs = sceneManager.getLightManager().getDomeLightArgs();
     ctx->bindResourceSampler(COMPOSITE_SKY_LIGHT_TEXTURE, linearSampler);
-    // DX11_V497: track whether a sky texture is really bound. The miss path only
-    // samples SkyLight when the primary ray misses, which in Kenshi is almost
-    // never (its sky is real geometry), so an unbound view is invisible there.
-    // Kenshi's distance fog samples it on every HIT pixel and would turn the same
-    // unbound view into a screen-wide null-descriptor read.
+    // Track whether a sky texture is really bound.
     if (domeLightArgs.active) {
       RtxTextureManager& texManager = ctx->getCommonObjects()->getTextureManager();
       const TextureRef& domeLightTex = texManager.getTextureTable()[domeLightArgs.textureIndex];
@@ -408,11 +404,9 @@ namespace dxvk {
       compositeArgs.maxFogDistance = maxFogDistance();
     }
 
-    // DX11_V496_KENSHI_DISTANT_FOG: values harvested from the game's own fog
-    // pass every frame (see d3d11_rtx.cpp). Kept independent of FogState/fogMode
-    // so nothing in the legacy fixed-function fog path has to change, and so
-    // rtx.fogColorScale (0.25 by default, tuned for D3D9 titles) does not silently
-    // quarter a colour the game already gave us in the right space.
+    // Values harvested from the game's own fog pass every frame (see d3d11_rtx.cpp). Independent of
+    // FogState/fogMode, so the legacy fixed-function fog path is untouched and rtx.fogColorScale (0.25,
+    // tuned for D3D9 titles) does not scale a colour the game already provides in the right space.
     {
       const Vector3 kenshiFogColour = KenshiOptions::kenshiFogColour();
       const Vector3 kenshiFogParams = KenshiOptions::kenshiFogParams();
@@ -429,8 +423,8 @@ namespace dxvk {
         && (kenshiFogDensity > 0.0f || kenshiFogAtmoEnd > kenshiFogAtmoStart);
 
       compositeArgs.kenshiFogActive = kenshiFogActive ? 1u : 0u;
-      // DX11_V502: bring the game's display-referred fog colour into radiance
-      // space by matching the visible sky's scale. See rtx_kenshi_options.h.
+      // Bring the game's display-referred fog colour into radiance space by matching the visible sky's
+      // scale (see rtx_kenshi_options.h).
       const float kenshiFogScale = RtxOptions::skyBrightness() * KenshiOptions::kenshiFogBrightness();
       compositeArgs.kenshiFogColour = { kenshiFogColour.x * kenshiFogScale,
                                         kenshiFogColour.y * kenshiFogScale,
@@ -441,9 +435,8 @@ namespace dxvk {
       compositeArgs.kenshiFogAtmoEnd = kenshiFogAtmoEnd;
       compositeArgs.kenshiFogSkyBlend = KenshiOptions::kenshiFogSkyBlend();
 
-      // DX11_V501: horizon colour replaces the sky-matte fetch entirely, so the
-      // fog no longer depends on a sky texture being bound and the V497 validity
-      // guard is no longer needed.
+      // The horizon colour replaces a sky-matte fetch, so the fog does not depend on a sky texture being
+      // bound.
       const Vector3 kenshiFogHorizon = KenshiOptions::kenshiFogHorizon();
       const Vector3 kenshiFogExtra = KenshiOptions::kenshiFogExtra();
       compositeArgs.kenshiFogHorizonColour = { kenshiFogHorizon.x * kenshiFogScale,
@@ -451,9 +444,8 @@ namespace dxvk {
                                                kenshiFogHorizon.z * kenshiFogScale };
       compositeArgs.kenshiFogHorizonBlend = kenshiFogExtra.x;
 
-      // DX11_V503: SkyX scattering constants. `kenshiFogScatterScale` carries the
-      // same display-referred correction the flat colours get, since the game's
-      // scattering result is composited into its finished image just like they are.
+      // SkyX scattering constants. kenshiFogScatterScale carries the same display-referred correction as the
+      // flat colours, since the game composites its scattering into the finished image too.
       const Vector3 skyXCameraPos = KenshiOptions::kenshiSkyXCameraPos();
       const Vector3 skyXInvWaveLength = KenshiOptions::kenshiSkyXInvWaveLength();
       const Vector3 skyXScatter = KenshiOptions::kenshiSkyXScatter();
@@ -474,7 +466,7 @@ namespace dxvk {
       const float sunDirLenSq = kenshiFogSunDir.x * kenshiFogSunDir.x
                               + kenshiFogSunDir.y * kenshiFogSunDir.y
                               + kenshiFogSunDir.z * kenshiFogSunDir.z;
-      // DX11_V505: snapshot this frame's local fog volumes.
+      // Snapshot this frame's local fog volumes.
       {
         static_assert(KENSHI_FOG_MAX_VOLUMES == int(kenshi_fog::kMaxFogVolumes),
                       "CompositeArgs volume cap must match the bridge-side store");
@@ -611,10 +603,9 @@ namespace dxvk {
       ctx->dispatch(workgroups.width, workgroups.height, workgroups.depth);
     }
 
-    // DX11_V791: one hotkey capture, no persistent resources or normal-frame
-    // dispatches. Reuse the actual lobe weighting, including BSDF factors,
-    // denoiser unpacking, roughness remodulation and primary attenuation.
-    // The shader's private sentinel returns before all history/output writes.
+    // One hotkey capture, no persistent resources or normal-frame dispatches. Reuses the actual lobe
+    // weighting, including BSDF factors, denoiser unpacking, roughness remodulation and primary
+    // attenuation. The shader's private sentinel returns before all history/output writes.
     if (kenshi_telemetry::enabled() && settings.captureLighting) {
       Rc<DxvkContext> captureContext = ctx;
       auto captureOutput = Resources::createImageResource(captureContext,

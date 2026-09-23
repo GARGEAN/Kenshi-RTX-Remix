@@ -1,5 +1,5 @@
-// V718 bounded pure-candidate oracle. Production arithmetic is checked against
-// this block by the offline source-equivalence fixture. Never runs on normal launch.
+// Bounded pure-candidate oracle, checked against the production arithmetic offline. Never runs on a
+// normal launch.
 namespace ogre_candidates {
   struct Candidates {
     std::array<Matrix4, 8> views, projections;

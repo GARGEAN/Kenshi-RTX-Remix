@@ -2,7 +2,7 @@
 #include <array>
 #include <cstdint>
 
-// V786: native operations and their immutable submitted-frame cut state.
+// Native operations and their immutable submitted-frame cut state.
 namespace dxvk::kenshi_camera_audit {
 using Handle = std::array<uint32_t, 5>;
 using Position = std::array<float, 3>;

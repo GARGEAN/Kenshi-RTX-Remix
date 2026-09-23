@@ -62,8 +62,8 @@ namespace material_probe_front {
     const auto* ps = state.ps.shader.ptr() ? state.ps.shader->GetCommonShader() : nullptr;
     const auto* vs = state.vs.shader.ptr() ? state.vs.shader->GetCommonShader() : nullptr;
     const bool isFarTerrain = farShader(ps);
-    // V744: startup terrain-params expires before the selected rock is reached.
-    // Use the native family even when the translated terrain marker is missing.
+    // Startup terrain-params logging can expire before the selected rock is reached; use the native
+    // family even when the translated terrain marker is missing.
     const bool isTerrainFeature = vs && vs->GetKenshiProjection() == 3u;
     if (!reason && !isFarTerrain && !isTerrainFeature) return;
     if (rows >= 256u) { ++suppressed; return; }

@@ -1007,9 +1007,7 @@ void resolveVertexUnorderedParticles<
       const OpaqueSurfaceMaterial opaqueSurfaceMaterial = opaqueSurfaceMaterialCreate(memoryPolymorphicSurfaceMaterial);
 
 #ifdef RAY_TRACING_PRIMARY_RAY
-      // DX11_V389_PARTICLE_MATERIAL_CHAIN: observe what this surface will
-      // actually sample, including the dimensions returned by the same bindless
-      // descriptor. Payload: (drawCallID, albedoTextureIndex, width, height).
+      // GPU print probe: what this surface samples. Payload: (drawCallID, albedoTextureIndex, width, height).
       uvec2 albedoExtent = uvec2(0u);
       const uint albedoTextureIndex = uint(opaqueSurfaceMaterial.albedoOpacityTextureIndex);
       if (albedoTextureIndex != BINDING_INDEX_INVALID)

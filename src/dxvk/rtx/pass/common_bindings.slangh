@@ -101,8 +101,7 @@ StructuredBuffer<uint16_t> lightMapping;
 layout(binding = BINDING_BILLBOARDS_BUFFER) 
 StructuredBuffer<MemoryBillboard> billboards;
 
-// DX11_V399_KENSHI_TERRAIN_BUFFER: one entry per distinct Kenshi terrain
-// parameter set; the surface material stores its index.
+// One entry per distinct Kenshi terrain parameter set; the surface material stores its index.
 layout(binding = BINDING_KENSHI_TERRAIN_BUFFER)
 StructuredBuffer<KenshiTerrainArgs> kenshiTerrainArgsBuffer;
 
@@ -118,18 +117,15 @@ StructuredBuffer<uint4> kenshiBloodArgsBuffer;
 layout(binding = BINDING_KENSHI_TERRAIN_BLOOD_BUFFER)
 StructuredBuffer<uint4> kenshiTerrainBloodBuffer;
 
-// DX11_V603_KENSHI_WATER_ZONES. Element 0 is a header (.x = zone count), then
-// four uint4 per zone, all floats:
+// Water zones: element 0 is a header (.x = zone count), then four uint4 per zone, all floats:
 //   [0] rect      : minX, minZ, maxX, maxZ
 //   [1] wave      : tileScaleX, tileScaleY, speedX, speedY
 //   [2] surface   : distortion, invStrength, scumScaleX, scumScaleY
 //   [3] extra     : scumDistortion, rainAmount, 0, 0
-// DX11_V650_KENSHI_INTERIOR_SHELL. Kenshi's interior mask shells as exact
-// geometry. Element 0 is a header (.x = volume count); element 1 holds the uint4
-// offset of each volume's record. A record carries the world-to-object transform,
-// an object-space box for broad rejection, a 2D bin grid over the footprint, and
-// the shell's own triangles. Point containment is a signed vertical crossing
-// count against only the triangles binned under the point.
+// Interior shells: element 0 is a header (.x = volume count); element 1 holds the uint4 offset of each
+// volume's record. A record carries the world-to-object transform, an object-space box for broad
+// rejection, a 2D bin grid over the footprint and the shell's own triangles; containment is a signed
+// vertical crossing count against the triangles binned under the point.
 layout(binding = BINDING_KENSHI_INTERIOR_BUFFER)
 StructuredBuffer<uint4> kenshiInteriorVolumeBuffer;
 

@@ -23,20 +23,11 @@
 
 #include "rtx/concept/surface/surface.slangh"
 
-// DX11_V560: sample at an EXPLICIT mip with a coordinate of our own choosing.
-//
-// textureRead below uses SampleGrad with the surface's stored gradients, which
-// belong to the surface's OWN uvs. That is correct whenever the substituted
-// coordinate is an affine function of those uvs (Kenshi's terrain detail layers,
-// where the constant scale factor is just a fixed mip bias) - and wrong when it
-// is not related to them at all.
-//
-// The dust noise is sampled at WORLD XZ, which has no relationship to a
-// building's uvs: the gradient mismatch varies per object and lands many mips
-// too coarse, so every dusty surface read essentially the texture's average and
-// dust rendered as a flat wash or not at all. At 0.002 units per texel one tile
-// spans 500 world units, so the pattern is very low frequency on screen and mip
-// 0 neither aliases nor costs anything.
+// Sample at an explicit mip with a coordinate of our own choosing. textureRead uses SampleGrad with the
+// surface's stored gradients, which belong to the surface's own UVs: fine for a coordinate affine in
+// them (terrain detail layers), wrong for an unrelated one. The dust noise is sampled at world XZ, where
+// the gradients would select a mip many levels too coarse (the texture's average). At 0.002 per unit
+// one tile spans 500 world units, so mip 0 neither aliases nor costs anything.
 vec4 textureReadLevel(uint16_t textureIndex, uint16_t samplerIndex, vec2 coordinates, float lod = 0.0)
 {
   return textures[nonuniformEXT(uint(textureIndex))].SampleLevel(

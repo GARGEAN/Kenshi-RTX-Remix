@@ -291,12 +291,11 @@ namespace dxvk {
       // Skinning processing will be finalized here, if object requires skinning
       finalizeSkinningData(pLastCamera);
 
-      // Update any categories that require geometry hash
-      // V691: eligible DX11 terrain captures an empty geometry-sky policy. A tag
-      // edit made while this command is queued applies to subsequent submissions;
-      // it cannot turn this independent commit into a native-pipeline consumer.
-      // Geometry categorization currently adds only Sky. All other paths retain
-      // their original late lookup, including every draw with a nonempty tag set.
+      // Update any categories that require geometry hash.
+      // Eligible DX11 terrain captures an empty geometry-sky policy at submission: a tag edit made while this
+      // command is queued applies to later submissions and cannot turn this commit into a native-pipeline
+      // consumer. Geometry categorization currently adds only Sky; every other path keeps its original late
+      // lookup.
       if (!geometrySkyDisabledAtSubmission)
         setupCategoriesForGeometry();
 
@@ -730,18 +729,10 @@ namespace dxvk {
   void DrawCallState::setupCategoriesForHeuristics(uint32_t prevFrameSeenCamerasCount,
                                                    std::vector<Vector3>& seenCameraPositions) {
     ScopedCpuProfileZone();
-    // DX11_V448: an upstream layer may already have classified this draw as sky
-    // from evidence the heuristics here cannot see - the DX11 bridge does it by
-    // vertex-shader constant name. Preserve that decision instead of
-    // overwriting it.
-    //
-    // This matters because the auto-detector cannot classify a DEFERRED
-    // renderer's sky at all: it assumes the classic "sky first, then world"
-    // order (the first draw of the frame with depth testing off), while Kenshi
-    // composites its sky AFTER the whole G-buffer and draws it with depth
-    // testing ON. By then two camera positions have been seen, so
-    // checkSkyAutoDetect takes its "subsequent draw calls can not be sky" exit
-    // and returns false for every sky draw in the frame.
+    // An upstream layer may already have classified this draw as sky from evidence the heuristics here
+    // cannot see (the DX11 bridge uses vertex-shader constant names); preserve that decision. The
+    // auto-detector cannot classify a deferred renderer's sky: it assumes the first depth-test-off draw of
+    // the frame, while Kenshi composites its sky after the G-buffer with depth testing on.
     const bool skyPreClassified = testCategoryFlags(InstanceCategories::Sky);
 
     const SkyDetectionSource skySource = shouldBakeSky(*this,

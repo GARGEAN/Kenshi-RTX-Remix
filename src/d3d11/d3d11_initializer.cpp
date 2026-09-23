@@ -89,10 +89,8 @@ namespace dxvk {
             pBuffer->SetIndexShadow(pInitialData->pSysMem, desc.ByteWidth);
         }
 
-        // DX11_V473_VERTEX_SHADOW: same treatment for vertex buffers, so an
-        // object-space bounding box can be derived for anti-culling. The bytes
-        // are released again as soon as the box exists (see
-        // D3D11Buffer::SetCachedVertexBounds), so this is transient.
+        // Same for vertex buffers, for anti-culling bounding boxes. Transient: the bytes are released once
+        // the box exists (D3D11Buffer::SetCachedVertexBounds).
         if (desc.BindFlags & D3D11_BIND_VERTEX_BUFFER)
           pBuffer->UpdateVertexShadow(0, pInitialData->pSysMem, desc.ByteWidth);
       }

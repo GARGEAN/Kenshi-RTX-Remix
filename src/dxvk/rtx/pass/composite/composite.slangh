@@ -72,11 +72,8 @@ vec4 calculateFog(float viewDistance)
 }
 
 
-// DX11_V503: Kenshi's own atmospheric scattering, ported from
-// `Kenshi Base/data/materials/post/atmospherefog.hlsl`.
-//
-// Optical-depth approximation used by SkyX. Kept byte-for-byte with the game's
-// polynomial so the curve matches rather than merely resembles.
+// Kenshi's atmospheric scattering, ported from data/materials/post/atmospherefog.hlsl.
+// SkyX optical-depth approximation, identical to the game's polynomial.
 float kenshiSkyXScaleFn(float coss, float scaleDepth)
 {
   const float x = 1.0f - coss;
@@ -154,41 +151,12 @@ vec3 calculateKenshiScattering(vec3 cameraPos, vec3 worldPos, vec3 lightDir)
   return rayleighPhase * rayleighColour * cb.kenshiSkyXExposure;
 }
 
-// DX11_V496_KENSHI_DISTANT_FOG, rewritten in V501 and V503.
-//
-// Kenshi's own `atmosphere_fog_fs` (Kenshi Base/data/materials/post/fog.hlsl):
-//
+// Kenshi's distance fog (atmosphere_fog_fs in data/materials/post/fog.hlsl):
 //   atmosphere = scattering colour, alpha ramped atmoStart..atmoEnd
 //   if (distance == farClip) atmosphere = 0            // sky: atmospheric half off
 //   global     = fogValue(distance, fogDensity, fogColour, sunColour.w)
 //   result     = lerp(atmosphere, global, global.a)
 //   result.a   = saturate(atmosphere.a + global.a)
-//
-// Two things V496 got wrong, both visible:
-//
-// 1. IT SKIPPED THE SKY ENTIRELY. Vanilla zeroes only the ATMOSPHERIC half at
-//    farClip - the global half still evaluates AT farClip, where `amount`
-//    saturates to 1 and the sky is fogged at full `fogColour.a`. Skipping both
-//    left fogged land against an unfogged sky.
-//
-// 2. IT USED THE SKY IMAGE as the atmospheric colour, sampled at the pixel's own
-//    screen UV, with an alpha ramp that reaches 1.0 by atmoEnd. Distant geometry
-//    was therefore REPLACED by whatever the sky matte held at that pixel -
-//    stars, sun glints, and below the horizon the skybox's bright green. That is
-//    both the "green glow in low areas" and the "stars visible through
-//    mountains".
-//
-// The atmospheric colour now comes from the game's own `horizonClouds`, which is
-// the last thing calculateAtmosphereFog does to its scattering result
-// (`color.rgb = lerp(color.rgb, horizonClouds.rgb, horizonClouds.a)`) and is what
-// makes vanilla's fog read grey and overcast. It is a constant, so it is smooth,
-// carries no image features, has no view-direction artefacts - and costs one
-// fewer texture fetch than the version it replaces.
-//
-// Remaining known gap: vanilla's scattering varies with view direction relative
-// to the sun and this does not. Porting the four-sample SkyX scattering is the
-// fix if that difference matters; every uniform it needs is a named constant on
-// the SkyX draws the sun harvest already reads.
 vec4 calculateKenshiFog(float viewDistance, bool primaryMiss, vec3 worldDirection)
 {
   if (cb.kenshiFogActive == 0)
@@ -217,13 +185,8 @@ vec4 calculateKenshiFog(float viewDistance, bool primaryMiss, vec3 worldDirectio
       (viewDistance - cb.kenshiFogAtmoStart)
       / (cb.kenshiFogAtmoEnd - cb.kenshiFogAtmoStart)) * cb.kenshiFogSkyBlend;
 
-    // V503: the atmospheric colour is now Kenshi's own scattering, evaluated per
-    // pixel, finished with the game's horizonClouds lerp exactly as
-    // calculateAtmosphereFog does. That lerp is why the constant-colour version
-    // looked correct where it was first measured: `horizonA` was 1.0 in that
-    // hazy biome, which collapses the scattering away entirely. Where the sky is
-    // clear `horizonA` is low, the scattering dominates, and a constant flattens
-    // every distant pixel to one grey.
+    // Atmospheric colour: Kenshi's per-pixel scattering, finished with the game's horizonClouds lerp
+    // as calculateAtmosphereFog does.
     if (cb.kenshiFogScatterValid != 0)
     {
       const vec3 cameraPos = cameraGetWorldPosition(cb.camera);
@@ -250,16 +213,10 @@ vec4 calculateKenshiFog(float viewDistance, bool primaryMiss, vec3 worldDirectio
 }
 
 
-// DX11_V505: Kenshi's local fog volumes, ported from fog_planes_fs and
-// fog_sphere_fs in `Kenshi Base/data/materials/post/fog.hlsl`.
-//
-// Both integrate `amount = far - near` - the path length THROUGH the medium -
-// and then run it through the same fogValue S-curve the distance fog uses. That
-// is why standing inside a volume needs no special case: `near` simply becomes 0.
-//
-// Returns premultiplied-style (rgb, alpha) to be blended over the radiance, and
-// is evaluated BEFORE the distance fog so distant volumes get washed by it, which
-// is what the game's own "fog the fog" blend achieves in fog_planes_fs.
+// Kenshi's local fog volumes, ported from fog_planes_fs and fog_sphere_fs (post/fog.hlsl).
+// Both integrate the path length through the medium (far - near) and apply the distance fog's
+// fogValue curve, so a camera inside a volume needs no special case. Returns (rgb, alpha) to blend
+// over the radiance; runs before the distance fog, which then fogs the volumes as the game does.
 vec4 calculateKenshiFogVolume(
   uint volumeIndex, vec3 cameraPos, vec3 viewRay, float viewDistance)
 {

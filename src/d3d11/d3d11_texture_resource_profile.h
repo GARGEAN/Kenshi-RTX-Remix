@@ -40,7 +40,7 @@ namespace dxvk {
         normal |= entry.lower.find("normalmap") != std::string::npos;
       }
       if (flow && normal) m_waterColourSlot = colourSlot;
-      // V699: preserve the old scans' ordering, else-if rules and t0 validity.
+      // Preserve the original scans' ordering, else-if rules and t0 validity.
       for (uint32_t slot = 0; slot < slotCount(); ++slot) {
         const auto& name = lowerName(slot);
         if (name.find("diffusemaps") != std::string::npos && m_terrain.diffuse == UINT32_MAX)

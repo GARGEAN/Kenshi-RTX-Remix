@@ -22,16 +22,9 @@
 #ifndef RTX_PASS_COMPOSITE_COMPOSITE_ARGS_H_DX11V225
 #define RTX_PASS_COMPOSITE_COMPOSITE_ARGS_H_DX11V225
 
-// DX11_V505: maximum simultaneously visible Kenshi fog volumes. Must match
-// dxvk::kenshi_fog::kMaxFogVolumes in rtx_kenshi_fog_volumes.h.
-//
-// DX11_V754: raised 16 -> 32. 16 was sized from "28 volumes in the whole world,
-// so 16 on screen is generous" and that reasoning was wrong - a Ctrl+Alt+O trace
-// in the Swamp measured 18 publishable volumes in a single frame. The full
-// reasoning and the measurement are on kenshi_fog::kMaxFogVolumes. Cost is 160
-// bytes per volume: CompositeArgs measures 8288 bytes at 16 and 10848 at 32,
-// in a uniform buffer whose limit on the target hardware is 64 KiB.
-#define KENSHI_FOG_MAX_VOLUMES 32 // DX11_V225_GUARD
+// Maximum simultaneously visible Kenshi fog volumes; must match kenshi_fog::kMaxFogVolumes
+// (rtx_kenshi_fog_volumes.h). Each costs 160 bytes of CompositeArgs.
+#define KENSHI_FOG_MAX_VOLUMES 32
 
 #include "rtx/utility/shader_types.h"
 #include "rtx/pass/volume_args.h"
@@ -124,9 +117,8 @@ struct CompositeArgs {
   float kenshiFogDensity;
   float kenshiFogOpacity;
 
-  // DX11_V496_KENSHI_DISTANT_FOG. Appended at the END of the struct on purpose -
-  // inserting into the middle of a shared args struct was a measured regression
-  // (see the V456/V457 entries for RaytraceArgs).
+  // Kenshi distance fog. Append new fields at the END of this shared struct: inserting mid-struct
+  // desynchronises the CPU and GPU layouts.
   vec3 kenshiFogColour;
   uint kenshiFogActive;
 
@@ -138,7 +130,7 @@ struct CompositeArgs {
   vec3 kenshiFogHorizonColour;
   float kenshiFogHorizonBlend;
 
-  // DX11_V503: SkyX scattering, appended at the END of the struct.
+  // SkyX scattering.
   vec3 kenshiSkyXCameraPos;
   float kenshiSkyXInnerRadius;
 
@@ -154,8 +146,8 @@ struct CompositeArgs {
   vec3 kenshiFogSunDir;
   uint kenshiFogScatterValid;
 
-  // DX11_V505: Kenshi's local fog volumes. The cap costs constant-buffer bytes
-  // only - the shader loops to kenshiFogVolumeCount, never to the cap.
+  // Kenshi's local fog volumes. The cap costs constant-buffer bytes only; the shader loops to
+  // kenshiFogVolumeCount.
   // planes: block = 7 world-space planes (dot(n,p) <= w);
   //         sphere = [0] is (centre.xyz, radius);
   //         cylinder = [0] (base.xyz, radius), [1] (axis.xyz, height).

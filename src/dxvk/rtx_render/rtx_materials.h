@@ -126,12 +126,8 @@ struct RtSurface {
     flags0 |= colorTextureIsSrgb ? (1 << 2) : 0;
     flags0 |= emissiveTextureIsSrgb ? (1 << 3) : 0;
     flags0 |= kenshiDistantTown ? (1 << 4) : 0;
-    // DX11_V761: this draw is a building UNDER CONSTRUCTION. It lives on the
-    // SURFACE, not the material, because the opaque material's `flags` is a
-    // uint16 whose usable range is bits 2-15 (COMMON_MATERIAL_FLAG_TYPE_OFFSET
-    // adds 2 for the material-type field) and offsets 0-13 already fill it -
-    // V760 asked for offset 14, which is bit 16, and the flag was silently
-    // dropped on the way to the GPU. flags0 here has bits 5-15 free.
+    // Building under construction. On the surface, not the material: the opaque material's uint16 `flags`
+    // is full (bits 2-15), and a flag past it is silently dropped. flags0 bits 6-15 remain free.
     flags0 |= kenshiConstruction ? (1 << 5) : 0;
     writeGPUHelper(data, offset, flags0);
 
@@ -306,10 +302,7 @@ struct RtSurface {
     textureFlags |= eyeParams ? (1 << 14) : 0;
     // textureFlags bit 15 unused
 
-    // 3 bits at 16, matching Surface::texcoordGenerationMode. TexGenMode
-    // outgrew two bits when WorldPositions was added; bits 17-18 were the old
-    // field, so the widening consumed the free bit below it rather than
-    // relocating the field.
+    // 3 bits at 16, matching Surface::texcoordGenerationMode.
     static_assert(static_cast<uint32_t>(TexGenMode::Count) <= 8);
     textureFlags |= ((static_cast<uint32_t>(texgenMode) & 0x7) << 16);
 
@@ -401,8 +394,7 @@ struct RtSurface {
   bool isVertexColorBakedLighting = true;
   // Native distant-town colour/gloss contract; flags0 bit4, no GPU layout growth.
   bool kenshiDistantTown = false;
-  // DX11_V761: under-construction scaffold contract; flags0 bit5. See the
-  // flags0 write above for why this is on the surface and not the material.
+  // Under-construction scaffold contract; flags0 bit 5 (see the flags0 write above).
   bool kenshiConstruction = false;
   bool colorTextureIsSrgb = false;
   bool emissiveTextureIsSrgb = false;
@@ -640,17 +632,17 @@ struct RtOpaqueSurfaceMaterial {
     uint32_t kenshiCharacterHairTextureIndex = 0,
     uint32_t kenshiCharacterBeardTextureIndex = 0,
     uint16_t kenshiCharacterHairChannels = 0,
-    // DX11_V490: 0 = octahedral (Remix default), 1 = Kenshi RGB, 2 = DXT5nm.
+    // 0 = octahedral (Remix default), 1 = Kenshi RGB, 2 = DXT5nm.
     uint32_t kenshiNormalEncoding = 0,
-    // DX11_V533: the diffuse alpha is gloss, scaled by roughnessConstant.
+    // The diffuse alpha is gloss, scaled by roughnessConstant.
     bool kenshiGlossInAlpha = false,
-    // DX11_V550: secondaryTextureIndex is this material's SECOND albedo, blended
-    // with the first by the vertex colour's alpha.
+    // secondaryTextureIndex is this material's second albedo, blended with the first by the vertex
+    // colour's alpha.
     bool kenshiDualTextureSet = false,
-    // DX11_V552: secondaryTextureIndex is a two-channel recolour mask, and
-    // albedoOpacityConstant / emissiveColorConstant carry the two colours.
+    // secondaryTextureIndex is a two-channel recolour mask; albedoOpacityConstant / emissiveColorConstant
+    // carry the two colours.
     bool kenshiColorMask = false,
-    // DX11_V554: this character material carries a worn-clothing layer.
+    // This character material carries a worn-clothing layer.
     bool kenshiCharacterVest = false
   ) :
     m_albedoOpacityTextureIndex{ albedoOpacityTextureIndex }, m_secondaryTextureIndex{secondaryTextureIndex}, m_normalTextureIndex{ normalTextureIndex },
@@ -708,8 +700,7 @@ struct RtOpaqueSurfaceMaterial {
     if (m_kenshiCharacterHead) {
       flags |= OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_CHARACTER_HEAD;
     }
-    // DX11_V490_KENSHI_NORMAL_ENCODING: 0 = octahedral (Remix's own), so a USD
-    // replacement keeps decoding exactly as before.
+    // 0 = octahedral (Remix's own), so a USD replacement decodes exactly as before.
     if (m_kenshiNormalEncoding == 1u) {
       flags |= OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_NORMAL_RGB;
     } else if (m_kenshiNormalEncoding == 2u) {
@@ -739,16 +730,9 @@ struct RtOpaqueSurfaceMaterial {
     uint32_t heightTextureIndex = m_heightTextureIndex;
     float thinFilmThickness = m_cachedThinFilmNormalizedThicknessConstant;
     float emissiveIntensity = m_cachedEmissiveIntensity;
-    // DX11_V766_KENSHI_MUSCLE_NORMAL: the muscle-blend normal map rides in
-    // heightTextureIndex, and this branch does not merely leave that slot
-    // alone - it WIPES it, because "if any POM attribute would disable POM,
-    // disable all POM attributes". Without the exemption the feature's CPU half
-    // would work while its texture index arrived invalid.
-    //
-    // DX11_V768: `hasValidDisplacement()` now returns false outright for these
-    // materials, so this branch is the one that runs and the displacement
-    // scalars are zeroed here - which is what keeps the slot genuinely inert
-    // rather than merely unread. See the note on that function.
+    // The muscle-blend normal map rides in heightTextureIndex. hasValidDisplacement() returns false for
+    // these materials, so the no-POM branch below runs: it zeroes the displacement scalars but must be
+    // exempted from wiping heightTextureIndex, or the muscle map would arrive invalid.
     const bool kenshiMuscleBlend = kenshiHasMuscleBlendMap();
     if (hasValidDisplacement()) {
       flags |= OPAQUE_SURFACE_MATERIAL_FLAG_HAS_DISPLACEMENT;
@@ -832,37 +816,18 @@ struct RtOpaqueSurfaceMaterial {
     return !hasTexture || m_samplerIndex != kSurfaceMaterialInvalidTextureIndex;
   }
 
-  // DX11_V766: bits 10-15 of the hair-channel word carry the muscle blend, and a
-  // non-zero amount is what proves heightTextureIndex holds V766's muscle normal
-  // map rather than a real height map.
+  // Bits 10-15 of the hair-channel word carry the muscle blend; a non-zero amount proves
+  // heightTextureIndex holds the muscle normal map, not a height map.
   bool kenshiHasMuscleBlendMap() const {
     return (m_kenshiCharacterHairChannels >> 10u) != 0u;
   }
 
-  // DX11_V768_KENSHI_MUSCLE_POM: a material carrying the muscle map must never
-  // be displaced.
-  //
-  // V766 aliased the muscle normal map into heightTextureIndex on the grounds
-  // that the slot is "dead on every Kenshi material - this bridge supplies no
-  // height map and never sets HAS_DISPLACEMENT". The second clause was true
-  // ONLY BECAUSE of the first: `DisplaceIn` defaults to **0.05** on every
-  // OpaqueMaterialData (`rtx_material_data.h`, the X-macro's sixth column), and
-  // `rtx.displacement.mode` defaults to QuadtreePOM with nothing in this game's
-  // config turning it off. The sole thing suppressing POM across the whole title
-  // was heightTextureIndex being invalid - so the alias did not occupy a dead
-  // slot, it switched parallax occlusion mapping ON for exactly the materials it
-  // touched, and marched the muscle map as if it were a height field.
-  //
-  // `opaqueSurfaceMaterialInteractionCreate` runs POM BEFORE every texture read
-  // in the function and overwrites `surfaceInteraction.textureCoordinates`, so
-  // albedo, both normal maps, the masks, hair and vest all then sampled at
-  // displaced coordinates. That is why the damage was not confined to the body
-  // the muscle blend applies to, and why it tracked character STATS.
-  //
-  // **Aliasing a field can change behaviour by being SET, not only by being
-  // read.** V555's rule - disable the ordinary consumer in the same edit - is
-  // necessary and was not sufficient here: the POM consumers were all correctly
-  // gated, and the gate itself was what the alias flipped.
+  // A material carrying the muscle map must never be displaced. `DisplaceIn` defaults to 0.05 on every
+  // OpaqueMaterialData (rtx_material_data.h) and rtx.displacement.mode defaults to QuadtreePOM, so the
+  // only thing keeping POM off in this game is heightTextureIndex being invalid - aliasing the muscle map
+  // there would switch POM on. opaqueSurfaceMaterialInteractionCreate runs POM before every texture read
+  // and overwrites the texture coordinates, so everything on the material would sample at displaced
+  // coordinates. Aliasing a field can change behaviour by being set, not only by being read.
   bool hasValidDisplacement() const {
     if (kenshiHasMuscleBlendMap()) {
       return false;
@@ -1013,21 +978,17 @@ private:
       uint32_t kenshiCharacterHairTextureIndex;
       uint32_t kenshiCharacterBeardTextureIndex;
       uint32_t kenshiCharacterHairChannels;
-      // DX11_V490: must participate in the hash - two materials sharing every
-      // other field but decoding their normal map differently are NOT the same
-      // material, and collapsing them would give one of them the wrong decode.
+      // Must participate in the hash: materials that differ only in normal decode are different materials.
       uint32_t kenshiNormalEncoding;
-      // DX11_V533: two materials differing only in whether their alpha is gloss
-      // are genuinely different materials.
+      // Materials differing only in whether their alpha is gloss are different materials.
       uint32_t kenshiGlossInAlpha;    // NOTE: uint32_t to avoid padding
-      // DX11_V550: two materials differing only in whether their secondary
-      // texture is a second albedo are different materials.
+      // Materials differing only in whether their secondary texture is a second albedo are different
+      // materials.
       uint32_t kenshiDualTextureSet;  // NOTE: uint32_t to avoid padding
-      // DX11_V552: two materials differing only in whether their secondary
-      // texture is a recolour mask are different materials.
+      // Materials differing only in whether their secondary texture is a recolour mask are different
+      // materials.
       uint32_t kenshiColorMask;       // NOTE: uint32_t to avoid padding
-      // DX11_V554: a body with clothing and the same body without are
-      // different materials.
+      // A body with clothing and the same body without are different materials.
       uint32_t kenshiCharacterVest;   // NOTE: uint32_t to avoid padding
       // NOTE: There must be NO padding between members, as the struct is used for hashing
     };
@@ -1130,15 +1091,15 @@ private:
   uint32_t m_kenshiCharacterHeadMaskTextureIndex;
   uint32_t m_kenshiCharacterHairTextureIndex;
   uint32_t m_kenshiCharacterBeardTextureIndex;
-  // DX11_V490: 0 = octahedral (Remix default), 1 = Kenshi RGB, 2 = DXT5nm.
+  // 0 = octahedral (Remix default), 1 = Kenshi RGB, 2 = DXT5nm.
   uint32_t m_kenshiNormalEncoding = 0u;
-  // DX11_V533: see OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_GLOSS_IN_ALPHA.
+  // See OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_GLOSS_IN_ALPHA.
   bool m_kenshiGlossInAlpha = false;
-  // DX11_V550: see OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_DUAL_TEXTURE_SET.
+  // See OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_DUAL_TEXTURE_SET.
   bool m_kenshiDualTextureSet = false;
-  // DX11_V552: see OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_COLOR_MASK.
+  // See OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_COLOR_MASK.
   bool m_kenshiColorMask = false;
-  // DX11_V554: see OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_CHARACTER_VEST.
+  // See OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_CHARACTER_VEST.
   bool m_kenshiCharacterVest = false;
 
   XXH64_hash_t m_cachedHash;
@@ -2041,65 +2002,54 @@ struct LegacyMaterialData {
   // Set only when the pixel-shader bytecode proves that its cutout mask is
   // sampled from colorTextures[1], rather than from the albedo texture.
   bool useSecondaryTextureForOpacity = false;
-  // DX11_V396_KENSHI_TERRAIN: set when this draw is Kenshi's terrain. The
-  // vectors turn the surface's interpolated overlay coordinate into the base
-  // tiled detail coordinate; see KenshiTerrainArgs for the derivation.
+  // Set when this draw is Kenshi's terrain. The vectors turn the surface's interpolated overlay
+  // coordinate into the base tiled detail coordinate; see KenshiTerrainArgs.
   uint8_t kenshiTerrainBlend = 0; // 1 ground, 2 NO_ROADS feature; same storage
-  // DX11_V633_KENSHI_RAIN: exact capture-side rain-family marker. Per-draw and
-  // deliberately excluded from material identity; the four textures already
-  // have distinct hashes and this state belongs to the surface blend path.
+  // Exact capture-side rain-family marker. Per draw and excluded from material identity: the four
+  // textures already have distinct hashes, and this state belongs to the surface blend path.
   bool kenshiRain = false;
   // FS_0284 character draws add the head atlas at UV.y + 1 for negative UVs.
   bool kenshiCharacterHead = false;
-  // DX11_V550_KENSHI_DUAL_TEXTURE_SET: this draw's pixel shader carries two full
-  // texture sets and blends them with COLOR0.a. colorTextures[1] holds the
-  // second albedo (`diffuseMap2` / `base_map2`).
+  // This draw's pixel shader carries two full texture sets and blends them with COLOR0.a.
+  // colorTextures[1] holds the second albedo (diffuseMap2 / base_map2).
   bool kenshiDualTextureSet = false;
-  // DX11_V551: the second set's NORMAL and METAL maps. Carried in two of the
-  // character-mask texture indices, which no dual-set material uses.
+  // The second set's normal and metal maps, carried in two of the character-mask texture indices, which
+  // no dual-set material uses.
   TextureRef kenshiDualNormalTexture = {};
   TextureRef kenshiDualMetalTexture = {};
-  // DX11_V552_KENSHI_COLOR_MASK: Kenshi's two-colour recolour (armour, gear).
-  // colorTextures[1] holds the mask; the two colours travel as constants.
+  // Kenshi's two-colour recolour (armour, gear). colorTextures[1] holds the mask; the two colours travel
+  // as constants.
   bool kenshiColorMask = false;
   Vector4 kenshiColor1 = Vector4(0.0f, 0.0f, 0.0f, 0.0f);
   Vector4 kenshiColor2 = Vector4(0.0f, 0.0f, 0.0f, 0.0f);
-  // DX11_V554_KENSHI_CHARACTER_VEST: the worn-clothing layer. `vestNormal`'s
-  // ALPHA is the coverage mask that decides skin versus clothing per texel.
+  // The worn-clothing layer. vestNormal's alpha is the coverage mask that decides skin versus clothing
+  // per texel.
   bool kenshiCharacterVest = false;
   TextureRef kenshiVestDiffuseTexture = {};
   TextureRef kenshiVestNormalTexture = {};
   TextureRef kenshiVestMaskTexture = {};
   Vector4 kenshiVestColor = Vector4(1.0f, 1.0f, 1.0f, 1.0f);
-  // DX11_V760_KENSHI_CONSTRUCTION: this draw is a building UNDER CONSTRUCTION.
-  // The scaffold lattice texture (construction.dds) and the three scalars the
-  // game's own shader drives it with - see the flag in shared_constants.h for
-  // the full contract.
+  // A building under construction: the scaffold lattice texture (construction.dds) and the three scalars
+  // the game's shader drives it with (see the construction capture in d3d11_rtx.cpp):
   //   x = constructionState.x, the build progress 0..1
   //   y = upperPos.x, the object-space height the progress is measured against
   //   z = scaffoldTiling, the UV multiplier for the lattice
   bool kenshiConstruction = false;
   TextureRef kenshiConstructionGridTexture = {};
   Vector4 kenshiConstructionParams = Vector4(0.0f, 0.0f, 0.0f, 0.0f);
-  // DX11_V557_KENSHI_DUST: the biome dust noise texture, sampled at world XZ.
-  // Travels in tangentTextureIndex - see the capture site for why that is free.
+  // The biome dust noise texture, sampled at world XZ. Travels in tangentTextureIndex (see the capture
+  // site).
   TextureRef kenshiDustNoiseTexture = {};
-  // DX11_V564: dust colour is PER-MATERIAL, not a biome global - measured, five
-  // distinct values in one run including a near-black. rgb = the raw
-  // display-space dustColour; w = presence plus the shader's static amount
-  // selector (1 = dustAmount.x, 2 = .y). The frame-global amount vector travels
-  // in RaytraceArgs instead. This vector rides in
-  // albedoOpacityConstant, dead on a textured material and not used by any other
-  // dust-carrying material class.
+  // Dust colour is per material, not a biome global. rgb = the raw display-space dustColour; w =
+  // presence plus the shader's static amount selector (1 = dustAmount.x, 2 = .y). The frame-global amount
+  // vector travels in RaytraceArgs. This rides in albedoOpacityConstant, unused on a textured material.
   Vector4 kenshiDustColour = Vector4(0.0f, 0.0f, 0.0f, 0.0f);
   TextureRef kenshiCharacterBodyMaskTexture = {};
   TextureRef kenshiCharacterHeadMaskTexture = {};
   TextureRef kenshiCharacterHairTexture = {};
   TextureRef kenshiCharacterBeardTexture = {};
-  // DX11_V491_KENSHI_HEAD_NORMAL: `headNormalMap` (s6 in character.hlsl). The
-  // head lives in NEGATIVE V of the same draw as the body and has its own normal
-  // map; sampling the body's map there reads unrelated texels. Travels to the
-  // GPU in the unused tangentTextureIndex slot - see the shader for why.
+  // `headNormalMap` (s6 in character.hlsl): the head lives in negative V of the same draw as the body and
+  // has its own normal map. Travels to the GPU in the unused tangentTextureIndex slot (see the shader).
   TextureRef kenshiCharacterHeadNormalTexture = {};
   // Per-draw state: deliberately excluded from material hashing.
   uint32_t kenshiBloodMode = 0u; // 1: Y-axis regional, 2: X-axis severed limb
@@ -2108,56 +2058,34 @@ struct LegacyMaterialData {
   std::array<float, 8> kenshiBloodAmounts = {};
   Vector2 kenshiBloodScale = Vector2(1.0f, 1.0f);
   Vector4 kenshiBloodColor = Vector4(0.0f, 0.0f, 0.0f, 0.0f);
-  // DX11_V488_KENSHI_NORMAL_MAPS: the game's own tangent-space normal map,
-  // found by REFLECTION NAME on the pixel shader (`base_normal`, `normalMap`,
-  // `normalMap2`) rather than by slot, so one rule covers the whole game.
-  //
-  // Remix's generic normalTextureIndex already existed and was already consumed
-  // correctly - it was simply only ever fed from USD replacements, never from
-  // the game. This carries a game texture into it;
-  // LegacyMaterialData::as<OpaqueMaterialData>() is where it lands.
-  //
-  // No tangent capture is needed: Remix derives a UV-aligned tangent frame per
-  // hit via genTangSpace() (surface_interaction.slangh ~511), which is why the
-  // bridge can keep discarding the game's TANGENT/BINORMAL streams.
-  //
-  // ENCODING: Kenshi decodes standard RGB (`normalTex.xyz * 2 - 1`) everywhere
-  // EXCEPT where the shader defines DXT5NORMAL, which is `creature.material`
-  // alone. Creatures are therefore deliberately NOT fed here yet - their maps
-  // put X in alpha and reconstruct Z, and reading them as RGB would be wrong.
+  // The game's own tangent-space normal map, found by reflection name on the pixel shader (`base_normal`,
+  // `normalMap`, `normalMap2`) rather than by slot. Remix's generic normalTextureIndex was only ever fed
+  // from USD replacements; this carries a game texture into it (it lands in
+  // LegacyMaterialData::as<OpaqueMaterialData>()). No tangent capture is needed: Remix derives a
+  // UV-aligned tangent frame per hit (genTangSpace() in surface_interaction.slangh). The decode is
+  // selected by kenshiNormalEncoding below.
   TextureRef kenshiNormalTexture = {};
-  // DX11_V490_KENSHI_NORMAL_ENCODING: 1 = standard RGB, 2 = DXT5nm.
-  // 0 leaves the material on Remix's octahedral decode.
-  //
-  // DX11_V766: no longer "2 = creatures". character.hlsl and its severed_limb_fs
-  // write the DXT5nm expansion out longhand with no `#ifdef DXT5NORMAL`, so
-  // V490's macro survey mis-tagged every character body and head as RGB - which
-  // reads x = R, and R == G == B == Y in those maps, discarding X entirely.
+  // 1 = standard RGB, 2 = DXT5nm; 0 leaves the material on Remix's octahedral decode. character.hlsl and
+  // its severed_limb_fs write the DXT5nm expansion out longhand without `#ifdef DXT5NORMAL`, so character
+  // bodies and heads are DXT5nm too.
   uint32_t kenshiNormalEncoding = 0u;
-  // DX11_V766: this shader family inverts the normal map's GREEN channel.
-  // skin.hlsl does it before the decode (`normalTex.g = 1.0f - normalTex.g`),
-  // creature.hlsl after it (`normalTex.g = -normalTex.g`); objects.hlsl,
-  // foliage.hlsl and character.hlsl do not. Travels in bit 9 of
-  // kenshiCharacterHairChannels - the material `flags` word is full.
+  // This shader family inverts the normal map's green channel: skin.hlsl before the decode
+  // (`normalTex.g = 1.0f - normalTex.g`), creature.hlsl after it (`normalTex.g = -normalTex.g`);
+  // objects, foliage and character.hlsl do not. Travels in bit 9 of kenshiCharacterHairChannels (the
+  // material `flags` word is full).
   bool kenshiNormalFlipGreen = false;
-  // DX11_V766_KENSHI_MUSCLE_NORMAL: character.hlsl's variance-in-muscle-size
-  // layer, `bodyN.wy = lerp(bodyN.wy, blendNormalMap.wy, muscleBlend)` on the
-  // RAW DXT5nm pair before anything else. Kenshi ships
-  // `<race>_body_normal_muscular.dds` and `_skinny.dds` beside the baseline map,
-  // so a character's build exists ONLY in this blend. Quantised to the 6 bits it
-  // travels in (kenshiCharacterHairChannels bits 10-15); zero means the material
-  // binds `flat.dds` and the blend is a no-op.
+  // character.hlsl's muscle-size layer, `bodyN.wy = lerp(bodyN.wy, blendNormalMap.wy, muscleBlend)` on
+  // the raw DXT5nm pair before anything else; a character's build exists only in this blend
+  // (<race>_body_normal_muscular.dds / _skinny.dds). Quantised to the 6 bits it travels in
+  // (kenshiCharacterHairChannels bits 10-15); zero means the material binds flat.dds and the blend is a
+  // no-op.
   float kenshiMuscleBlend = 0.0f;
   TextureRef kenshiCharacterBlendNormalTexture = {};
-  // DX11_V533_KENSHI_OBJECT_GLOSS. Kenshi's deferred lighting is a metallic
-  // workflow - `albedo * (1 - metal)` for diffuse, `lerp(0.04, albedo, metal)`
-  // for F0, GGX with `alpha = 1 - 0.99 * gloss`. Remix uses the same model; only
-  // the storage differs, so both of these are direct translations rather than
-  // approximations.
-  //
-  // Gloss lives in the DIFFUSE texture's alpha, times this per-draw scalar. Zero
-  // means the pixel shader does not declare `glossMult` and the alpha is
-  // therefore ordinary coverage - do not read it.
+  // Kenshi's deferred lighting is a metallic workflow - `albedo * (1 - metal)` for diffuse,
+  // `lerp(0.04, albedo, metal)` for F0, GGX with `alpha = 1 - 0.99 * gloss` - the same model as Remix,
+  // so these are direct translations. Gloss lives in the diffuse texture's alpha, times this per-draw
+  // scalar. Zero means the pixel shader does not declare glossMult and the alpha is ordinary coverage:
+  // do not read it.
   float kenshiGlossMult = 0.0f;
   // `metal_map`, whose RED channel the game writes straight into its G-buffer's
   // metal channel. Remix's metallic slot wants exactly that.
@@ -2178,18 +2106,14 @@ struct LegacyMaterialData {
   Vector4 kenshiTerrainOverlayMult = Vector4(0.0f, 0.0f, 0.0f, 0.0f);
   float kenshiTerrainBrightnessFix = 1.0f;
   float kenshiTerrainHeightOffset = 0.0f;
-  // DX11_V530: `distortion0.xy` from the terrain vertex shader. The cliff layer
-  // is NOT tiled against a flat height - both terrain vertex shaders add
-  // (cos(texturePos.x * .x) + cos(texturePos.z * .x)) * .y to that coordinate,
-  // which is what makes rock strata run at an angle instead of in dead-level
-  // bands. Zero leaves the coordinate exactly as it was before V530.
+  // `distortion0.xy` from the terrain vertex shader: both terrain vertex shaders add
+  // (cos(texturePos.x * .x) + cos(texturePos.z * .x)) * .y to the cliff layer's height coordinate, which
+  // angles the rock strata. Zero leaves the coordinate unchanged.
   Vector2 kenshiTerrainHeightWarp = Vector2(0.0f, 0.0f);
-  // DX11_V528_KENSHI_TERRAIN_BIOME_BLEND: a boundary tile's pixel shader carries
-  // one to three ADDITIONAL complete six-layer sets (`diffuseMaps1..3`), each
-  // with its own scales, slope bands, overlayMult and brightnessFix, plus a
-  // shared `blendMap` sampled at the biome UV. The per-chunk fields above -
-  // detail rect, overlay map, height offset - are shared by every set, so only
-  // the parts that actually differ per biome live here.
+  // A boundary tile's pixel shader carries one to three additional complete six-layer sets
+  // (`diffuseMaps1..3`), each with its own scales, slope bands, overlayMult and brightnessFix, plus a
+  // shared `blendMap` sampled at the biome UV. The per-chunk fields above (detail rect, overlay map,
+  // height offset) are shared by every set.
   static constexpr uint32_t kKenshiTerrainBiomeSetCount = 3u;
   struct KenshiTerrainBiomeSet {
     std::array<TextureRef, kKenshiTerrainLayerCount> layers = {};
@@ -2202,9 +2126,9 @@ struct LegacyMaterialData {
     float brightnessFix = 1.0f;
     Vector4 textureFade = Vector4(0.0f, 0.0f, 0.0f, 0.0f);
   };
-  // V776: CPU-only shared ownership follows prepared draws, queued commands and
-  // BlasEntry input materials. The lookup tables keep WEAK references. Copying a
-  // draw copies two handles, not the large biome payload; no GPU layout change.
+  // CPU-only shared ownership follows prepared draws, queued commands and BlasEntry input materials. The
+  // lookup tables keep weak references. Copying a draw copies two handles, not the large biome payload;
+  // no GPU layout change.
   struct KenshiTerrainNormalSet {
     std::array<TextureRef, kKenshiTerrainLayerCount> textures = {};
     Vector4 textureFade = Vector4(0.0f);
@@ -2233,7 +2157,7 @@ struct LegacyMaterialData {
   bool isTextureFactorBlend = false;
   bool isVertexColorBakedLighting = true;
   bool colorTextureIsSrgb = false;
-  // V747: native distant-town PS receives IA COLOR0 through TEXCOORD1.
+  // The native distant-town PS receives IA COLOR0 through TEXCOORD1.
   bool kenshiDistantTown = false;
   // Constant-color materials: shaders with no material texture samplers carry their
   // color in shader constant registers. Captured at draw time so the legacy->opaque
@@ -2337,44 +2261,43 @@ struct MaterialData {
   TextureRef m_kenshiCharacterHeadMaskTexture = {};
   TextureRef m_kenshiCharacterHairTexture = {};
   TextureRef m_kenshiCharacterBeardTexture = {};
-  // DX11_V491: Kenshi's separate head normal map (character.hlsl s6).
+  // Kenshi's separate head normal map (character.hlsl s6).
   TextureRef m_kenshiCharacterHeadNormalTexture = {};
-  // DX11_V766: Kenshi's muscle-blend normal map (character.hlsl s4). Travels to
-  // the GPU in heightTextureIndex - see writeGPUData.
+  // Kenshi's muscle-blend normal map (character.hlsl s4). Travels to the GPU in heightTextureIndex (see
+  // writeGPUData).
   TextureRef m_kenshiMuscleBlendTexture = {};
-  // Bits 0-2 hair colour channel, 3-5 hair alpha, 6-8 beard alpha (V442),
-  // bit 9 the V766 green flip, bits 10-15 the V766 muscle blend in 1/63 steps.
+  // Bits 0-2 hair colour channel, 3-5 hair alpha, 6-8 beard alpha, bit 9 the green flip, bits 10-15 the
+  // muscle blend in 1/63 steps.
   uint16_t m_kenshiCharacterHairChannels = 0u;
   uint32_t m_kenshiTerrainSetIndex = 0u;
-  // DX11_V490: 0 = octahedral (Remix default), 1 = Kenshi RGB, 2 = DXT5nm.
+  // 0 = octahedral (Remix default), 1 = Kenshi RGB, 2 = DXT5nm.
   uint32_t m_kenshiNormalEncoding = 0u;
-  // DX11_V533: see OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_GLOSS_IN_ALPHA.
+  // See OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_GLOSS_IN_ALPHA.
   bool m_kenshiGlossInAlpha = false;
-  // DX11_V550: see OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_DUAL_TEXTURE_SET.
+  // See OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_DUAL_TEXTURE_SET.
   bool m_kenshiDualTextureSet = false;
-  // DX11_V551: see LegacyMaterialData::kenshiDualNormalTexture.
+  // See LegacyMaterialData::kenshiDualNormalTexture.
   TextureRef m_kenshiDualNormalTexture = {};
   TextureRef m_kenshiDualMetalTexture = {};
-  // DX11_V552: see OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_COLOR_MASK.
+  // See OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_COLOR_MASK.
   bool m_kenshiColorMask = false;
   Vector4 m_kenshiColor1 = Vector4(0.0f, 0.0f, 0.0f, 0.0f);
   Vector4 m_kenshiColor2 = Vector4(0.0f, 0.0f, 0.0f, 0.0f);
   TextureRef m_kenshiColorMaskTexture = {};
-  // DX11_V554: see OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_CHARACTER_VEST.
+  // See OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_CHARACTER_VEST.
   bool m_kenshiCharacterVest = false;
   TextureRef m_kenshiVestDiffuseTexture = {};
   TextureRef m_kenshiVestNormalTexture = {};
   TextureRef m_kenshiVestMaskTexture = {};
   Vector4 m_kenshiVestColor = Vector4(1.0f, 1.0f, 1.0f, 1.0f);
-  // DX11_V761: the under-construction scaffold payload. The "is construction"
-  // decision itself is a SURFACE flag (flags0 bit5); only the texture and the
-  // three scalars ride on the material.
+  // The under-construction scaffold payload. Whether a draw is under construction is a surface flag
+  // (flags0 bit 5); only the texture and the three scalars ride on the material.
   bool m_kenshiConstruction = false;
   TextureRef m_kenshiConstructionGridTexture = {};
   Vector4 m_kenshiConstructionParams = Vector4(0.0f, 0.0f, 0.0f, 0.0f);
-  // DX11_V557: see LegacyMaterialData::kenshiDustNoiseTexture.
+  // See LegacyMaterialData::kenshiDustNoiseTexture.
   TextureRef m_kenshiDustNoiseTexture = {};
-  // DX11_V564: see LegacyMaterialData::kenshiDustColour.
+  // See LegacyMaterialData::kenshiDustColour.
   Vector4 m_kenshiDustColour = Vector4(0.0f, 0.0f, 0.0f, 0.0f);
 
   using MaterialVariant = std::variant<
@@ -2435,7 +2358,7 @@ struct MaterialData {
     return m_kenshiCharacterBeardTexture;
   }
 
-  // DX11_V491: Kenshi's separate head normal map.
+  // Kenshi's separate head normal map.
   const TextureRef& getKenshiCharacterHeadNormalTexture() const {
     return m_kenshiCharacterHeadNormalTexture;
   }
@@ -2444,7 +2367,7 @@ struct MaterialData {
     m_kenshiCharacterHeadNormalTexture = value;
   }
 
-  // DX11_V766: Kenshi's muscle-blend normal map.
+  // Kenshi's muscle-blend normal map.
   const TextureRef& getKenshiMuscleBlendTexture() const {
     return m_kenshiMuscleBlendTexture;
   }
@@ -2457,7 +2380,7 @@ struct MaterialData {
     return m_kenshiCharacterHairChannels;
   }
 
-  // DX11_V490: 0 = octahedral (Remix default), 1 = Kenshi RGB, 2 = DXT5nm.
+  // 0 = octahedral (Remix default), 1 = Kenshi RGB, 2 = DXT5nm.
   uint32_t getKenshiNormalEncoding() const { return m_kenshiNormalEncoding; }
   bool getKenshiGlossInAlpha() const { return m_kenshiGlossInAlpha; }
   bool getKenshiDualTextureSet() const { return m_kenshiDualTextureSet; }

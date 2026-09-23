@@ -39,8 +39,8 @@
 #include "rtx/algorithm/volume_composite_helpers.slangh"
 #include "rtx/algorithm/accumulate.slangh"
 
-// DX11_V791: private capture-only dispatch, never a selectable debug view.
-// Reuses existing bindings/args; keep in sync with rtx_composite.cpp.
+// Private capture-only dispatch, never a selectable debug view. Reuses existing bindings/args; keep in
+// sync with rtx_composite.cpp.
 bool isLightingCapture() { return cb.debugViewIdx == 0xfffffffeu; }
 
 float3 sampleDomeLightTexture(Sampler2D<float3> DomeLight, float3 worldDirection, float4x4 worldToDomeLightTransform)
@@ -429,26 +429,18 @@ void applyFog(
   inout vec3 radianceOutput,
   inout vec4 particleLayerOutput)
 {
-  // DX11_V496: Kenshi's own distance fog. Deliberately applied even when the
-  // volumetric froxel grid is on - that grid reaches rtx.volumetrics.froxelMaxDistanceMeters
-  // (a few hundred metres of a 50000-unit view), so it is not an alternative to
-  // this and the early-out below must not swallow it.
+  // Kenshi's own distance fog, applied even when the volumetric froxel grid is on: that grid only reaches
+  // rtx.volumetrics.froxelMaxDistanceMeters (a few hundred metres of a 50000-unit view), so it is no
+  // alternative, and the early-out below must not swallow it.
   const vec4 kenshiFog = calculateKenshiFog(viewDistance, primaryMiss, primaryRayDirections.worldDirection);
   if (kenshiFog.a > 0.0f)
   {
     radianceOutput = lerp(radianceOutput, kenshiFog.rgb, kenshiFog.a);
   }
 
-  // DX11_V508: local fog volumes are applied AFTER the distance fog, and to SKY
-  // pixels as well.
-  //
-  // V505 did the opposite on both counts and it showed. Applying them first let
-  // the distance fog - whose alpha saturates to 1 by ~15500 units - simply
-  // overwrite them, so a dense biome volume read as "distance fog with a
-  // different colour". And gating on !primaryMiss meant they never touched the
-  // sky, whereas the game's own volume shaders substitute farClip when the depth
-  // buffer is empty (`distance = distance==0 ? farClip : distance`) and so DO
-  // integrate across sky pixels.
+  // Local fog volumes are applied after the distance fog (whose alpha saturates to 1 by ~15500 units and
+  // would otherwise overwrite them), and to sky pixels too: the game's volume shaders substitute farClip
+  // for an empty depth (`distance = distance==0 ? farClip : distance`) and integrate across the sky.
   if (cb.kenshiFogVolumeCount > 0u)
   {
     const vec3 volCameraPos = cameraGetWorldPosition(cb.camera);

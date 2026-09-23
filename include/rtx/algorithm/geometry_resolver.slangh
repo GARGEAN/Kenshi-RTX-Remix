@@ -1682,64 +1682,13 @@ void geometryResolverVertex(
   EmptyExtraArgs extraArgs, RayHitInfo rayHitInfo,
   inout GeometryResolverState geometryResolverState)
 {
-  // DX11_V377_GPU_PRINT_WORLDPOS: WHERE the primary ray hit, in true world space.
-  //
-  // The first version of this probe reported `surfaceIndex`, which is unusable:
-  // AccelManager clears m_reorderedSurfaces every frame and hands out indices in
-  // that frame's traversal order (rtx_accel_manager.cpp:718/790), so a surface
-  // index is meaningful only within the frame that produced it. Joining one
-  // against an instance dump captured on a different frame produced a confident
-  // and completely wrong identification of which object a pixel belonged to.
-  //
-  // A world-space position cannot be misjoined. It is directly comparable to the
-  // `o2wT=[...]` translations the bridge already logs per draw, so a probed pixel
-  // says in world coordinates what surface is there - or, with w == -1, that
-  // nothing is.
-  //
-  // No space conversion is needed: the primary ray is created with
-  // `ray.origin = cameraGetWorldPosition(camera)` (ray.slangh), so this resolver
-  // runs in TRUE world space, not the translated/camera-relative space used
-  // elsewhere in Remix. `translatedWorldOffset` exists only on
-  // VolumeDefinitionCamera and is not applicable here.
-  //
-  // w encodes facing rather than distance: distance is recoverable from the
-  // position and the camera, whereas facing is not. It matters because Kenshi
-  // supplies no normal stream for any family (`hasNormal=0` scene-wide), so
-  // shading falls back to the geometric triangle normal - and the measured
-  // contrast so far is that geometry which renders is hit front-facing while the
-  // faint wall slivers are hit BACK-facing.
-  //
-  // DX11_V381_GPU_PRINT_DRAWCALL: world position answers "what is at this pixel"
-  // only if some logged draw happens to sit at that coordinate. It could not
-  // answer the question that actually blocked the airborne-alpha investigation -
-  // "WHICH submitted draw owns this pixel" - and a whole session was spent
-  // guessing at it from instance sizes instead.
-  //
-  // So report `surface.objectPickingValue`, which
-  // `rtx_instance_manager.cpp:1115` assigns as `drawCall.drawCallID`. That is the
-  // SAME number the bridge already prints as `id=` in `[D3D11Rtx][trace-draw]`
-  // and as `drawId=` in the family/sprite logs, so a probed pixel names its draw
-  // outright.
-  //
-  // This is NOT a return to the discredited surfaceIndex. The problem with that
-  // one was silent cross-frame joining: indices are handed out in per-frame
-  // traversal order, so a stale join looked valid and was not. drawCallID also
-  // resets per frame (`D3D11Rtx::ResetCommandListState` sets `m_drawCallID = 0`),
-  // but BOTH sides of this join carry their frame - the print line is emitted as
-  // "Frame: N - GPU print value ..." from `GpuPrintBufferElement::frameIndex`,
-  // and `[trace-draw]` prints `f=N`. **Only join rows whose frame numbers match.**
-  //
-  // The probe therefore moved below `resolveVertex`, which is where `surface` is
-  // first populated; the block above it has no surface to report.
-  //
+  // GPU print probe (written after resolveVertex, where `surface` is populated).
   // Payload: (drawCallID, facing, hitDistance, unorderedInteractions)
-  //   drawCallID            -1 when the ray committed no hit
+  //   drawCallID            -1 on a miss; the id the bridge logs as `id=` in [trace-draw].
+  //                         IDs reset every frame, so only join rows with matching frame numbers.
   //   facing                0 = no hit, 1 = back-facing hit, 2 = front-facing hit
   //   hitDistance           along the primary ray from the camera
-  //   unorderedInteractions how many unordered/particle surfaces the ray crossed
-  //                         before committing - 0 means the pixel never touched
-  //                         Remix's particle path, which is exactly the routing
-  //                         question the Particle categorisation below changes.
+  //   unorderedInteractions unordered/particle surfaces crossed before the committed hit
 
   // Setup resolve state
 
@@ -1843,21 +1792,9 @@ void geometryResolverVertex(
     isRaytracedRenderTarget,
     false, true);
 
-  // DX11_V381_GPU_PRINT_DRAWCALL: see the note at the top of this function for
-  // the payload and for why joining this against `[trace-draw]` is only valid
-  // within one frame. Last write wins per pixel, so with several resolve
-  // interactions this reports the LAST one - which is the committed surface.
-  // DX11_V387_GPU_PRINT_UNORDERED: yield to the unordered writer.
-  //
-  // When the ray crossed any unordered/particle surface, the write inside
-  // resolve.slangh has already reported THAT particle's draw - which is the
-  // interesting one, and the only one obtainable, since particles never become
-  // the committed surface. Writing here as well would clobber it, because this
-  // runs after the unordered resolve and last write wins.
-  //
-  // For a pixel with no particles in front, this still reports the committed
-  // surface exactly as before. `kind` (component y) tells the two apart:
-  // 1 = unordered particle, 2 = committed surface, 0 = nothing hit.
+  // GPU print probe (payload described at the top of this function). Skipped when the ray
+  // crossed an unordered surface: resolve.slangh already reported that particle's draw and a
+  // later write here would overwrite it. kind (y): 1 = particle, 2 = committed surface, 0 = miss.
   if (numUnorderedInteractions == 0)
   {
     const float kind = rayHitInfo.hasHit ? 2.0f : 0.0f;
@@ -3067,21 +3004,8 @@ void geometryResolver(ivec2 pixelCoordinate) {
 
     EmptyExtraArgs extraArgs;
 
-    // DX11_V376_GPU_PRINT_PRIMARY: consumer-side probe for "geometry is provably in
-    // the TLAS and still nothing renders".
-    //
-    // Every producer-side stage has been measured clean for Kenshi's wall segments:
-    // admission, camera, per-instance transform, placement, instance mask,
-    // hidden/GC, TLAS presence, BLAS reference, merged-vs-dynamic routing, and
-    // bucket build. So the remaining question is what the primary ray actually
-    // does at a wall pixel, which nothing in this project has ever measured.
-    //
-    // Written BEFORE the trace as a sentinel, so a MISS still produces a line.
-    // GpuPrintBuffer holds one element per frame slot and the last write wins, so
-    // the hit write inside geometryResolverVertex overwrites this whenever the ray
-    // hits something. A reported w of -1 therefore means "the probe ran and this
-    // pixel resolved to nothing", which is exactly the distinction a silent
-    // absence of output could not make.
+    // GPU print probe: write a miss sentinel (w = -1) before the trace. A hit overwrites it in
+    // geometryResolverVertex, so every probed pixel produces a line.
     GpuPrint::write(geometryResolverState.pixelCoordinate,
                     float4(0.0f, 0.0f, 0.0f, -1.0f));
 

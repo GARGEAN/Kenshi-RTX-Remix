@@ -865,43 +865,24 @@ namespace dxvk {
     out.isFullyOpaque = !blendEnabled && out.alphaTestType == AlphaTestType::kAlways; // use the blend/test type from the output, rather than legacy for this so replacements can override
     out.isBlendingDisabled = !blendEnabled;
 
-    // DX11_V621/V627_KENSHI_WATER_TRANSPARENCY. Proper translucent water must
-    // let the resolver continue through it. Simulated-depth water instead stays
-    // fully opaque and performs its bottom-colour blend inside the material.
-    //
-    // resolve.slangh early-outs on isFullyOpaque before it ever reads
-    // `opacity`, and V588 forces enableBlending=false on every admitted water
-    // draw - so the water block could write any opacity it liked and nothing
-    // would look at it. Clearing the flag here is what opens the transmission
-    // path; the water block then writes the depth-based alpha itself.
-    //
-    // V588's reason for forcing opaque does NOT return: watercolourmap.png has
-    // alpha 0 in every texel, but ignoreAlphaChannel stays on, so the texture's
-    // alpha is still discarded and the opacity is computed, not sampled.
+    // Translucent water must let the resolver continue through it; simulated-depth water instead stays
+    // fully opaque and blends its bottom colour inside the material. resolve.slangh early-outs on
+    // isFullyOpaque before reading `opacity`, so clearing the flag here is what opens the transmission
+    // path; the water block then writes the depth-based alpha itself. ignoreAlphaChannel stays on
+    // (watercolourmap.png has zero alpha), so opacity is computed, not sampled.
     if (KenshiOptions::kenshiWaterTransparency() > 0.0f
      && !KenshiOptions::kenshiWaterSimulatedDepth()
      && drawCall.testCategoryFlags(InstanceCategories::AnimatedWater)) {
       out.isFullyOpaque = false;
     }
 
-    // DX11_V760_KENSHI_CONSTRUCTION. An unfinished building is a real cutout -
-    // above the build line only the scaffold lattice's texels exist - but the
-    // cutout is not expressible as a legacy alpha test: its mask is a SECOND
-    // texture sampled at its own tiling, and whether it applies at all depends
-    // on a per-vertex height against a per-draw progress constant. The material
-    // therefore writes the decision into `opacity` itself, exactly as
-    // simulated-depth water writes its own alpha.
-    //
-    // Clearing this flag is what makes anything read that opacity:
-    // resolve.slangh early-outs on isFullyOpaque before it ever looks. Leaving
-    // alphaTestType at kAlways keeps the legacy alpha test OFF, which matters
-    // here more than usual - a Kenshi building's diffuse alpha is GLOSS (V533),
-    // so an alpha test against it would cut the building up by shininess.
-    //
-    // The instance lands in the "alpha-tested geometry" branch of the flag chain
-    // (geometryFlags = 0, no OPAQUE_BIT), so the resolver can step through the
-    // holes. The matching OMM exclusion is set on the draw call - see the
-    // capture site in d3d11_rtx.cpp.
+    // An unfinished building is a real cutout, but not expressible as a legacy alpha test: its mask is a
+    // second texture at its own tiling, gated by per-vertex height against a per-draw progress constant,
+    // so the material writes the decision into `opacity` itself. Clearing isFullyOpaque is what makes
+    // anything read it (resolve.slangh early-outs on it). alphaTestType stays kAlways: a Kenshi building's
+    // diffuse alpha is gloss, so an alpha test would cut it up by shininess. The instance lands in the
+    // alpha-tested branch of the flag chain (no OPAQUE_BIT), so the resolver steps through the holes; the
+    // matching OMM exclusion is set on the draw call (d3d11_rtx.cpp).
     if (drawCall.getMaterialData().kenshiConstruction) {
       out.isFullyOpaque = false;
     }
@@ -1120,8 +1101,7 @@ namespace dxvk {
         currentInstance.surface.opacityTextureChannel = drawCall.getMaterialData().opacityTextureChannel;
         currentInstance.surface.texgenMode = drawCall.getTransformData().texgenMode; // NOTE: Make it material data...
         currentInstance.surface.blendConstant = drawCall.getMaterialData().blendConstant;
-        // DX11_V761: the under-construction marker. A surface flag, not a
-        // material one - the opaque material's flags field is full.
+        // Under-construction marker: a surface flag, since the opaque material's flags field is full.
         currentInstance.surface.kenshiConstruction = drawCall.getMaterialData().kenshiConstruction;
         currentInstance.surface.alphaState = alphaState;
         currentInstance.surface.isAnimatedWater = currentInstance.testCategoryFlags(InstanceCategories::AnimatedWater);
@@ -1299,10 +1279,10 @@ namespace dxvk {
 #endif
     }
 
-    // V722: routing follows the current (possibly merged) alpha state. Instances
-    // can be reused for an ordinary draw after a particle/decal draw; retaining
-    // m_isUnordered sends opaque triangles to a resolver that ignores opaque hits.
-    // Recompute on every update, including when same-frame merging prefers opaque.
+    // Routing follows the current (possibly merged) alpha state. An instance can be reused for an ordinary
+    // draw after a particle/decal draw, and a stale m_isUnordered would send opaque triangles to a
+    // resolver that ignores opaque hits. Recompute on every update, including when same-frame merging
+    // prefers opaque.
     currentInstance.m_isUnordered = false;
 
     // Update the geometry and instance flags
@@ -1350,36 +1330,19 @@ namespace dxvk {
       currentInstance.m_geometryFlags = VK_GEOMETRY_OPAQUE_BIT_KHR;
     }
 
-    // V649: every clip-marked instance needs the traversal callback, including
-    // alpha-tested vegetation handled by earlier branches of the flag chain.
-    // Keep this per-instance so marking never changes a shared BLAS's flags.
+    // Every clip-marked instance needs the traversal callback, including alpha-tested vegetation handled
+    // by earlier branches of the flag chain. Per instance, so marking never changes a shared BLAS's flags.
     if (currentInstance.surface.isClipPlaneEnabled) {
       currentInstance.m_vkInstance.flags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
     }
 
-    // DX11_V630_KENSHI_WATER_ONE_WAY. Simulated-depth water must let rays that
-    // leave from UNDERNEATH the sheet pass through, so submerged geometry receives
-    // the sun, the sky and analytic lights with real shadows instead of only
-    // whatever light already happens to be below the surface.
-    //
-    // This bit exists solely to create a shader hook for VISIBILITY rays. They are
-    // traced with RayQuery and only invoke handleVisibilityVertex for
-    // CANDIDATE_NON_OPAQUE_TRIANGLE (visibility.slangh), so an instance carrying
-    // VK_GEOMETRY_OPAQUE_BIT_KHR is committed by the traversal hardware and no
-    // shader ever runs - which is precisely why V629's early-out was unreachable
-    // and why the last build changed nothing.
-    //
-    // Nothing else is disturbed. Both resolve paths trace with RAY_FLAG_FORCE_OPAQUE
-    // (geometry_resolver.slangh, integrator_indirect.slangh) and ray flags override
-    // instance flags, so camera and bounce rays still see a hard hit here; their
-    // one-way behaviour comes from the resolve.slangh rule instead.
-    //
-    // OMM-neutral, and must stay that way for the planned foliage micromaps:
-    // opacity micromap eligibility reads alphaState and material type only
-    // (rtx_opacity_micromap_manager.cpp ~1062) and never the instance flags, while
-    // simulated-depth water deliberately keeps isFullyOpaque == true, so it fails
-    // every candidate branch with or without this bit. The clip-plane case just
-    // above pairs OPAQUE_BIT with FORCE_NO_OPAQUE the same way.
+    // Simulated-depth water must let rays leaving from underneath pass through, so submerged geometry
+    // receives the sun, sky and analytic lights with real shadows. This bit only creates a shader hook for
+    // visibility rays: they invoke handleVisibilityVertex only for CANDIDATE_NON_OPAQUE_TRIANGLE, so with
+    // VK_GEOMETRY_OPAQUE_BIT_KHR the hardware would commit the hit and no shader would run. Camera and
+    // bounce rays trace with RAY_FLAG_FORCE_OPAQUE (ray flags override instance flags), so they still hit;
+    // their one-way rule is in resolve.slangh. OMM-neutral: micromap eligibility reads alphaState and
+    // material type, never instance flags, and simulated-depth water keeps isFullyOpaque.
     if (KenshiOptions::kenshiWaterSimulatedDepth()
      && KenshiOptions::kenshiWaterTransparency() > 0.0f
      && currentInstance.testCategoryFlags(InstanceCategories::AnimatedWater)) {
@@ -1581,52 +1544,22 @@ namespace dxvk {
       } else if(!currentInstance.surface.alphaState.isDecal
              && (KenshiOptions::kenshiParticleBillboards()
               || !currentInstance.testCategoryFlags(InstanceCategories::Particle))) {
-        // DX11_V493: skip billboard rebuilding for particle-categorised instances.
-        // See rtx_kenshi_options.h - this call is the difference between the two
-        // config bisects around the V492 load-time device fault, and it mutates
-        // the live instance mask and dirties the BLAS every frame for geometry
-        // the game already rebuilds camera-facing on the CPU.
+        // Skip billboard rebuilding for particle-categorised instances (see kenshiParticleBillboards): it
+        // mutates the live instance mask and dirties the BLAS every frame for geometry the game already builds
+        // camera-facing on the CPU.
         createBillboards(currentInstance, cameraManager.getMainCamera().getDirection(false));
       } else if (!currentInstance.surface.alphaState.isDecal) {
-        // DX11_V494: an instance must never advertise the INTERSECTION_PRIMITIVE
-        // mask bits when no billboards were registered for it.
-        //
-        // createBillboards() normally does this narrowing itself, on its success
-        // path. Skipping the call (V493) left the bits set, and indirect rays
-        // take them: integrator_indirect.slangh builds
-        // `unorderedRayMask = OBJECT_MASK_UNORDERED_ALL_BLENDED | ...`
-        // UNCONDITIONALLY - only the EMISSIVE half is behind an option - and
-        // passes `useIntersectionBillboards = enableBillboardOrientationCorrection`.
-        // A candidate that is not reported as a triangle then does
-        // `billboards[rayQuery.CandidateInstanceID()]` against a billboards
-        // buffer that was never populated. That is the V492 load-time device
-        // fault: `read-invalid` at a CONSTANT address across every run, which is
-        // what a null-buffer read at a computed offset looks like.
-        //
-        // It could never fire before V492 because no instance in this game
-        // carried the BLENDED bits at all - the only unordered instances were
-        // emissive, and emissive is excluded from indirect rays here by
-        // rtx.enableUnorderedEmissiveParticlesInIndirectRays = False. V492
-        // created the first blended unordered instance and the path ran for the
-        // first time.
-        // DX11_V495: narrowing to ALL_GEOMETRY was not enough - the fault
-        // returned at a DIFFERENT address, so indirect rays reach these
-        // instances by more than the intersection-primitive bit alone.
-        //
-        // Give them the EMISSIVE geometry bit instead of the BLENDED one. This
-        // is purely a ray-visibility mask and changes no shading (that comes
-        // from alphaState.emissiveBlend, untouched):
+        // An instance must never advertise the INTERSECTION_PRIMITIVE mask bits when no billboards were
+        // registered for it: indirect rays would read an unpopulated billboards buffer (a device fault).
+        // Narrowing to ALL_GEOMETRY is not enough - indirect rays reach these instances by more than that bit -
+        // so give them the EMISSIVE geometry bit instead of the BLENDED one. This is only a ray-visibility mask
+        // (shading comes from alphaState.emissiveBlend):
         //   primary  - geometry_resolver requests OBJECT_MASK_ALL_UNORDERED and
-        //              resolveVertexUnorderedParticles narrows it to
-        //              ALL_GEOMETRY, which contains this bit. Still visible.
-        //   indirect - integrator_indirect requests ALL_BLENDED plus ALL_EMISSIVE
-        //              only when rtx.enableUnorderedEmissiveParticlesInIndirectRays
-        //              is on. It defaults to False, so these are excluded.
-        //
-        // That puts Kenshi's alpha billboards on exactly the footing its additive
-        // ones have always had, using only mechanisms the fork already ships. The
-        // cost is dust in reflections and indirect lighting, which the additive
-        // dust never had either.
+        //              resolveVertexUnorderedParticles narrows it to ALL_GEOMETRY, which contains this bit.
+        //   indirect - integrator_indirect requests ALL_BLENDED plus ALL_EMISSIVE only when
+        //              rtx.enableUnorderedEmissiveParticlesInIndirectRays is on (default False).
+        // This puts Kenshi's alpha billboards on the same footing as its additive ones (no dust in reflections
+        // or indirect light).
         currentInstance.getVkInstance().mask = OBJECT_MASK_UNORDERED_EMISSIVE_GEOMETRY;
       }
 

@@ -84,8 +84,8 @@ namespace dxvk {
     m_rtx       (this) {
     const std::string terrainMode = env::getEnvVar("DXVK_KENSHI_TERRAIN_DEFER");
     const auto mode = terrain_restore::selectMode(terrainMode);
-    // V707: retain the oracle callback for a finite, explicitly requested check.
-    // Registering it does not enable verification on a normal launch.
+    // Keep the oracle callback for an explicitly requested, finite check. Registering it does not
+    // enable verification on a normal launch.
     terrain_restore::VerifyFn verifyTerrain = nullptr;
     {
       verifyTerrain = [](const void* context, terrain_restore::VerificationBoundary boundary) {
@@ -3508,16 +3508,9 @@ namespace dxvk {
     ByteCount = std::min(dstLength - DstOffset, ByteCount);
     ByteCount = std::min(srcLength - SrcOffset, ByteCount);
 
-    // DX11_V328_INDEX_SHADOW_ON_UPDATE (copy path). OGRE fills its
-    // device-local index buffers by writing a staging buffer and copying it
-    // here, not through UpdateSubresource - confirmed by the UpdateBuffer
-    // hook never firing for Kenshi while every draw still reported
-    // indexCpuVisible=0. The staging source is CPU-written and therefore
-    // mappable, so the index data can be mirrored into the destination's
-    // shadow at copy time, exactly as the creation-time path does for
-    // buffers created with initial data. Without a readable index range the
-    // submit path cannot bound a draw's vertices and must drop any uncaptured
-    // draw.
+    // Index shadow, copy path: OGRE fills device-local index buffers by copying from a CPU-written
+    // staging buffer rather than through UpdateSubresource. Mirror the data into the destination's
+    // shadow here; without a readable index range a draw's vertices cannot be bounded.
     if (pDstBuffer->Desc()->BindFlags & D3D11_BIND_INDEX_BUFFER) {
       const DxvkBufferSliceHandle srcMapped = pSrcBuffer->GetMappedSlice();
       const uint8_t* srcBytes =
@@ -3529,16 +3522,8 @@ namespace dxvk {
           size_t(DstOffset), srcBytes + SrcOffset, size_t(ByteCount));
       }
 
-      // Whether this hook ever fires cannot be inferred from the existing
-      // logs: both [geometry-range] and the unsafe-draw warnings are capped
-      // and stop within the first ~300 ms, long before most index buffers are
-      // filled. Report the copy path directly instead.
-      // Report the cases that actually matter rather than the first 16
-      // chronologically. The previous cap was spent entirely on tiny startup
-      // buffers (12/72/3264 bytes) while Kenshi's real mesh index buffers
-      // (39108, 58800, 79380 ...) load later and were never observed - so
-      // "the copy hook works" was only ever established for buffers nobody
-      // cares about. Log every failure, and successes only for large buffers.
+      // Log every failure, but successes only for large buffers, so tiny startup buffers do not use up
+      // the cap.
       static uint32_t sIndexCopyLogs = 0;
       const bool worthLogging = !shadowed || ByteCount >= 4096;
       if (worthLogging && sIndexCopyLogs < 64u) {
@@ -3557,11 +3542,8 @@ namespace dxvk {
       }
     }
 
-    // DX11_V473_VERTEX_SHADOW: the same mirror for vertex data. This is the
-    // route that matters for Kenshi - OGRE allocates its hardware buffers empty
-    // and fills them by staging copy, which is exactly why the index shadow
-    // needed this hook too. Bounded by the callee; the bytes are released once
-    // a bounding box has been derived from them.
+    // Same mirror for vertex data; OGRE fills its buffers by staging copy. Bounded by the callee and
+    // released once a bounding box has been derived.
     if (pDstBuffer->Desc()->BindFlags & D3D11_BIND_VERTEX_BUFFER) {
       const DxvkBufferSliceHandle srcMapped = pSrcBuffer->GetMappedSlice();
       const uint8_t* srcBytes =
@@ -3953,23 +3935,16 @@ namespace dxvk {
     prepared_terrain::written(pDstBuffer);
     DxvkBufferSlice bufferSlice = pDstBuffer->GetBufferSlice(Offset, Length);
 
-    // DX11_V328_INDEX_SHADOW_ON_UPDATE: mirror index-buffer writes into the
-    // CPU shadow the RT submit path uses to size a draw's vertex range. The
-    // creation-time shadow only covers buffers created WITH data; engines like
-    // OGRE create empty and fill here, leaving their index data unreadable to
-    // the bridge (indexCpuVisible=0) and their uncaptured draws dropped. The
-    // source bytes are already in system memory at this point.
+    // Mirror index-buffer writes into the CPU shadow the RT submit path uses to size a draw's vertex
+    // range. OGRE creates buffers empty and fills them here, so the creation-time shadow never sees them.
     pDstBuffer->UpdateIndexShadow(Offset, pSrcData, Length);
 
-    // DX11_V473_VERTEX_SHADOW: the same mirror for vertex data, feeding the
-    // object-space bounding box anti-culling needs. Gated inside the callee on
-    // D3D11_BIND_VERTEX_BUFFER, and released once a box has been derived.
+    // Same mirror for vertex data (bounding boxes for anti-culling). Gated on D3D11_BIND_VERTEX_BUFFER
+    // in the callee and released once a box exists.
     pDstBuffer->UpdateVertexShadow(Offset, pSrcData, Length);
 
-    // Kenshi's index buffers are all USAGE_DEFAULT / cpuAccess=0 /
-    // initialData=0, so they can only be filled by this path or by a copy -
-    // yet their draws still report shadowBytes=0. Record large writes here to
-    // establish which of the two routes the real meshes actually take.
+    // Diagnostic: Kenshi's index buffers are USAGE_DEFAULT with no CPU access or initial data, so they
+    // are filled here or by a copy. Log large writes to see which route real meshes take.
     if ((pDstBuffer->Desc()->BindFlags & D3D11_BIND_INDEX_BUFFER)
      && Length >= 4096) {
       static uint32_t sIndexUpdateLogs = 0;

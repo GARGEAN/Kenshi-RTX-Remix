@@ -61,25 +61,10 @@ def _is_clean_original(path: Path) -> bool:
     return "argparse" in text or "slangc" in text or "glslang" in text
 
 def _select_original() -> Path | None:
-    candidates = [
-        # DX11_V225: prefer the v174 clean original because it implements the full
-        # "//!variant-matrix" system that gbuffer.slang uses. The v219 "real_original"
-        # only understands "//!variant" and errors with "shader type not specified"
-        # on gbuffer.slang, so gbuffer_variants.h was never generated.
-        SCRIPT_DIR / "compile_shaders_real_original_v174.py",
-        SCRIPT_DIR / "compile_shaders_real_original_v219.py",
-        SCRIPT_DIR / "compile_shaders_orig_clean_v219.py",
-        SCRIPT_DIR / "compile_shaders_orig_v219.py",
-        SCRIPT_DIR / "compile_shaders_orig_v219.py",
-        SCRIPT_DIR / "compile_shaders_before_v219.py",
-        SCRIPT_DIR / "compile_shaders_before_v219.py",
-        SCRIPT_DIR.parent / "_nvidia_dxvk_remix_for_dx11_bridge" / "scripts-common" / "compile_shaders.py",
-        SCRIPT_DIR.parent / "_upstream_dxvk_remix_1_5_full_runtime_dx11" / "scripts-common" / "compile_shaders.py",
-        SCRIPT_DIR.parent / "_upstream_dxvk_remix_1_5_runtime_ui" / "scripts-common" / "compile_shaders.py",
-    ]
-    for c in candidates:
-        if _is_clean_original(c):
-            return c
+    # This compiler supports the //!variant-matrix directives used by gbuffer.slang.
+    compiler = SCRIPT_DIR / "compile_shaders_real_original_v174.py"
+    if _is_clean_original(compiler):
+        return compiler
     return None
 
 def _norm(p: os.PathLike[str] | str) -> str:

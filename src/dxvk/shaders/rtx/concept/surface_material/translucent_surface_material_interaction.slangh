@@ -160,18 +160,11 @@ TranslucentSurfaceMaterialInteraction translucentSurfaceMaterialInteractionCreat
 
   // Transform to desired Translucent Material Interaction values
 
-  // DX11_V624_KENSHI_WATER_TRANSLUCENT. Kenshi's water shading, on the material
-  // type that can actually transmit.
-  //
-  // The whole surface - biome selection from the blend map, three cross-faded
-  // ripple taps, turbulence, rain rings and scum - is computed by kenshiWaterShade
-  // in the opaque header, which surface_material.slangh includes BEFORE this file
-  // so the helper and every kenshiWater* function it calls are already in scope.
-  //
-  // Depth falloff is NOT computed here: it comes from Beer-Lambert over the real
-  // path length through the medium, driven by the material's transmittance colour
-  // and measurement distance (set to 1/invOpacity = ~500 units on the CPU). That
-  // is the entire reason for being on this path rather than the opaque one.
+  // Kenshi's water shading on the material type that can actually transmit. The whole surface (biome
+  // selection, cross-faded ripple taps, turbulence, rain rings, scum) comes from kenshiWaterShade in the
+  // opaque header, which surface_material.slangh includes before this file. Depth falloff is not
+  // computed here: it comes from Beer-Lambert over the real path length through the medium, driven by
+  // the material's transmittance colour and measurement distance (1/invOpacity, set on the CPU).
   if (surface.isAnimatedWater && cb.kenshiWaterTileScaleX != 0.0f)
   {
     const KenshiWaterShading kenshiWater = kenshiWaterShade(

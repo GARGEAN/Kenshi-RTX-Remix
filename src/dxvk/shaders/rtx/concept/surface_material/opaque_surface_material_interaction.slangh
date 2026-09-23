@@ -543,9 +543,7 @@ void overrideMaterialInteractionForEye(
 
 // Opaque Surface Material Interaction Functions
 
-// DX11_V397_KENSHI_TERRAIN_LAYERS: helpers for Kenshi's ground blend. The
-// composite itself lives in opaqueSurfaceMaterialInteractionCreate below; see
-// analysis/notes/kenshi-terrain-material.md for the decode these follow.
+// Helpers for Kenshi's ground blend; the composite is in opaqueSurfaceMaterialInteractionCreate.
 
 // The game's slope weighting: a smoothstep band, on either side.
 float kenshiTerrainSlopeBand(float slope, float minSlope, float maxSlope, float blend)
@@ -562,51 +560,26 @@ float kenshiTerrainSlopeBand(float slope, float minSlope, float maxSlope, float 
   return risingSmooth * fallingSmooth;
 }
 
-// DX11_V540_KENSHI_WETNESS: the game's weather wetness, transcribed from the
-// terrain and object pixel shaders (they agree instruction for instruction
-// apart from the response term):
-//
+// Kenshi's weather wetness, transcribed from the terrain and object pixel shaders:
 //   submerged = saturate((waterHeightRel - worldY + 2) * 0.5)
 //   w         = min(submerged + wetness, 1)
 //   wetSpec   = min(2*pow(max(w - 0.15a, 0), 4a+1) * min((1-submerged)*100, 1), 1)
 //   darkening = min((1 - 1/(w+0.7))*a + submerged*0.2, 0.4)
 //   gloss'    = lerp(gloss, 0.5, wetSpec)
 //   albedo   *= 1 - 0.5*darkening
-//
-// The `(1-submerged)*100` term kills the highlight once a surface is actually
-// UNDER the water rather than beside it.
-//
-// The response term `a` differs by family: objects compute `(1-metal)(1-gloss)`,
-// terrain uses `1 + absorbance - gloss` from an authored per-layer `absorbance`
-// array. This uses the object form for both, which is exact for objects and
-// differs for terrain only by that absorbance - eight more floats per terrain
-// record for a term that is zero on any material that does not soak. Revisit
-// if wet ground reads wrong next to wet props.
+// The `(1-submerged)*100` term kills the highlight once a surface is under the water. The response `a`
+// differs by family: objects use `(1-metal)(1-gloss)`, terrain `1 + absorbance - gloss` from an
+// authored per-layer array. The object form is used for both (exact for objects; terrain differs only
+// by absorbance).
 float kenshiWetnessSpecular(float gloss, float metal, float worldY, out float albedoScale)
 {
   albedoScale = 1.0f;
 
-  // DX11_V753: no early-out on a dry frame.
-  //
-  // Kenshi calls makeWet UNCONDITIONALLY from all six deferred shaders
-  // (objects, terrain, character, creature, foliage, skin) - there is no
-  // "skip when dry" branch anywhere in the game. `darken` is
-  // (1 - 1/(wet + 0.7)) * absorbance, which is NEGATIVE for wet < 0.3 and is
-  // clamped only from above, so Kenshi's dry state is a BRIGHTENING of up to
-  // 1 + 0.214 * absorbance, not 1.0.
-  //
-  // Returning early made 1.0 a state the game never produces, and turned the
-  // continuous wetness term into a binary one: the harvested value legitimately
-  // visits zero (measured: a run ramping 0 -> 0.40 -> 0.00066), and each
-  // crossing stepped every surface's albedo between 1.0 and ~1.18. Measured as
-  // a uniform 0.818x two-level flicker on all path-traced surfaces, on every
-  // light, absent from the rasterised sky matte, and immune to the denoiser,
-  // exposure, RTXDI and ReSTIR GI. V752 removed the intra-frame last-writer-wins
-  // race behind it, but that disagreement was only 0.0375 vs 0.0400 - worth
-  // 0.2%. This branch was the amplifier.
-  //
-  // Evaluating unconditionally makes the response continuous: the same 0 vs
-  // 0.0375 swing is now 1.214 vs 1.178, a 3% residual instead of 18%.
+  // No early-out on a dry frame: Kenshi calls makeWet unconditionally from all six deferred shaders, and
+  // `darken` = (1 - 1/(wet + 0.7)) * absorbance is negative for wet < 0.3 (clamped only from above), so
+  // the game's dry state brightens by up to 1 + 0.214 * absorbance. An early-out would make 1.0 a state
+  // the game never produces and turn the continuous term into a step, flickering every surface as the
+  // harvested wetness crosses zero.
   const float a = (1.0f - saturate(metal)) * (1.0f - saturate(gloss));
   const float submerged = saturate((cb.kenshiWaterHeight - worldY + 2.0f) * 0.5f);
   const float w = min(submerged + cb.kenshiWetness, 1.0f);
@@ -621,93 +594,44 @@ float kenshiWetnessSpecular(float gloss, float metal, float worldY, out float al
   return lerp(gloss, 0.5f, wetSpec);
 }
 
-// DX11_V537: Kenshi's gloss -> Remix's perceptual roughness.
-//
-// Kenshi's deferred lighting maps gloss to sharpness TWICE, and the two do not
-// agree with each other:
-//
+// Kenshi's gloss -> Remix's perceptual roughness. Kenshi maps gloss twice, inconsistently:
 //   direct light   GGX alpha = 1 - 0.99 * gloss
 //                  (`mad r1.w, -r6.w, l(0.99), l(1.0)` feeding the NDF)
 //   environment    specularityCube mip = (1 - gloss) * 7
 //                  (`add r2.w, -r6.w, l(1.0)` / `mul r2.w, r2.w, l(7.0)`)
-//
-// V533 took the first, being the one that is unambiguously a GGX alpha, and it
-// is wrong for what a surface actually LOOKS like. The visible character of
-// Kenshi's shiny materials is the environment reflection, not the analytic
-// highlight, and its mapping is far more compressive: gloss 1.0 and gloss 0.8
-// are 0 and 1.4 mips apart - visually near-identical - while their alphas differ
-// twentyfold. Measured on the game's iron and copper nodes, whose gloss maps
-// peak at ~1.0 and ~0.8 and which look the same in raster.
-//
-// A prefiltered cube's mip is linear in PERCEPTUAL roughness by construction,
-// and this one has 8 mips, so mip = (1 - gloss) * 7 says
-// perceptualRoughness = 1 - gloss. That is the mapping used here.
-//
-// Note this is what V531 used before V533 "corrected" it - the original guess
-// happened to match the term that governs the look.
+// The environment reflection is what gives Kenshi's shiny materials their look, and a prefiltered
+// 8-mip cube's mip is linear in perceptual roughness, so perceptualRoughness = 1 - gloss.
 float kenshiGlossToPerceptualRoughness(float gloss)
 {
   return saturate(1.0f - saturate(gloss));
 }
 
-// DX11_V591_KENSHI_WATER_RIPPLES. One tap of Kenshi's ripple normal.
-//
-// water.hlsl scrolls the normal map along the flow direction and cross-fades
-// three taps a third of a cycle apart, so the pattern advances without ever
-// visibly resetting:
-//
+// Kenshi water helpers, following water.hlsl.
+// Ripple normal (kenshiWaterSampleNormal): the normal map scrolls along the flow direction and three
+// taps a third of a cycle apart are cross-faded, so the pattern never visibly resets:
 //   t      = frac(time)
 //   normal = tex2D(map, coord + direction * speed * t).rgb * 2 - 1
 //   weight = 1 - abs(t * 2 - 1)
 //   return normal.xzy * weight
-//
-// The `.xzy` swizzle is the important part: these normals are Y-UP WORLD space
-// added to a float3(0,1,0) base, not tangent space. Kenshi's water is a flat
-// plane, so they can be used as the world shading normal directly and no
-// tangent frame is involved.
-// DX11_V599_KENSHI_WATER_SCUM. One tap of Kenshi's rain rings.
-//
-// rainRipple() in water.hlsl reads a per-drop PHASE from the map's alpha and a
-// per-drop RADIUS from its red, then drives a single sine pulse outward:
-//
+// The `.xzy` swizzle matters: these normals are Y-up world space added to a (0,1,0) base, not tangent
+// space; the water is a flat plane, so they serve as the world shading normal directly.
+// Rain rings (kenshiWaterRainRipple): a per-drop phase from the map's alpha and a radius from its red
+// drive a single sine pulse outward:
 //   dropTime = frac(ripple.a + time * 0.5)
 //   dropFrac = dropTime - 1 + ripple.r * 0.5 + 0.5
 //   s        = -sin(clamp(dropFrac * 16, 0, 2) * PI)
 //   normal   = ripple.grb, with xz scaled by s, times weight and ripple.r
-//
-// so every texel carries its own drop, expanding and fading on its own
-// schedule. Three taps at different scales and phases keep them out of lockstep.
-// DX11_V604_KENSHI_WATER_LOCAL_UV. Build a tiling water coordinate that fp32 can
-// still resolve.
-//
-// THE root defect of this whole implementation. `coord = worldXZ * scale` looks
-// harmless, but Kenshi rebases its world per zone and the camera routinely sits
-// at world coordinates around 1e5. At scale 0.004 that puts the coordinate near
-// 430, where a float's ULP is 3e-5 - about SIXTEEN texels of a 2048 map. The
-// coordinate arrives at the sampler pre-quantized into blocks, so:
-//
-//   - over any small screen region it cannot change, every tap returns the same
-//     texel, and the surface takes that texel's tilt as a flat plane-wide angle
-//     (an edge-ish texel tilts the normal by tens of degrees - the reflections
-//     that are cut short on one side and detached on the other)
-//   - what variation survives beats against the pixel grid as concentric rings
-//   - and it all depends on how far that zone's rebased origin happens to be
-//     from the world origin, which is why one area looked right and another did
-//     not
-//
-// The game never hits this: its vertex shader computes the coordinate per VERTEX
-// and the rasterizer interpolates across a small local range.
-//
-// The pattern is periodic, so subtracting a whole number of periods is exact.
-// Anchor near the camera and the arithmetic happens around zero, where fp32
-// resolves individual texels again.
-// DX11_V618: four blended biome channels plus the unblended base.
+// Three taps at different scales and phases keep the drops out of lockstep.
+// kenshiWaterLocalCoordinate: `worldXZ * scale` at world coordinates around 1e5 quantises into blocks of
+// many texels in fp32 (flat facets and ring artefacts that depend on the zone's origin); the game
+// avoids this by computing it per vertex. The pattern is periodic, so subtracting whole periods around
+// the camera is exact and keeps the arithmetic near zero.
+// Four blended biome channels plus the unblended base:
 static const uint kKenshiWaterBiomeCount = 5u;
 
-// DX11_V756: vec4s per biome record in kenshiWaterZoneBuffer, after the one-vec4
-// header. Must equal `kRecordUints / 4` in buildKenshiWaterZoneBuffer; the two
-// water paths and both biome-selection probes index with it, so naming it is
-// what keeps the next field addition from desynchronising one of the four.
+// vec4s per biome record in kenshiWaterZoneBuffer, after the one-vec4 header. Must equal
+// `kRecordUints / 4` in buildKenshiWaterZoneBuffer; both water paths and both biome-selection probes
+// index with it.
 //   +0 wave    : tileScaleX, tileScaleY, speedX, speedY
 //   +1 surface : distortion, invStrength, scumScaleX, scumScaleY
 //   +2 extra   : scumDistortion, rainAmount, tileOffsetX, tileOffsetY
@@ -776,20 +700,11 @@ vec3 kenshiWaterSampleNormal(
   const vec2 savedGradientX = surfaceInteraction.textureGradientX;
   const vec2 savedGradientY = surfaceInteraction.textureGradientY;
 
-  // DX11_V598_KENSHI_WATER_WRAP. frac() is doing the sampler's job.
-  //
-  // A material carries ONE sampler and it comes from the albedo slot, which for
-  // water is the colour map - a whole-map lookup Kenshi declares
-  // `tex_address_mode clamp`. This tiling coordinate is worldXZ * 0.004, so at
-  // world coordinates of thousands it runs far outside 0-1 and every tap came
-  // back as the same clamped edge texel: constant at any coordinate, any mip,
-  // and without the aliasing that a genuine mip-0 sample would have shown.
-  //
-  // Wrapping here reproduces the REPEAT mode the game's own normalMap unit uses
-  // (it declares no address mode, and OGRE's default is wrap). The cost is a
-  // hairline seam wherever the bilinear footprint straddles the wrap, once per
-  // 250-unit tile; the explicit gradients keep that seam from also blowing up
-  // the mip selection.
+  // frac() does the sampler's job: the material's single sampler comes from the albedo slot, which for
+  // water is the colour map (`tex_address_mode clamp`), and this tiling coordinate runs far outside 0-1,
+  // so every tap would return the clamped edge texel. Wrapping reproduces the repeat mode of the game's
+  // own normalMap unit. The cost is a hairline seam once per 250-unit tile; the explicit gradients keep
+  // it from disturbing mip selection.
   surfaceInteraction.textureCoordinates = frac(coordinates + direction * (speed * t));
   // The surface's own gradients describe the WHOLE-MAP coordinate, which is
   // three orders of magnitude finer than this tiling one - textureRead calls
@@ -817,19 +732,12 @@ vec3 kenshiWaterSampleNormal(
   return rippleNormal.xzy * weight;
 }
 
-// DX11_V624_KENSHI_WATER_TRANSLUCENT. The whole Kenshi water surface, callable
-// from either material interaction.
-//
-// Deliberately a SEPARATE implementation from the block inside the opaque
-// interaction rather than a refactor of it. That block is the proven V613-V620
-// path and is what `Water Transparency = 0` still selects; rewriting it to be
-// shared would put every working feature at risk to save duplication. When the
-// translucent path has proven itself the opaque one can be deleted outright,
-// which is a safer order than merging them now.
-//
-// Everything arrives through the biome buffer, so this needs no material texture
-// slots: header words carry the three whole-map maps (colour, flow, blend) and
-// each record carries its own five (scum, scum normal, rain, turbulence, ripple).
+// The whole Kenshi water surface, callable from either material interaction. Deliberately separate
+// from the block inside the opaque interaction, which is the established path that
+// `Water Transparency = 0` still selects; once this path has proven itself the opaque one can be
+// deleted outright. Everything arrives through the biome buffer, so no material texture slots are
+// needed: header words carry the three whole-map maps (colour, flow, blend) and each record its own
+// five (scum, scum normal, rain, turbulence, ripple).
 struct KenshiWaterShading
 {
   vec3 normal;
@@ -890,8 +798,8 @@ KenshiWaterShading kenshiWaterShade(
     surfaceInteraction.textureGradientY = savedY;
   }
 
-  // Biome selection, stochastic by blend weight - V528's rule, seeded from the
-  // hit position so the dither is fixed in world space.
+  // Biome selection, stochastic by blend weight as for terrain, seeded from the hit position so the
+  // dither is fixed in world space.
   vec2 waterTileScale = vec2(cb.kenshiWaterTileScaleX, cb.kenshiWaterTileScaleY);
   vec2 waterTileOffset = vec2(cb.kenshiWaterTileOffsetX, cb.kenshiWaterTileOffsetY);
   vec2 waterSpeed = vec2(cb.kenshiWaterSpeedX, cb.kenshiWaterSpeedY);
@@ -1137,19 +1045,12 @@ KenshiWaterShading kenshiWaterShade(
     }
   }
 
-  // DX11_V625. The V610 directional clearance clamp, which V624 omitted.
-  //
-  // Without it a ripple normal is free to tilt the reflected ray BELOW the water
-  // plane, so instead of sky and sun the ray samples the ground: the surface goes
-  // dark, loses its sun specular, and the world-locked moire V610 removed comes
-  // straight back. Both symptoms reported against V624 trace here.
-  //
-  // Test the actual reflected ray first - normals that already clear the
-  // requested angle pass through bit for bit, and only the harmful slope
-  // direction is shortened. For N(s) = normalize(Ng + s*T) with T tangent to Ng,
-  // solving dot(Ng, reflect(I, N(s))) = q gives this positive quadratic root:
-  // the exact largest retained slope, with no trigonometry, iteration, extra rays
-  // or texture reads.
+  // Directional clearance clamp: without it a ripple normal can tilt the reflected ray below the water
+  // plane, so it samples the ground (dark surface, lost sun specular, world-locked moire). Normals that
+  // already clear the requested angle pass through unchanged; only the harmful slope is shortened. For
+  // N(s) = normalize(Ng + s*T) with T tangent to Ng, solving dot(Ng, reflect(I, N(s))) = q gives this
+  // positive quadratic root: the exact largest retained slope, with no iteration, extra rays or texture
+  // reads.
   {
     const vec3 incidentDirection = -minimalRayInteraction.viewDirection;
     const float incidentNormal = dot(incidentDirection, waterTriangleNormal);
@@ -1186,15 +1087,11 @@ vec3 kenshiTerrainTint(vec3 tint, float strength)
   return vec3(1.0f, 1.0f, 1.0f) + strength * (tint - vec3(1.0f, 1.0f, 1.0f));
 }
 
-// DX11_V531_KENSHI_TERRAIN_GLOSS: returns vec4 now. The ALPHA of each diffuse
-// slice is Kenshi's per-layer gloss - the terrain families have no glossMult and
-// no metal_map, they carry it here - and this sample was already being taken and
-// its alpha thrown away, so reading it costs nothing.
-//
-// A missing layer falls back to alpha 0, i.e. fully rough: an absent texture
-// must not read as a mirror.
-// Native triplanar sampling. Zero-weight axes are exactly absent in raster's
-// result and can skip their reads. Normal maps need axis swizzles and signs.
+// Terrain layer samples return vec4: each diffuse slice's alpha is Kenshi's per-layer gloss (terrain
+// has no glossMult or metal_map). A missing layer falls back to alpha 0, i.e. fully rough - an absent
+// texture must not read as a mirror.
+// Native triplanar sampling. Zero-weight axes are exactly absent in raster's result and can skip their
+// reads. Normal maps need axis swizzles and signs.
 bool kenshiProjectedTextureRead(bool triplanar, bool normalMap,
   uint16_t textureIndex, uint16_t samplerIndex,
   inout SurfaceInteraction surfaceInteraction, out vec4 sampleValue)
@@ -1305,22 +1202,12 @@ vec3 kenshiTerrainNormalToWorld(vec3 encodedNormal, vec3 geometricNormal)
     detailNormal.x * tangentX + detailNormal.y * tangentY + detailNormal.z * n);
 }
 
-// DX11_V528_KENSHI_TERRAIN_BIOME_BLEND: where two biomes meet, the game's
-// pixel shader evaluates every neighbouring six-layer set and cross-fades them
-// by blendMap weight. Reproducing that literally means a SECOND full composite
-// whose descriptors come from a second, independently indexed record - the
-// exact shape that lost the device at save load in V405 through V414 (V410,
-// which reused the primary record's own index expression, was the only stable
-// member of that family).
-//
-// So choose ONE set per hit, with probability equal to its blend weight, and
-// shade it with the single proven composite. The path tracer already averages
-// many hits per pixel and across frames, so the expected value is the same
-// cross-fade - for one composite's cost, and in V399's instruction shape: one
-// record load reaching the layer samples, exactly as before.
-//
-// Everything this function reads is dead before the composite begins; only the
-// chosen record index escapes.
+// Where two biomes meet, the game evaluates every neighbouring six-layer set and cross-fades them by
+// blendMap weight. A second full composite with its own independently indexed record is the shape that
+// proved unstable (device loss at save load), so choose one set per hit with probability equal to its
+// blend weight and shade it with the single composite. The path tracer averages many hits per pixel
+// and across frames, so the expected value is the same cross-fade at one composite's cost. Only the
+// chosen record index escapes this function.
 uint kenshiTerrainSelectBiomeSet(
   uint primarySet, uint16_t samplerIndex,
   inout SurfaceInteraction surfaceInteraction)
@@ -1412,16 +1299,14 @@ vec3 kenshiTerrainComposite(
         args.overlayTexture, mapSamplerIndex, surfaceInteraction, overlaySample))
     overlay = overlaySample;
 
-  // V745: pad0 bit 0 is the feature flag; bits 1..16 are the detail sampler.
-  // Map coordinates retain their native clamp sampler, all tiled layers repeat.
+  // pad0 bit 0 is the feature flag; bits 1..16 are the detail sampler. Map coordinates keep their native
+  // clamp sampler, and all tiled layers repeat.
   const uint16_t samplerIndex = uint16_t(args.pad0 >> 1u);
 
-  // DX11_V530: the ROCK family's pixel shader clamps this - `min r1.y, r1.y,
-  // l(1.000000)` right after `1 - normalize(n).y`. The ground family has no
-  // clamp because a heightfield normal never points downward, so one clamp
-  // matches both. Without it an underside reads slope 2, falls outside every
-  // band, and loses the cliff and slope layers that raster gives it at nearly
-  // full weight - which is exactly why rock undersides did not match.
+  // The rock family's pixel shader clamps this (`min r1.y, r1.y, l(1.000000)` right after
+  // `1 - normalize(n).y`); the ground family needs no clamp because a heightfield normal never points
+  // downward, so one clamp matches both. Without it an underside reads slope 2, falls outside every band
+  // and loses the cliff and slope layers raster gives it.
   const bool nativeFeature = (args.pad0 & 1u) != 0u;
   const vec3 nativeNormal = nativeFeature
     ? normalize(surfaceInteraction.kenshiNativeNormal) : surfaceInteraction.geometryNormal;
@@ -1542,17 +1427,12 @@ vec3 kenshiTerrainComposite(
   if (weight2 > 0.001f)
   {
     const float objectHeight = surfaceInteraction.position.y - args.objectHeightOffset;
-    // DX11_V530: the cliff coordinate is not a flat height. Both terrain vertex
-    // shaders compute
+    // The cliff coordinate is not a flat height. Both terrain vertex shaders compute
     //     (cos(texturePos.x * d0.x) + cos(texturePos.z * d0.x)) * d0.y
     //   + (1 - texturePos.y * 0.0002)
-    // and that cosine pair is what makes layered rock run at an angle instead
-    // of in dead-level bands - the single most visible terrain difference left
-    // against raster. `distortion0.xy` rides in slopeBlend.zw; zero there
-    // collapses the term to nothing and restores the pre-V530 coordinate.
-    //
-    // The cosines take texture-space UNITS, not the 0.0002-scaled detail base,
-    // hence the 5000x back out of it.
+    // and the cosine pair makes layered rock run at an angle instead of in level bands. `distortion0.xy`
+    // rides in slopeBlend.zw; zero collapses the term. The cosines take texture-space units, not the
+    // 0.0002-scaled detail base, hence the 5000x.
     const vec2 texturePosXZ = detailBase * 5000.0f;
     const float heightWarp =
       (cos(texturePosXZ.x * args.slopeBlend.z)
@@ -1571,11 +1451,8 @@ vec3 kenshiTerrainComposite(
       surfaceInteraction.geometryNormal.x,
       surfaceInteraction.geometryNormal.z) + vec2(1e-6f, 0.0f));
     vec2 axisWeights = vec2(0.5f, 0.5f);
-    // DX11_V530: `lt r0.z, l(0.995), n.y` - the flat-projection branch is taken
-    // on n.y ABOVE the threshold only. The previous abs() also took it on
-    // downward-facing normals, which raster never does; with the slope clamp
-    // above now giving undersides a full-weight cliff layer, their axis weights
-    // have to be the real ones.
+    // `lt r0.z, l(0.995), n.y`: the flat-projection branch is taken only for n.y above the threshold,
+    // never for downward-facing normals (which get the full-weight cliff layer via the slope clamp above).
     if (surfaceInteraction.geometryNormal.y <= 0.995f)
     {
       // And there is no max() in the disassembly: `add |n| + (-0.2)`,
@@ -1699,21 +1576,13 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
   const bool secondaryOpacityLoaded = (opaqueSurfaceMaterial.flags & OPAQUE_SURFACE_MATERIAL_FLAG_USE_SECONDARY_TEXTURE_FOR_OPACITY)
     && surfaceMaterialInteractionTextureReadHelper(opaqueSurfaceMaterial.secondaryTextureIndex, opaqueSurfaceMaterial.samplerIndex, surfaceInteraction, secondaryOpacitySample);
 
-  // DX11_V550_KENSHI_DUAL_TEXTURE_SET: ten of Kenshi's pixel shaders carry two
-  // complete texture sets and cross-fade them with the vertex colour's alpha:
-  //
+  // Ten of Kenshi's pixel shaders carry two complete texture sets and cross-fade them with the vertex
+  // colour's alpha:
   //     albedo = lerp(diffuseMap2, base_map, COLOR0.a)
-  //
-  // The capture layer puts set A in albedoOpacityTextureIndex and set B in
-  // secondaryTextureIndex, having verified BY NAME that the primary really is
-  // the first set - otherwise the blend would run backwards.
-  //
-  // Blending the SAMPLE rather than the finished albedo means everything
-  // downstream that reads this texture keeps working on the blended result:
-  // the gloss-in-alpha path at the bottom of this function reads
-  // `albedoOpacitySample.a`, and Kenshi blends the alpha between the two sets
-  // exactly as it blends the colour, so a cross-faded surface gets the right
-  // gloss too. That is why the alpha is carried here and not just the rgb.
+  // The capture layer puts set A in albedoOpacityTextureIndex and set B in secondaryTextureIndex (having
+  // verified by name that the primary is set A). The sample is blended rather than the finished albedo,
+  // so the gloss-in-alpha path below reads the blended alpha - Kenshi blends the alpha between the sets
+  // just like the colour.
   const bool kenshiDualSet =
     (opaqueSurfaceMaterial.flags & OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_DUAL_TEXTURE_SET) != 0;
   // vertexColor.a is the game's own blend factor, delivered per vertex.
@@ -1738,41 +1607,19 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     }
   }
 
-  // DX11_V760_KENSHI_CONSTRUCTION: a building that is still being built.
-  //
-  // Kenshi's own pixel shader (objects.hlsl with CONSTRUCTION), reproduced
-  // exactly - see the flag in shared_constants.h for the source listing:
-  //
+  // A building still being built, reproducing Kenshi's own pixel shader (objects.hlsl with
+  // CONSTRUCTION):
   //   conY  = objectPosition.y / upperPos.x
   //   grid  = grid_map.Sample(uv * scaffoldTiling)
   //   if (constructionState.x * 1.2 < conY) clip(grid.a - 0.7);
   //   if (1.0 - (constructionState.x - 0.8) * 5.0 < conY) gridAmount = 0;
   //   grid.a = 0.4;  diffuse = lerp(diffuse, grid, gridAmount);
-  //
-  // so above the build line only the lattice's own texels survive and the
-  // building fills upward as the work progresses, while the scaffold itself
-  // only starts clearing once progress passes 0.8.
-  //
-  // The cutout is written into `opacity` rather than expressed as a legacy
-  // alpha test, because it is not one: the mask is a SECOND texture at its own
-  // tiling, and whether it applies depends on the hit's height against a
-  // per-draw constant. The instance manager clears isFullyOpaque for these
-  // draws so the resolver actually reads what this writes.
-  //
-  // The lattice blend is applied to the SAMPLE, not the finished albedo, for the
-  // same reason the dual-set blend above is: the gloss-in-alpha path at the
-  // bottom of this function reads `albedoOpacitySample.a`, and the game's
-  // `gridTexture.a = 0.4` IS the scaffold's gloss. Blending here gives the
-  // lattice its own shininess for free and keeps the transfer in one place.
-  //
-  // V761: gated on the SURFACE flag. V760 used a material flag at offset 14,
-  // which is bit 16 of a uint16 field - it never reached the GPU, so this whole
-  // block was dead while the CPU-side `isFullyOpaque = false` still applied.
-  // That combination is what produced the reported symptom: a solid building
-  // full of holes, because with nothing writing the cutout the resolver read the
-  // only opacity available - the diffuse alpha, which on a Kenshi building is
-  // GLOSS. The holes tracked cracks and cavities because that is where gloss is
-  // low.
+  // Above the build line only the lattice's texels survive; the building fills upward, and the scaffold
+  // starts clearing once progress passes 0.8. The cutout is written into `opacity` (not a legacy alpha
+  // test: its mask is a second texture at its own tiling, gated by the hit's height), and the instance
+  // manager clears isFullyOpaque so the resolver reads it. The lattice is blended into the sample, not
+  // the finished albedo, so the gloss-in-alpha path picks up the scaffold's gloss (grid.a = 0.4).
+  // Gated on the surface flag: the material flag field is full.
   bool kenshiConstructionCut = false;
   bool kenshiConstructionActive = false;
   float kenshiConstructionGrid = 0.0f;
@@ -1836,23 +1683,11 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     }
   }
 
-  // DX11_V491_KENSHI_HEAD_NORMAL: Kenshi packs a character's HEAD into NEGATIVE
-  // V of the same draw as the body, and reaches it by adding 1.0 to the
-  // coordinate (see the KENSHI_CHARACTER_HEAD albedo branch further down). The
-  // head also has its OWN normal map - `headNormalMap` at s6 in character.hlsl.
-  //
-  // Sampling the body's normal map here at an unmodified negative V therefore
-  // read unrelated texels for every face fragment: normals that did not vary
-  // smoothly, did not join up with the body at the neck, and fell apart at
-  // grazing angles. The albedo path already handled this; the normal path did
-  // not, because it samples BEFORE that branch.
-  //
-  // The head map arrives in `tangentTextureIndex`. That field is unused for any
-  // Kenshi material - the bridge never sets a tangent texture and Remix derives
-  // its tangent frame from UVs - and the GPU material struct is exactly full at
-  // kSurfaceMaterialGPUSize, so aliasing an unused field is the alternative to
-  // growing it for every material type. Guarded on the head flag so a USD
-  // replacement carrying a real tangent map is untouched.
+  // Kenshi packs a character's head into negative V of the same draw as the body, reached by adding 1.0
+  // to the coordinate (see the KENSHI_CHARACTER_HEAD albedo branch below), and the head has its own
+  // normal map (`headNormalMap`, s6 in character.hlsl). The body's map at negative V reads unrelated
+  // texels. The head map arrives in tangentTextureIndex, unused by any Kenshi material (the GPU material
+  // struct is full); guarded on the head flag so a USD replacement's real tangent map is untouched.
   bool normalLoaded;
   const bool isKenshiHeadFragment =
        (opaqueSurfaceMaterial.flags & OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_CHARACTER_HEAD) != 0
@@ -1872,16 +1707,10 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     normalLoaded = kenshiProjectedTextureRead(kenshiTriplanar, true, opaqueSurfaceMaterial.normalTextureIndex, opaqueSurfaceMaterial.samplerIndex, surfaceInteraction, normalSample);
   }
 
-  // DX11_V551: the second set's NORMAL map, blended by the same factor as its
-  // albedo. Without this a cross-faded surface takes set B's colour while
-  // keeping set A's relief, which reads as a broken material rather than a
-  // partly-translated one. The blend is applied to the RAW sample so whichever
-  // encoding decode runs below (V490's RGB / DXT5nm / octahedral) sees one
-  // consistent tangent-space normal - both sets are authored in the same
-  // encoding, so interpolating before the decode is well defined.
-  //
-  // Rides in kenshiCharacterBodyMaskTextureIndex, which only a character
-  // material uses and a dual-set material never is.
+  // The second set's normal map, blended by the same factor as its albedo (otherwise a cross-faded
+  // surface takes set B's colour with set A's relief). Blended on the raw sample so whichever decode runs
+  // below sees one consistent tangent-space normal; both sets use the same encoding. Rides in
+  // kenshiCharacterBodyMaskTextureIndex, which only a character material uses.
   if (kenshiDualSet && normalLoaded)
   {
     vec4 kenshiSecondNormalSample;
@@ -1895,27 +1724,15 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     }
   }
 
-  // DX11_V766_KENSHI_MUSCLE_NORMAL: character.hlsl's second body normal map -
-  // the "variance in muscle size" layer, which is the ONLY thing that carries a
-  // character's build. Kenshi ships `<race>_body_normal_muscular.dds` and
-  // `_skinny.dds` beside the baseline map, binds one at s4, and lerps:
-  //
+  // character.hlsl's second body normal map, the muscle-size layer - the only thing that carries a
+  // character's build. Kenshi binds <race>_body_normal_muscular.dds or _skinny.dds at s4 and lerps
   //   bodyN.wy = lerp(bodyN.wy, blendNormalMap.wy, muscleBlend)
-  //
-  // on the RAW DXT5nm pair, before the head add, the vest blend and the decode.
-  // The blend therefore happens at the decode site below, not here - here we
-  // only fetch the sample.
-  //
-  // It rides in heightTextureIndex, dead on every Kenshi material (this bridge
-  // supplies no height map and never sets HAS_DISPLACEMENT) and exempted from
-  // the host's "disable all POM attributes" wipe on the same test used here.
-  // The amount lives in the top 6 bits of the hair-channel word, in 1/63 steps.
-  //
-  // NOT applied to a head fragment. In the game the body and blend maps both
-  // return the border colour at negative V, so the lerp is `lerp(0, 0, m) = 0`
-  // and the head map is then ADDED to that zero. This path replaces rather than
-  // adds (V491), so blending here would scale the head's own normal by
-  // `1 - muscleBlend` and flatten every muscular character's face.
+  // on the raw DXT5nm pair before the head add, the vest blend and the decode; the blend happens at the
+  // decode site below, here we only fetch. It rides in heightTextureIndex (exempt from the host's POM
+  // wipe on the same test); the amount is the top 6 bits of the hair-channel word, in 1/63 steps.
+  // Not applied to head fragments: in the game both body maps return the border colour at negative V,
+  // so the lerp gives 0 and the head map is added to it. This path replaces rather than adds, so
+  // blending here would flatten muscular characters' faces.
   const uint kenshiMuscleSteps =
     uint(opaqueSurfaceMaterial.kenshiCharacterHairChannels) >> 10u;
   const float kenshiMuscleBlend = float(kenshiMuscleSteps) * (1.0f / 63.0f);
@@ -1930,9 +1747,8 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       kenshiMuscleNormalSample);
   }
 
-  // DX11_V766: this shader family inverts the normal map's green channel.
-  // skin.hlsl does it before the decode (`normalTex.g = 1 - normalTex.g`),
-  // creature.hlsl after it (`normalTex.g = -normalTex.g`); the two are the same
+  // This shader family inverts the normal map's green channel: skin.hlsl before the decode
+  // (`normalTex.g = 1 - normalTex.g`), creature.hlsl after it (`normalTex.g = -normalTex.g`) - the same
   // statement, so it is applied once, to the decoded Y, below.
   const bool kenshiFlipNormalGreen =
     (uint(opaqueSurfaceMaterial.kenshiCharacterHairChannels) & (1u << 9u)) != 0u;
@@ -1954,17 +1770,10 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     surfaceInteraction.textureCoordinates = savedCoordinates;
   }
 
-  // DX11_V491: on a Kenshi character material this slot carries the HEAD NORMAL
-  // map, not a tangent map, so it must not be read as one.
-  // DX11_V557_KENSHI_DUST: on a dust material this slot holds the biome NOISE
-  // texture, not a tangent map. The material flag word is exactly full - V554's
-  // vest flag took the last of the 14 bits - so dust is signalled by the slot
-  // being populated at all, which is safe because Remix derives tangents from
-  // UVs and never sets this for a Kenshi material (V491's finding).
-  //
-  // Per V555's rule, the ordinary consumer is suppressed in the same edit that
-  // aliases the field: a noise texture read as a tangent map would perturb every
-  // dusty surface with garbage.
+  // On a Kenshi character material this slot carries the head normal map, and on a dust material the
+  // biome noise texture - never a tangent map (no Kenshi material sets one; Remix derives tangents from
+  // UVs). The material flag word is full, so dust is signalled by the slot being populated. The ordinary
+  // tangent consumer is suppressed, or the noise would perturb every dusty surface.
   const bool kenshiDustActive =
        cb.kenshiDustStrength > 0.0f
     && (opaqueSurfaceMaterial.flags & OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_CHARACTER_HEAD) == 0
@@ -1973,26 +1782,16 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
        !kenshiDustActive
     && (opaqueSurfaceMaterial.flags & OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_CHARACTER_HEAD) == 0
     && surfaceMaterialInteractionTextureReadHelper(opaqueSurfaceMaterial.tangentTextureIndex, opaqueSurfaceMaterial.samplerIndex, surfaceInteraction, tangentSample);
-  // DX11_V555: a vest material's metallic / roughness / emissive indices are
-  // NOT those maps - they carry the clothing's diffuse, normal and recolour
-  // mask (V554). Their ORDINARY consumers have to be suppressed, or the vest
-  // diffuse is read as metalness and the vest normal as roughness, which is
-  // what turned every character mirror-bright, worst on heads.
-  //
-  // This is the difference between this aliasing and V551's: the character-mask
-  // indices V551 reused have no consumer outside the character branch, so
-  // nothing else could read them. These three do. **When aliasing a field that
-  // has an ordinary consumer, disabling that consumer is part of the change.**
-  // V552 did this for emission and V554 omitted it entirely.
+  // On a vest material the metallic / roughness / emissive indices carry the clothing's diffuse, normal
+  // and recolour mask, so their ordinary consumers must be suppressed (otherwise characters turn
+  // mirror-bright). When aliasing a field that has an ordinary consumer, disabling that consumer is part
+  // of the change.
   const bool kenshiCharacterVest =
     (opaqueSurfaceMaterial.flags & OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_CHARACTER_VEST) != 0;
   const bool roughnessLoaded = !kenshiCharacterVest && surfaceMaterialInteractionTextureReadHelper(opaqueSurfaceMaterial.roughnessTextureIndex, opaqueSurfaceMaterial.samplerIndex, surfaceInteraction, roughnessSample);
   const bool metallicLoaded = !kenshiCharacterVest && kenshiProjectedTextureRead(kenshiTriplanar, false, opaqueSurfaceMaterial.metallicTextureIndex, opaqueSurfaceMaterial.samplerIndex, surfaceInteraction, metallicSample);
-  // DX11_V551: the second set's METAL map, same factor again. Kenshi reads
-  // metalness from this texture's RED channel (V533), and the two sets can
-  // disagree about whether a surface is metal at all, so carrying only the
-  // albedo would make a cross-faded surface metallic in the wrong places.
-  // Rides in kenshiCharacterHeadMaskTextureIndex.
+  // The second set's metal map, same factor again: Kenshi reads metalness from its red channel, and the
+  // two sets can disagree about whether a surface is metal. Rides in kenshiCharacterHeadMaskTextureIndex.
   if (kenshiDualSet && metallicLoaded)
   {
     vec4 kenshiSecondMetalSample;
@@ -2006,9 +1805,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     }
   }
 
-  // DX11_V555: likewise the emissive slot, which on a vest material is the
-  // clothing recolour mask. The CPU also forces emission off, but the texture
-  // read has to stop here too - emissiveColorLoaded alone tints the surface.
+  // Likewise the emissive slot, which on a vest material is the clothing recolour mask. The CPU also
+  // forces emission off, but the texture read must stop here too - emissiveColorLoaded alone tints the
+  // surface.
   const bool emissiveColorLoaded = !kenshiCharacterVest && surfaceMaterialInteractionTextureReadHelper(opaqueSurfaceMaterial.emissiveColorTextureIndex, opaqueSurfaceMaterial.samplerIndex, surfaceInteraction, emissiveColorSample);
   
   // Load Emissive Color
@@ -2040,15 +1839,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     thinFilmThickness = opaqueSurfaceMaterial.thinFilmThicknessConstant;
   }
 
-  // DX11_V396_KENSHI_TERRAIN: the ground's colour map carries only the zone's
-  // low-frequency tint - the grain comes from a detail layer tiled tens of
-  // times per chunk, which Kenshi multiplies the tint by. Sample that layer at
-  // the detail coordinate and apply the same multiply.
-  //
-  // The detail coordinate is affine in the overlay coordinate the surface
-  // already interpolates, so no extra per-vertex data is needed. Sampling with
-  // an explicit coordinate keeps the ray-cone LOD of the surface, which for a
-  // texture tiled this much would otherwise alias badly at distance.
+  // Kenshi terrain: the colour map holds only a low-frequency tint; the grain comes from a detail
+  // layer tiled many times per chunk, which the game multiplies in. The detail coordinate is affine
+  // in the overlay coordinate, and sampling with an explicit coordinate keeps the ray-cone LOD.
   vec3 kenshiTerrainAlbedo = vec3(0.0f, 0.0f, 0.0f);
   vec3 kenshiTerrainEncodedNormal = vec3(0.5f, 0.5f, 1.0f);
   bool kenshiTerrainBlended = false;
@@ -2060,15 +1853,10 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
 #if defined(RAY_TRACING_PRIMARY_RAY)
   kenshiTerrainShadingMode = 0u;
 #endif
-  // DX11_V528: only a terrain material may run the selector. For everything
-  // else this field is an ordinary texture index and the record below is
-  // meaningless - it is read unconditionally and clamped by robust buffer
-  // access, then rejected by the set != 0 test, exactly as in V399.
-  //
-  // DX11_V529: and only when the answer can still matter. The selector exists
-  // to decide WHICH biome's textures get sampled; mode 2 samples none of them,
-  // its albedo being the macro tint alone, so a blend-map read there buys
-  // nothing. Mode 1 does sample the chosen set's layer 0, so it keeps it.
+  // Only a terrain material may run the selector: for everything else this field is an ordinary texture
+  // index, and the record read below (unconditional, clamped by robust buffer access) is rejected by the
+  // set != 0 test. And only when it can matter: mode 2 samples no biome textures (its albedo is the macro
+  // tint alone); mode 1 samples the chosen set's layer 0.
   const bool kenshiTerrainSelectsBiome =
     (opaqueSurfaceMaterial.flags & OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_TERRAIN_BLEND)
     && kenshiTerrainShadingMode != 2u;
@@ -2118,28 +1906,21 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     surfaceInteraction.textureCoordinates = savedCoordinates;
   }
 
-  // DX11_V552_KENSHI_COLOR_MASK: Kenshi's two-colour recolour, applied before
-  // anything else consumes the albedo.
-  //
+  // Kenshi's two-colour recolour, applied before anything else consumes the albedo:
   //   lum   = dot(albedo, 1)/3
   //   w1    = lerp(lum, 1, color1.a)
   //   layer = lerp(albedo, color1.rgb * w1, mask.r)
   //   w2    = lerp(lum, 1, color2.a)
   //   out   = lerp(layer,  color2.rgb * w2, mask.g)
-  //
-  // The `.a` weight is what keeps the source texture's shading: at 0 the tint
-  // is modulated by the pixel's own luminance (so folds and wear survive), at 1
-  // it is flat. Reproducing it is the difference between a recoloured material
-  // and a painted silhouette.
-  //
-  // color1 rides in albedoOpacityConstant and color2 in emissiveColorConstant +
-  // emissiveIntensity; both are dead on a textured material whose emission the
-  // CPU forces off when this flag is set. The mask is secondaryTextureIndex.
+  // The `.a` weight keeps the source texture's shading: at 0 the tint is modulated by the pixel's own
+  // luminance (folds and wear survive), at 1 it is flat. color1 rides in albedoOpacityConstant, color2
+  // in emissiveColorConstant + emissiveIntensity (emission is forced off on the CPU); the mask is
+  // secondaryTextureIndex.
   float kenshiColorMaskMetallic = 0.0f;
   bool kenshiColorMaskLoaded = false;
-  // DX11_V557: `1 - 0.6 * max(beardW, hairW)`, the game's own attenuation that
-  // makes hair and beard rougher than the skin under them. Declared here, ahead
-  // of the character branch that fills it and the gloss site that reads it.
+  // `1 - 0.6 * max(beardW, hairW)`, the game's own attenuation that makes hair and beard rougher than the
+  // skin under them. Declared ahead of the character branch that fills it and the gloss site that reads
+  // it.
   float kenshiHairGlossAttenuation = 1.0f;
   if ((opaqueSurfaceMaterial.flags & OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_COLOR_MASK) != 0
    && albedoOpacityLoaded)
@@ -2205,17 +1986,11 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     albedo = kenshiTerrainAlbedo;
 
 
-    // DX11_V525. Kenshi's ground blood. The raster pass re-renders the terrain
-    // mesh with `uv = (worldPos.xz - info.xy) * info.zw` and alpha-blends the
-    // result into the G-buffer albedo, so the projection is purely world-space
-    // and needs no per-vertex data at all.
-    //
-    // Decals are global rather than per-surface: a chunk can carry several, and
-    // associating each draw with its chunk was the part most likely to break.
-    // The rect test rejects almost every decal in a couple of instructions.
-    //
-    // Written into surfaceInteraction.kenshiBlood so the SAME downstream code
-    // that blends character blood into albedo and roughness applies here too.
+    // Kenshi's ground blood. The raster pass re-renders the terrain with
+    // `uv = (worldPos.xz - info.xy) * info.zw` and alpha-blends it into the G-buffer albedo, so the
+    // projection is purely world-space. Decals are global rather than per surface (a chunk can carry
+    // several); the rect test rejects most in a couple of instructions. Written into
+    // surfaceInteraction.kenshiBlood so the character-blood blend applies here too.
     const uint terrainDecalCount = min(kenshiTerrainBloodBuffer[0].x, 64u);
     if (terrainDecalCount != 0u)
     {
@@ -2308,9 +2083,8 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     const uint hairColorChannel = hairChannels & 7u;
     const uint hairAlphaChannel = (hairChannels >> 3u) & 7u;
     const uint beardAlphaChannel = (hairChannels >> 6u) & 7u;
-    // DX11_V557: the game attenuates a character's gloss where hair or beard
-    // covers - `o0.w *= 1 - 0.6 * max(beardW, hairW)` - so hair reads rougher
-    // than the skin beneath it. Collected here and applied with the gloss.
+    // The game attenuates a character's gloss where hair or beard covers
+    // (`o0.w *= 1 - 0.6 * max(beardW, hairW)`). Collected here and applied with the gloss.
     float kenshiHairCoverage = 0.0f;
     const vec2 savedCoordinates = surfaceInteraction.textureCoordinates;
     surfaceInteraction.textureCoordinates.y += 1.0f;
@@ -2345,24 +2119,15 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     kenshiHairGlossAttenuation = 1.0f - 0.6f * saturate(kenshiHairCoverage);
   }
 
-  // DX11_V554_KENSHI_CHARACTER_VEST: the worn-clothing layer, applied over the
-  // finished skin composite exactly as the game does - after skin tone, hair
-  // and beard, before blood.
-  //
+  // The worn-clothing layer, applied over the finished skin composite as the game does - after skin
+  // tone, hair and beard, before blood:
   //   vestLum  = dot(vest.rgb, 1)/3
   //   clothing = lerp(vest.rgb, colour.rgb * vestLum, mask.r)
   //   albedo   = lerp(skinComposite, clothing, vestNormal.a)
-  //
-  // `vestNormal.a` is a per-texel COVERAGE mask: clothing and skin share one
-  // mesh and one draw, which is why picking a single albedo per draw showed
-  // bare skin on every clothed character.
-  //
-  // The recolour keeps the clothing's own shading by weighting the tint with
-  // the source luminance - the same idea as the armour mask (V552), here with
-  // one colour and no separate weight.
-  // DX11_V556: carried out of the vest block for the roughness, metalness and
-  // normal sites below. `kenshiVestGlossValid` is what tells them the clothing
-  // layer actually resolved, rather than the flag merely being set.
+  // vestNormal.a is a per-texel coverage mask (clothing and skin share one mesh and draw). The recolour
+  // keeps the clothing's shading by weighting the tint with the source luminance.
+  // kenshiVestGlossValid tells the roughness, metalness and normal sites below that the clothing layer
+  // actually resolved, not merely that the flag is set.
   bool kenshiVestGlossValid = false;
   float kenshiVestGloss = 0.0f;
   float kenshiVestCoverage = 0.0f;
@@ -2404,37 +2169,23 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       kenshiVestCoverage = saturate(kenshiVestNormalSample.a);
       albedo = lerp(albedo, kenshiClothing, kenshiVestCoverage);
 
-      // DX11_V556: the GLOSS blends by the same coverage mask. Kenshi keeps a
-      // character's gloss in the diffuse ALPHA of whichever layer covers the
-      // texel - `lerp(bodyAlbedo.a, vestAlbedo.a, coverage)` - and the game's
-      // own output confirms there is nothing else: `mov o0.z, l(0)` writes
-      // metalness ZERO unconditionally, and o0.w is this alpha.
-      //
-      // This is a real signal that was going unused: the character shader
-      // declares no `glossMult`, so V533's object-gloss path never applied to
-      // characters and they had no gloss at all.
+      // The gloss blends by the same coverage mask: Kenshi keeps a character's gloss in the diffuse alpha of
+      // whichever layer covers the texel (`lerp(bodyAlbedo.a, vestAlbedo.a, coverage)`), and its output
+      // confirms nothing else - `mov o0.z, l(0)` writes metalness zero, and o0.w is this alpha. The character
+      // shader declares no glossMult, so the object-gloss path never applies to characters.
       kenshiVestGloss = lerp(
         albedoOpacityLoaded ? albedoOpacitySample.a : 0.0f,
         kenshiVestSample.a,
         kenshiVestCoverage);
       kenshiVestGlossValid = true;
 
-      // The clothing's own NORMAL is deliberately NOT blended here. Kenshi's
-      // vest map is RGB-encoded (X in red) while the BODY map is DXT5nm (X in
-      // alpha, Y in green) - V490's two encodings - so they cannot be mixed as
-      // raw samples the way V551's matched pair could, and this point in the
-      // function is upstream of the decode that would make them comparable.
-      // Mixing them here would rotate the body's perturbation rather than
-      // blend it, which is precisely the failure V490 exists to document.
-      // Albedo is the visible half of the clothing layer; the normal is a
-      // separate change at the decode site.
+      // The clothing's normal is not blended here, upstream of the decode; it is blended on the raw channel
+      // pair at the decode site below.
     }
   }
 #if defined(RAY_TRACING_PRIMARY_RAY)
-  // DX11_V535: reported from where the values are actually read, so this
-  // distinguishes "the flag never arrived" from "the alpha carries nothing"
-  // from "it arrived and is being used" - three states that look identical in
-  // Remix's own roughness view.
+  // Reported from where the values are read, so it distinguishes "the flag never arrived" from "the alpha
+  // carries nothing" from "it arrived and is used" - identical in Remix's own roughness view.
   if (cb.debugView == DEBUG_VIEW_KENSHI_GLOSS_INPUT)
   {
     const bool kenshiFlagged =
@@ -2539,26 +2290,11 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     opacity = 1.f;
   }
 
-  // DX11_V760_KENSHI_CONSTRUCTION: the cutout itself, written last so nothing
-  // above can put the removed part of an unfinished building back.
-  //
-  // V761 CORRECTION. V760 wrote only the zero and assumed IGNORE_ALPHA_CHANNEL
-  // had already forced the rest to 1, on the belief that a Kenshi building sets
-  // it. It does not: `ignoreAlphaChannel` is only raised by
-  // `dx11Material.Power > 0`, and Power is written for WATER alone
-  // (d3d11_rtx.cpp, kenshiWaterRoughness) - `glossMult` reaches
-  // setRoughnessConstant directly and never touches Power. So a building's
-  // opacity was still its diffuse ALPHA, which on a Kenshi material is GLOSS,
-  // not coverage (V533). That was harmless while isFullyOpaque kept the
-  // resolver from ever reading it; clearing that flag for construction exposed
-  // it, and the building came out perforated wherever gloss was low - cracks
-  // and cavities.
-  //
-  // The construction shader has exactly one coverage term and this is it, so
-  // state it completely rather than relying on anything upstream.
-  // Gated on the SURFACE flag, not on the grid having loaded: if the lattice
-  // texture is ever missing this must still fall back to a solid building - the
-  // pre-V760 look - rather than to a perforated one.
+  // The construction cutout, written last so nothing above can put the removed part back. State the
+  // opacity completely: nothing upstream forced it to 1 (ignoreAlphaChannel is only raised for water, via
+  // Power > 0), so a building's opacity would otherwise be its diffuse alpha - gloss - and it would be
+  // perforated wherever gloss is low once isFullyOpaque is cleared. Gated on the surface flag, not on the
+  // grid having loaded, so a missing lattice texture falls back to a solid building.
   if (surface.kenshiConstruction)
   {
     opacity = kenshiConstructionCut ? 0.0f : 1.0f;
@@ -2610,25 +2346,14 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       // REMIX-2224: Normals blended during terrain baking using programmable shaders can sometimes end up being invalid so we sanitize them at this point
       tangentNormal = sanitize(normalSample.xyz, cb.isZUp ? vec3(0.f, 0.f, 1.f) : vec3(0.f, 1.f, 0.f));
     }
-    // DX11_V490_KENSHI_NORMAL_ENCODING / DX11_V766_KENSHI_NORMAL_FAMILIES: the
-    // game's normal maps are tangent-space, not the octahedral form Remix's
-    // asset pipeline produces. The octahedral decode below rotates (x,y) by 45
-    // degrees and reconstructs z linearly, so feeding a game texture through it
-    // points every bump the wrong way - while still mapping flat to flat, which
-    // is why it looks like working relief.
-    //
-    // Kenshi uses TWO tangent-space layouts and the choice is per shader family:
+    // Kenshi's normal maps are tangent-space, not the octahedral form Remix's asset pipeline produces; the
+    // octahedral decode would rotate every bump by 45 degrees while still mapping flat to flat. Kenshi uses
+    // two tangent-space layouts, per shader family:
     //   RGB     x in red,   y in green   objects, foliage, triplanar, water
     //   DXT5nm  x in ALPHA, y in green   character, severed limb, creature
-    // V490 believed DXT5nm was creature-only because `creature.material` is the
-    // only file defining the DXT5NORMAL macro. character.hlsl writes the same
-    // expansion out longhand instead, so every character body and head was read
-    // with x = red - and in those maps R == G == B == Y, so X was discarded and
-    // replaced by a copy of Y. See the bridge for the measured error.
-    //
-    // Everything that modifies the normal does so on the RAW CHANNEL PAIR and
-    // before the decode, because that is what the game does: one decode at the
-    // end, on whatever the layers left in (x-slot, green).
+    // (character.hlsl writes the DXT5nm expansion out longhand, without the DXT5NORMAL macro.) Everything
+    // that modifies the normal works on the raw channel pair before the decode, as the game does: one
+    // decode at the end, on whatever the layers left in (x-slot, green).
     else if (opaqueSurfaceMaterial.flags
              & (OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_NORMAL_RGB
               | OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_NORMAL_DXT5NM))
@@ -2639,9 +2364,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
         ? vec2(normalSample.w, normalSample.y)
         : vec2(normalSample.x, normalSample.y);
 
-      // DX11_V766: the muscle-blend map, first, exactly as character.hlsl
-      // orders it - `bodyN.wy = lerp(bodyN.wy, blendNormalMap.wy, muscleBlend)`
-      // before the head add and the vest blend.
+      // The muscle-blend map first, in character.hlsl's order -
+      // `bodyN.wy = lerp(bodyN.wy, blendNormalMap.wy, muscleBlend)` - before the head add and the vest
+      // blend.
       if (kenshiMuscleNormalLoaded)
       {
         const vec2 kenshiMusclePair = kenshiDxt5nm
@@ -2650,14 +2375,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
         kenshiNormalPair = lerp(kenshiNormalPair, kenshiMusclePair, kenshiMuscleBlend);
       }
 
-      // DX11_V554/V556/V766: the clothing's own normal. The vest map is RGB
-      // (x in red) while the body map it lands on is DXT5nm (x in alpha), and
-      // the game resolves that by writing the vest's RAW xy straight into the
-      // body's (alpha, green) slots - `bodyN.wy = lerp(bodyN.wy, vestN.xy,
-      // vestN.a)` - and decoding once afterwards. V556 decoded each with its own
-      // rule and lerped the resulting unit vectors, which was the right call
-      // while the body was believed to be RGB; with the body decode corrected,
-      // the game's own form is both exact and simpler.
+      // The clothing's own normal. The vest map is RGB (x in red) while the body map is DXT5nm (x in alpha);
+      // the game writes the vest's raw xy straight into the body's (alpha, green) slots -
+      // `bodyN.wy = lerp(bodyN.wy, vestN.xy, vestN.a)` - and decodes once afterwards.
       if (kenshiVestGlossValid && kenshiVestCoverage > 0.0f)
       {
         kenshiNormalPair = lerp(kenshiNormalPair,
@@ -2666,25 +2386,16 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
 
       vec2 xy = (kenshiNormalPair * 2.0f - 1.0f)
               * cb.opaqueMaterialArgs.normalIntensity;
-      // DX11_V766: skin.hlsl and creature.hlsl invert green; the others do not.
-      // Flipping the decoded Y is the same statement as skin.hlsl's pre-decode
-      // `1 - g` and creature.hlsl's post-decode negate.
+      // skin.hlsl and creature.hlsl invert green; the others do not. Flipping the decoded Y is the same
+      // statement as skin.hlsl's pre-decode `1 - g` and creature.hlsl's post-decode negate.
       if (kenshiFlipNormalGreen)
       {
         xy.y = -xy.y;
       }
-      // DX11_V767: a reconstructed Z of zero means the sample was not a normal
-      // in this encoding at all, and the result would be a shading normal lying
-      // flat IN the surface - perpendicular to the geometric normal, which is a
-      // degenerate frame rather than a wrong-looking one. The case that reached
-      // here was Kenshi's own `flat.dds` (R128 G128 B255 A255) read as DXT5nm:
-      // x = A = +1 exactly. V767 stops those at the bridge; this is the backstop
-      // for any placeholder or replacement it does not recognise.
-      //
-      // Real maps do land here for a fraction of a percent of texels at their
-      // most extreme, and flat is a poorer approximation for those than an
-      // in-plane normal is a correct one - so this is strictly an improvement on
-      // both counts.
+      // A reconstructed Z of zero means the sample was not a normal in this encoding (e.g. a placeholder
+      // such as flat.dds read as DXT5nm: x = A = +1), and the result would be a shading normal lying flat in
+      // the surface - a degenerate frame. The bridge filters known placeholders; this is the backstop. Real
+      // maps reach it only for a fraction of a percent of their most extreme texels.
       const float kenshiNormalXYLengthSq = dot(xy, xy);
       tangentNormal = kenshiNormalXYLengthSq >= 1.0f
         ? vec3(0.0f, 0.0f, 1.0f)
@@ -2696,12 +2407,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       tangentNormal = unsignedOctahedralToHemisphereDirection(vec2(normalSample.xy), cb.opaqueMaterialArgs.normalIntensity);
     }
 
-    // DX11_V760_KENSHI_CONSTRUCTION: the game flattens the normal map where the
-    // scaffold covers the surface - `worldNormal = lerp(worldNormal, normal,
-    // gridAmount)`, `normal` there being the unperturbed interpolated one. The
-    // lattice is a separate object drawn on the building's UVs, so the
-    // building's own relief has no business showing through it. Blending toward
-    // the flat tangent-space normal is the same statement in this frame.
+    // The game flattens the normal map where the scaffold covers the surface
+    // (`worldNormal = lerp(worldNormal, normal, gridAmount)`, with the unperturbed interpolated normal);
+    // blending toward the flat tangent-space normal is the same statement in this frame.
     if (kenshiConstructionGrid > 0.0f)
     {
       tangentNormal = normalize(lerp(tangentNormal, vec3(0.0f, 0.0f, 1.0f),
@@ -2748,9 +2456,8 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     storeColorOverlayedWithTextureResolutionCheckersInDebugView(normal, opaqueSurfaceMaterial.normalTextureIndex, surfaceInteraction);
   }
 #endif
-  // DX11_V557_KENSHI_DUST: the biome dust overlay, applied after the normal is
-  // resolved because it needs both the shading normal and the albedo.
-  //
+  // The biome dust overlay, applied after the normal is resolved because it needs both the shading
+  // normal and the albedo:
   //   noise     = dustNoise.Sample(worldXZ * 0.002).r
   //   slopeTerm = saturate(4 * (n.y + dustAmount.z - 0.7))
   //   amount    = shader variant selects dustAmount.x or dustAmount.y
@@ -2758,27 +2465,15 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
   //   t        *= min(amount * 8, 1)
   //   albedo    = lerp(albedo, dustColour, saturate(t))
   //   normal    = lerp(normal, vertexNormal, saturate(t * 0.5))
-  //
-  // Transcribed from `b10b1a9b` and `d7d13405`, which agree instruction for
-  // instruction. The two gates are what make it read as dust rather than as a
-  // wash: it collects on UP-FACING surfaces (the slope term) and avoids glossy
-  // ones (the -6*albedo.a term, gloss living in the diffuse alpha).
-  //
-  // Flattening the normal is half the effect and is easy to leave out - dust
-  // fills in surface relief, so tinting without flattening reads as a stain.
+  // (b10b1a9b and d7d13405, instruction for instruction.) Dust collects on up-facing surfaces (the slope
+  // term) and avoids glossy ones (-6*albedo.a, gloss living in the diffuse alpha). Flattening the normal
+  // is half the effect: dust fills in relief, so tinting alone reads as a stain.
   if (kenshiDustActive)
   {
-    // The noise is sampled at WORLD XZ, not at the surface's own UVs, so the
-    // pattern is continuous across separate meshes - which is what stops it
-    // reading as a per-object texture.
-    //
-    // DX11_V560: at an EXPLICIT mip, not through the ordinary read. That helper
-    // uses SampleGrad with the surface's stored gradients, which describe the
-    // surface's own uvs; world XZ bears no relation to them, so the chosen mip
-    // was many levels too coarse and every dusty surface sampled roughly the
-    // texture's AVERAGE. A constant noise value makes the dust term uniform -
-    // which is why V557 read as a flat wash and V559 as nothing at all, and why
-    // neither symptom pointed at the colour work that was being blamed for it.
+    // The noise is sampled at world XZ, not the surface's UVs, so the pattern is continuous across meshes.
+    // At an explicit mip: the ordinary read uses SampleGrad with the surface's own UV gradients, which bear
+    // no relation to world XZ and would select a mip so coarse that every surface samples the texture's
+    // average (uniform dust).
     vec4 kenshiDustNoiseSample = vec4(0.0f, 0.0f, 0.0f, 0.0f);
     const bool kenshiDustNoiseLoaded =
       opaqueSurfaceMaterial.tangentTextureIndex != BINDING_INDEX_INVALID;
@@ -2791,11 +2486,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     }
     if (kenshiDustNoiseLoaded)
     {
-      // DX11_V564/V573: colour and the shader's X/Y component choice are
-      // per-material, while the complete dustAmount vector is frame-global.
-      // DXBC inspection found 26 dust shaders reading .x and seven reading .y;
-      // treating all 33 as .y substantially weakened coverage. Keeping only the
-      // static selector on the material avoids a new identity as amounts ramp.
+      // Colour and the shader's X/Y component choice are per material; the complete dustAmount vector is
+      // frame-global (26 dust shaders read .x, seven read .y). Keeping only the static selector on the
+      // material avoids a new identity as amounts ramp.
       const bool kenshiDustUsesAmountY =
         opaqueSurfaceMaterial.albedoOpacityConstant.a > 1.5f;
       const float kenshiDustAmount =
@@ -2811,25 +2504,14 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       kenshiDustT = kenshiDustT * 2.0f + kenshiDustAmount - 1.0f;
       kenshiDustT *= min(kenshiDustAmount * 8.0f, 1.0f);
 
-      // DX11_V559: blend in DISPLAY space, which is where the game blends.
-      //
-      // Every other Kenshi albedo feature composes before `gammaToLinear(albedo)`
-      // and gets this for free; dust cannot, because it needs the shading normal
-      // and that is only resolved after the conversion. So convert back around
-      // the blend rather than trying to fake it with a pre-converted constant.
-      //
-      // V558 tried the latter - a linearised constant lerped in linear space -
-      // and it made dust vanish: for a LIGHT film over a darker surface the
-      // linear-space blend sits far below the display-space one. Getting the
-      // hue right is not enough if the blend happens in the wrong space.
+      // Blend in display space, where the game blends. Other Kenshi albedo features compose before
+      // `gammaToLinear(albedo)`; dust needs the shading normal, resolved only after the conversion, so it
+      // converts back around the blend (a linearised constant lerped in linear space makes a light film over
+      // a darker surface far too dark).
 #if defined(RAY_TRACING_PRIMARY_RAY)
-      // DX11_V560: reported from where the values are actually used, so it
-      // separates "noise collapsed to a constant" from "factor never crosses
-      // its threshold" from "path never ran" - see the view's own description.
-      // DX11_V562: the three INPUTS, not the result. The V561 run already
-      // established the result: G was zero everywhere, so the factor never
-      // crosses its threshold. Which of the three terms is responsible cannot
-      // be read off that, and each points somewhere different.
+      // Dust debug view, reported where the values are used: the three inputs, which separate "noise
+      // collapsed to a constant", "factor never crosses its threshold" and "path never ran" (see the view's
+      // description).
       if (cb.debugView == DEBUG_VIEW_KENSHI_DUST)
       {
         storeInDebugView(getDispatchRaysIndex().xy,
@@ -2837,11 +2519,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       }
 #endif
 
-      // DX11_V572: Kenshi blends its display-space albedo toward its raw
-      // display-space dustColour. Remix has already converted albedo to linear
-      // by this point, so convert around this one blend and return the result to
-      // the linear-light material path. This preserves both dark endpoints and
-      // the raster blend curve at partial coverage.
+      // Kenshi blends its display-space albedo toward its raw display-space dustColour. Albedo is already
+      // linear here, so convert around this one blend and return to the linear-light path; this preserves
+      // dark endpoints and the raster blend curve at partial coverage.
       const vec3 kenshiDustColourSrgb =
         opaqueSurfaceMaterial.albedoOpacityConstant.rgb;
       albedo = gammaToLinear(lerp(
@@ -2878,46 +2558,31 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
   // Apply material modifiers
   roughness = saturate(roughness * cb.opaqueMaterialArgs.roughnessScale + cb.opaqueMaterialArgs.roughnessBias);
 
-  // DX11_V531_KENSHI_TERRAIN_GLOSS. Kenshi's terrain has no roughness of its own
-  // as far as Remix is concerned - every non-replaced material takes the flat
-  // rtx.legacyMaterial.roughnessConstant. The game does author one, as the alpha
-  // of each diffuse slice, so map it: perceptual roughness = 1 - gloss.
-  //
-  // Blended rather than substituted, because the mapping is a guess about a
-  // deferred Blinn-Phong-ish term and the untouched families stay on the flat
-  // default; the strength knob is what lets the two populations be reconciled by
-  // eye. Zero strength reproduces the previous build exactly.
-  //
-  // Saturated first: raster never clamps this channel and the 1.2x macro tint
-  // can push it past 1, which would map to a mirror.
+  // Kenshi terrain gloss: the game authors it as the alpha of each diffuse slice, mapped as perceptual
+  // roughness = 1 - gloss. Blended rather than substituted, by a strength option, because families
+  // without gloss stay on rtx.legacyMaterial.roughnessConstant and the two are reconciled by eye; zero
+  // strength is the flat default. Saturated first: raster never clamps this channel and the 1.2x macro
+  // tint can push it past 1 (a mirror).
   const float kenshiTerrainGlossStrength =
     float(cb.opaqueMaterialArgs.pad1 & 0xffffu) * (1.0f / 65535.0f);
   const float kenshiObjectGlossMultiplier =
     float(cb.opaqueMaterialArgs.pad1 >> 16u) * (4.0f / 65535.0f);
 
-  // DX11_V533: the exact curve, corrected from V531's guess. Kenshi's deferred
-  // pass shades GGX with `alpha = 1 - 0.99 * gloss` (`mad r1.w, -r6.w,
-  // l(0.99), l(1.0)` feeding the NDF), and Remix's
-  // perceptualRoughnessToRoughness is square(), so perceptual = sqrt(alpha).
-  // V531 used `1 - gloss`, which squares to alpha = (1-gloss)^2 - roughly half
-  // the roughness Kenshi asks for, i.e. visibly too shiny.
+  // Terrain: blend toward the gloss-derived roughness (kenshiGlossToPerceptualRoughness) by the strength
+  // option.
   if (kenshiTerrainGlossLoaded && kenshiTerrainGlossStrength > 0.0f)
   {
     roughness = lerp(roughness, kenshiGlossToPerceptualRoughness(kenshiTerrainGloss),
                      kenshiTerrainGlossStrength);
   }
 
-  // DX11_V533_KENSHI_OBJECT_GLOSS: the same value, stored differently. On these
-  // materials the diffuse alpha is gloss rather than coverage - the flag is set
-  // only where the game's own pixel shader declares `glossMult`, which is what
-  // proves it - and that multiplier rides in roughnessConstant.
+  // The same value stored differently: on these materials the diffuse alpha is gloss (the flag is set
+  // only where the pixel shader declares glossMult) and the multiplier rides in roughnessConstant.
   if ((opaqueSurfaceMaterial.flags & OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_GLOSS_IN_ALPHA)
    && albedoOpacityLoaded && kenshiObjectGlossMultiplier > 0.0f)
   {
-    // DX11_V536: the user gain sits on the GLOSS, before the curve, so the
-    // faithful transfer is preserved and only its input is reshaped. At
-    // multiplier 0 this block does not run at all, which is what keeps the
-    // feature-off case a true no-op whatever the legacy roughness happens to be.
+    // The user gain applies to the gloss, before the curve. At multiplier 0 this block does not run, so the
+    // feature-off case is a true no-op.
     const float kenshiObjectGloss = albedoOpacitySample.a
       * opaqueSurfaceMaterial.roughnessConstant * kenshiObjectGlossMultiplier;
     roughness = kenshiGlossToPerceptualRoughness(kenshiObjectGloss);
@@ -2927,47 +2592,26 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     roughness = kenshiGlossToPerceptualRoughness(
       (1.0f - saturate(surfaceInteraction.vertexColor.a)) * kenshiObjectGlossMultiplier);
 
-  // DX11_V556: characters have their own gloss and it needs no `glossMult` -
-  // the character shader declares none, which is exactly why V533's path never
-  // reached them and they rendered with no gloss at all. The value is the
-  // coverage-blended diffuse alpha computed with the clothing layer above, so
-  // skin and clothing each get their own, with the same curve V537 uses.
+  // Characters have their own gloss and need no glossMult (their shader declares none). The value is the
+  // coverage-blended diffuse alpha computed with the clothing layer above, through the same curve.
   if (kenshiVestGlossValid && cb.kenshiCharacterGloss > 0.0f)
   {
-    // DX11_V557: hair and beard are rougher than the skin under them, by the
-    // game's own factor. Folded in before the curve so it attenuates the GLOSS,
-    // which is where the game applies it, rather than the roughness.
+    // Hair and beard are rougher than the skin under them, by the game's own factor, applied to the gloss
+    // (before the curve) as the game does.
     roughness = kenshiGlossToPerceptualRoughness(
       saturate(kenshiVestGloss * cb.kenshiCharacterGloss * kenshiHairGlossAttenuation));
   }
 
-  // DX11_V522. Kenshi's raster has no PBR, so blood would otherwise inherit skin
-  // roughness and disappear into it under path-traced lighting. Blended by the
-  // same influence that blends the blood colour, and applied AFTER the global
-  // scale/bias so the knob means what it says.
+  // Kenshi's raster has no PBR, so blood would otherwise inherit skin roughness. Blended by the same
+  // influence as the blood colour, after the global scale/bias so the option means what it says.
   if (surfaceInteraction.kenshiBlood.a > 0.0f)
     roughness = lerp(roughness, surface.kenshiBloodRoughness, surfaceInteraction.kenshiBlood.a);
 
-  // DX11_V542_KENSHI_WETNESS_UNGATED: wetness is applied to EVERY surface here,
-  // not inside the two gloss blocks where V540 put it.
-  //
-  // V540's placement meant a material had to have a decoded gloss map before it
-  // could get wet - and a character declares no `glossMult`, so it is never
-  // flagged, so wetness could never reach one at any slider value. Characters
-  // are the most visibly wet thing in the game. In Kenshi every material
-  // carrying the constant responds, whatever its gloss.
-  //
-  // Whatever gloss the surface ended up with is recovered from its roughness.
-  // Because V537's curve is `perceptual = 1 - gloss` that inverse is exact, so
-  // with wetness at zero this is bit-identical to not running at all.
-  //
-  // Note this reaches USD replacements too, since the wetness scalar is global
-  // and nothing here distinguishes them. That is deliberate: rain is a
-  // world-space effect and a replaced surface standing in it should also be wet.
-  // The option defaults to 0, so it is opt-in either way.
-  // DX11_V753: evaluated unconditionally, matching Kenshi - see the note on
-  // kenshiWetnessSpecular. The gate here was the second half of the same
-  // early-out and produced the same binary step in albedo and roughness.
+  // Wetness is applied to every surface here, not only to materials with a decoded gloss map (characters
+  // have no glossMult, and they are the most visibly wet thing in the game). The surface's gloss is
+  // recovered from its roughness; with the `1 - gloss` curve the inverse is exact. Evaluated
+  // unconditionally, matching Kenshi (see kenshiWetnessSpecular). This also reaches USD replacements
+  // (the wetness scalar is global) - deliberate: a replaced surface standing in the rain should be wet.
   float kenshiWetAlbedoScale = 1.0f;
   {
     const float kenshiCurrentGloss = saturate(1.0f - roughness);
@@ -2993,20 +2637,16 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     metallic = metallicSample.x;
   }
 
-  // DX11_V552: a recolour-mask material binds no metal_map, so the mask's BLUE
-  // channel is its only metalness - the game writes it straight into its
-  // G-buffer metal channel. Placed after the ordinary resolve so it replaces
-  // the flat constant that would otherwise stand in, and before the scale/bias
-  // so it is treated like any other authored metalness.
+  // A recolour-mask material binds no metal_map, so the mask's blue channel is its only metalness (the
+  // game writes it straight into its G-buffer metal channel). After the ordinary resolve so it replaces
+  // the flat constant, and before scale/bias like any authored metalness.
   if (kenshiColorMaskLoaded)
   {
     metallic = kenshiColorMaskMetallic;
   }
 
-  // DX11_V556: Kenshi writes `mov o0.z, l(0)` on every character draw - a
-  // character is NEVER metallic, skin or clothing. Without this they inherit
-  // the legacy metallic constant, which is not zero and reads as a faint sheen
-  // on everything.
+  // Kenshi writes `mov o0.z, l(0)` on every character draw: a character is never metallic. Otherwise
+  // they would inherit the non-zero legacy metallic constant.
   if (kenshiCharacterVest)
   {
     metallic = 0.0f;
@@ -3016,17 +2656,16 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
   if (surface.kenshiDistantTown)
     metallic = 0.0f;
 
-  // DX11_V533: Kenshi's terrain pixel shaders write `mov o0.z, l(0)` - terrain
-  // is explicitly NON-metallic, where the flat legacy metallicConstant gives it
-  // 0.1. Tied to the same knob as terrain gloss so zero reproduces V532 exactly.
+  // Kenshi's terrain pixel shaders write `mov o0.z, l(0)`: terrain is non-metallic, where the flat legacy
+  // metallicConstant gives 0.1. Tied to the terrain gloss strength, so zero keeps the default.
   if (kenshiTerrainBlended && kenshiTerrainGlossStrength > 0.0f)
   {
     metallic = lerp(metallic, 0.0f, kenshiTerrainGlossStrength);
   }
 
 #if defined(RAY_TRACING_PRIMARY_RAY)
-  // DX11_V535: Remix has no metallic view - only base reflectivity, which mixes
-  // albedo in and therefore cannot be read as a metal mask.
+  // Remix has no metallic view - only base reflectivity, which mixes albedo in and cannot be read as a
+  // metal mask.
   if (cb.debugView == DEBUG_VIEW_KENSHI_METALLIC)
   {
     storeInDebugView(getDispatchRaysIndex().xy, vec3(metallic, metallic, metallic));
@@ -3035,22 +2674,13 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
 
   // Transform to desired Opaque Material Interaction values
 
-  // DX11_V591_KENSHI_WATER_RIPPLES / V603_KENSHI_WATER_ZONES. Kenshi's water,
-  // rebuilt from the game's own maps and constants.
-  //
-  // Two coordinate systems are needed and a Remix surface carries one: the
-  // colour and flow maps are projected across the whole world map, while the
-  // ripples, rain and scum tile every few hundred units. Both are affine in
-  // world XZ, so both are derived here from the hit position.
-  //
-  // The CONSTANTS are per zone. Kenshi draws each body of water as its own
-  // material with its own wave scale, speed, scum and distortion, so they are
-  // selected by where the ray landed, never by which draw happened last.
-  // DX11_V605-V607_KENSHI_WATER_NORMAL_TELEMETRY. Modes carried in an existing
-  // pad: 0 production, 1 geometric-flat final normal, 2 ripple-only unbent,
-  // 3 full unbent, 4 DC-centred ripple-only unbent, 5 the same centred ripple
-  // passed through getBentNormal, 6 original ripple-only bent, 7 centred full
-  // water bent.
+  // Kenshi's water, rebuilt from the game's own maps and constants. Two coordinate systems are needed and
+  // a Remix surface carries one: the colour and flow maps span the whole world map, while ripples, rain
+  // and scum tile every few hundred units. Both are affine in world XZ, so both are derived here from the
+  // hit position. The constants are per zone and selected by where the ray landed.
+  // Normal telemetry modes (in an existing pad): 0 production, 1 geometric-flat final normal,
+  // 2 ripple-only unbent, 3 full unbent, 4 DC-centred ripple-only unbent, 5 the same passed through
+  // getBentNormal, 6 original ripple-only bent, 7 centred full water bent.
   bool isKenshiWaterInteraction = false;
   float kenshiWaterNormalTelemetryMode = 0.0f;
   vec3 kenshiWaterPrimaryGlow = vec3(0.0f);
@@ -3072,21 +2702,11 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
 
     const vec2 worldXZ = vec2(surfaceInteraction.position.x, surfaceInteraction.position.z);
 
-    // DX11_V618_KENSHI_WATER_BIOMES. Which water this is, decided by the game's
-    // own blend map instead of by a table of rectangles.
-    //
-    // `WaterFPBlend` samples a whole-map 4-channel blend map at the colour map's
-    // UV and weights its alpha by one channel, named per material by
-    // `blendChannel`; the unblended base material gets `1 - sum`. Raster then
-    // ALPHA BLENDS the overlapping patches, so a pixel covered by two biomes
-    // shows a genuine cross-fade of both. That is what V603's rect table could
-    // never reproduce - it picked one zone, hard, and every biome boundary was a
-    // seam.
-    //
-    // Resolved the way V528 resolved the identical construct on terrain: choose
-    // ONE biome per hit with probability equal to its blend weight and shade it
-    // with the single composite. The path tracer averages many hits per pixel
-    // and across frames, so the expected value is the true cross-fade for one
+    // Which water this is, decided by the game's own blend map: `WaterFPBlend` samples a whole-map
+    // 4-channel blend map at the colour map's UV and weights its alpha by one channel, named per material
+    // by `blendChannel` (the unblended base material gets `1 - sum`), and raster alpha-blends the
+    // overlapping patches into a genuine cross-fade. Resolved as on terrain: choose one biome per hit with
+    // probability equal to its blend weight; the path tracer's averaging gives the true cross-fade for one
     // composite's cost.
     const vec3 waterCameraPosition = cameraGetWorldPosition(cb.camera);
     const vec2 waterCameraXZ = vec2(waterCameraPosition.x, waterCameraPosition.z);
@@ -3094,13 +2714,10 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       worldXZ * vec2(cb.kenshiWaterMapScaleX, cb.kenshiWaterMapScaleY)
       + vec2(cb.kenshiWaterMapOffsetX, cb.kenshiWaterMapOffsetY);
 
-    // DX11_V603 footprint. The surface's own gradients ARE derivatives with
-    // respect to screen x and y, for the colour map's coordinate; every water
-    // coordinate is a fixed multiple of it, so scaling them converts exactly and
-    // keeps their meaning. What they lack is reach: surface_interaction clamps
-    // them to roughly the triangle's UV radius, so at grazing angles they
-    // under-filter and alias. Amplifying isotropically by 1/cos(theta) restores
-    // that reach without inventing an axis, so it cannot band.
+    // Footprint: the surface's own gradients are screen-space derivatives of the colour-map coordinate,
+    // and every water coordinate is a fixed multiple of it, so scaling them converts exactly.
+    // surface_interaction clamps them to roughly the triangle's UV radius, so they under-filter at grazing
+    // angles; amplifying isotropically by 1/cos(theta) restores the reach without inventing an axis.
     const vec3 waterTriangleNormal = surfaceInteraction.kenshiTriangleNormal;
     const float waterCosTheta = saturate(
       abs(dot(minimalRayInteraction.viewDirection, waterTriangleNormal)));
@@ -3124,15 +2741,12 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     vec2 waterScumScale = vec2(cb.kenshiWaterScumScaleX, cb.kenshiWaterScumScaleY);
     float waterScumDistortion = cb.kenshiWaterScumDistortion;
     float waterRainAmountParam = cb.kenshiWaterRainAmount;
-    // DX11_V756_KENSHI_WATER_ZONE_VISIBILITY. The depth over which this water
-    // goes opaque, per zone. The frame global is the fallback for open water
-    // outside every biome, exactly as it is for every other field here.
+    // The depth over which this water goes opaque, per zone; the frame global is the fallback for open
+    // water outside every biome.
     float waterInvOpacityParam = cb.kenshiWaterInvOpacity;
 
-    // DX11_V619: this biome's OWN maps. The material's slots are the fallback -
-    // they hold whichever near draw was submitted last, which is exactly the
-    // race being removed, so they are used only where a biome has no map of its
-    // own (open water the game never drew a near patch over).
+    // This biome's own maps. The material's slots (whichever near draw was submitted last) are only the
+    // fallback, used where a biome has no map of its own.
     uint16_t waterScumTextureIndex =
       opaqueSurfaceMaterial.kenshiCharacterBodyMaskTextureIndex;
     uint16_t waterScumNormalTextureIndex =
@@ -3167,12 +2781,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
         surfaceInteraction.textureGradientY = savedBlendGradientY;
       }
 
-      // Seeded from the HIT POINT ALONE, never from the frame index - V528's
-      // rule. A per-frame seed would put a boiling two-biome flicker into the
-      // G-buffer wherever biomes meet; hashing the position makes the choice a
-      // dither fixed in world space, and sub-pixel jitter still lands on
-      // different hit points each frame, which is what lets the upscaler
-      // resolve it to the true weighted average.
+      // Seeded from the hit point alone, never the frame index: a per-frame seed would put a boiling
+      // two-biome flicker into the G-buffer. Position hashing makes it a dither fixed in world space, and
+      // sub-pixel jitter still lets the upscaler resolve the weighted average.
       const float waterXi = randomFloat(uint3(
         asuint(surfaceInteraction.position.x),
         asuint(surfaceInteraction.position.y),
@@ -3214,9 +2825,7 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
         if (biomeWave.x != 0.0f)
         {
           waterTileScale = biomeWave.xy;
-          // The biome's OWN offset, at its own scale. V603 had to rescale the
-          // global one by a ratio because a zone borrowed the global's units;
-          // a record that carries its own needs no correction.
+          // The biome's own offset, at its own scale.
           waterTileOffset = biomeExtra.zw;
           waterSpeed = biomeWave.zw;
         }
@@ -3232,9 +2841,8 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
         waterScumDistortion = biomeExtra.x;
         waterRainAmountParam = biomeExtra.y;
 
-        // DX11_V756: `1 / "water visibility"`, the FCS field the game pushes
-        // per water body. Zero means this zone never reported one, so the frame
-        // global stands.
+        // `1 / "water visibility"`, the FCS field the game pushes per water body. Zero means this zone never
+        // reported one, so the frame global stands.
         const float biomeInvOpacity =
           asfloat(kenshiWaterZoneBuffer[waterBase + 4u]).x;
         if (biomeInvOpacity > 0.0f)
@@ -3263,10 +2871,8 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
           waterRainTextureIndex = biomeRain;
         if (biomeTurbulence != BINDING_INDEX_INVALID)
           waterTurbulenceTextureIndex = biomeTurbulence;
-        // The ripple map is the one texture the traced (distant) material DOES
-        // carry, but it carries the distant one. A biome's own wave character -
-        // Watercalm, water - Flowing, water - Ripples - could not reach the path
-        // tracer at all before this.
+        // The ripple map is the one texture the traced (distant) material does carry, but it is the distant
+        // one; this gives each biome its own wave character (Watercalm, water - Flowing, water - Ripples).
         if (biomeRipple != BINDING_INDEX_INVALID)
           waterRippleTextureIndex = biomeRipple;
       }
@@ -3306,18 +2912,13 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       surfaceInteraction.textureGradientY = savedGradientY;
     }
 
-    // DX11_V619_KENSHI_WATER_TURBULENCE. The local half of the flow field.
-    //
+    // Turbulence, the local half of the flow field:
     //   float2 turbulence = tex2D(turbulencemap, tex.xy * 0.234).xy * 2 - 1;
     //   direction += turbulence * 0.6;
-    //
-    // The flow map alone is 2048 texels across 294912 world units - one texel
-    // per 144 units - so it carries only the large-scale current. Turbulence
-    // tiles every 250/0.234 = ~1068 units and rotates the direction by up to
-    // +-0.6 against a base of +-1, which is what makes the three scrolling taps
-    // smear along different axes in different places. That is the local streaked
-    // ripple patterning that has been missing since V591: it was never a shading
-    // problem, the texture was simply never captured.
+    // The flow map (2048 texels over 294912 units, one per 144 units) carries only the large-scale
+    // current. Turbulence tiles every ~1068 units and rotates the direction by up to +-0.6, which makes the
+    // three scrolling taps smear along different axes in different places - the local streaked ripple
+    // pattern.
     if (waterTurbulenceTextureIndex != BINDING_INDEX_INVALID)
     {
       const vec2 turbulenceScale = vec2(0.234f, 0.234f);
@@ -3356,15 +2957,8 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
 
     const float waterDistortion = max(waterDistortionParam, 1.0e-3f);
     flowSpeed /= waterDistortion;
-    // DX11_V616_KENSHI_WATER_CLOCK. One clock, no sentinel.
-    //
-    // This used to be `cb.kenshiWaterTime != 0 ? cb.kenshiWaterTime :
-    // cb.timeSinceStartSeconds`, which treated a legal zero as "unavailable".
-    // Kenshi's gameTime IS genuinely zero for the first ~5 s after every load
-    // (measured V614), so that fallback ran the cross-fade at 120 cycles/second
-    // instead of ~1 - and then snapped back mid-session. rtx_context.cpp now
-    // accumulates a monotonic clock on the CPU that is already correct in both
-    // states, so there is nothing left to choose between here.
+    // One clock, no sentinel: rtx_context.cpp accumulates a monotonic water clock on the CPU (gameTime is a
+    // legitimate 0 for the first seconds after a load), so there is nothing to choose between here.
     const float waterTime = cb.kenshiWaterTime * waterDistortion;
 
     vec3 waterNormal = vec3(0.0f, 1.0f, 0.0f);
@@ -3383,11 +2977,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
 
     if (kenshiWaterNormalTelemetryMode == 0.0f || kenshiWaterCenteredRippleTelemetry)
     {
-      // DX11_V606_KENSHI_WATER_RIPPLE_DC. water.png's decoded lateral mean is
-      // (+0.02204, +0.02462). Every animated tap therefore contributes the
-      // same world-XZ slope, and the changing sum of its triangular weights
-      // turns that bias into a slowly moving plane-wide tilt. Remove only that
-      // measured mean, scaled by the exact weights already applied per tap.
+      // water.png's decoded lateral mean is (+0.02204, +0.02462), so every animated tap adds the same
+      // world-XZ slope, and the changing sum of the triangular weights turns it into a slowly moving
+      // plane-wide tilt. Remove only that measured mean, scaled by the per-tap weights.
       const float waterNormalWeight =
         1.0f - abs(frac(waterTime) * 2.0f - 1.0f)
         + 1.0f - abs(frac(waterTime + 0.33f) * 2.0f - 1.0f)
@@ -3406,10 +2998,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
      && waterRainAmountParam > 0.0f
      && rainTextureIndex != BINDING_INDEX_INVALID)
     {
-      // map.zw in the vertex shader is `base * 0.01`, and the tiling coordinate
-      // is `base * tileScale`, so one converts to the other by ratio.
-      // `map.zw` is `base * 0.01`. Derived from its own anchor rather than from
-      // the tile coordinate, whose anchor is a different multiple.
+      // map.zw in the vertex shader is `base * 0.01` and the tiling coordinate is `base * tileScale`.
+      // Derived from its own anchor rather than from the tile coordinate, whose anchor is a different
+      // multiple.
       const vec2 waterBaseScale = vec2(
         max(abs(waterTileScale.x), 1.0e-12f), max(abs(waterTileScale.y), 1.0e-12f));
       const vec2 rainScale = vec2(0.01f, 0.01f);
@@ -3419,18 +3010,11 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       const vec2 rainGradientX = waterSurfaceGradientX * rainRatio;
       const vec2 rainGradientY = waterSurfaceGradientY * rainRatio;
       const float waterDistance = length(waterCameraPosition - surfaceInteraction.position);
-      // DX11_V614_KENSHI_WATER_RAIN_DISTANCE. The game's own fade, plus the
-      // range bound the game gets from geometry and this surface does not.
-      //
-      // Kenshi compiles rain out of the DISTANT water shader entirely, so its
-      // rings only ever exist on the near patches. Remix traces ONE surface for
-      // both families, so the rings inherit the clipmap's whole reach. Beyond a
-      // few thousand units a pixel's footprint covers many drops, and since
-      // `ripple.a` is a per-drop PHASE that a mip averages, the phase collapses
-      // to the texture mean and every drop in view pulses together - the
-      // breathing on distant reflections. Fade them out before that.
-      //
-      // Zero means no limit, which is exactly V612's behaviour.
+      // The game's own fade, plus a range bound the game gets from geometry and this surface does not.
+      // Kenshi compiles rain out of the distant water shader, so its rings only exist on the near patches;
+      // Remix traces one surface for both families, so the rings would inherit the clipmap's whole reach.
+      // Beyond a few thousand units a pixel's footprint covers many drops, and since `ripple.a` is a per-drop
+      // phase that a mip averages, every drop in view pulses together. Zero means no limit.
       const float rainDistanceLimit = cb.kenshiWaterPad2;
       const float rainRangeFade = rainDistanceLimit > 0.0f
         ? saturate((rainDistanceLimit - waterDistance)
@@ -3458,33 +3042,20 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
 
     normal = normalize(waterNormal);
 
-    // DX11_V755_KENSHI_WATER_SCUM_GAIN. The colour gain belongs to the WATER,
-    // not to the scum, so it is applied BEFORE the scum blend instead of after.
-    //
-    // V632 put it after, reasoning that raster's gain lives in the lighting
-    // (`(sunLight.diffuse + envLight.diffuse) * albedo`) and therefore multiplies
-    // the scum-blended albedo too. That is true of raster and false of what this
-    // dial actually is: raster's factor is a property of its non-physical water
-    // LIGHTING - PI on the sun term, 4x on the irradiance probe - and this
-    // surface is lit correctly, so the gain is a stand-in for the missing light,
-    // fitted to the biome colour map alone. The scum is an ordinary authored
-    // albedo and already reaches the image correctly lit; gaining it as well
-    // just makes the film louder than raster's by the same factor. At the
-    // deployed setting of 3 that is three times.
-    //
-    // kenshiWaterColour is still the raw pre-gain colour and still feeds the
-    // glow term untouched, exactly as water.hlsl:210 does.
-    //
-    // A non-positive constant means the value never reached this frame's args;
-    // fall back to the physical 1.0 rather than blacking the water out.
+    // The colour gain belongs to the water, not the scum, so it is applied before the scum blend. Raster's
+    // factor is a property of its non-physical water lighting (PI on the sun term, 4x on the irradiance
+    // probe); this surface is lit correctly, so the gain stands in for that light and is fitted to the
+    // biome colour map alone. The scum is ordinary authored albedo and already correctly lit.
+    // kenshiWaterColour is still the raw pre-gain colour and feeds the glow term, as water.hlsl does. A
+    // non-positive constant means the value never reached this frame's args: fall back to 1.0 rather than
+    // blacking out the water.
     if (cb.kenshiWaterColourGain > 0.0f)
     {
       albedo *= cb.kenshiWaterColourGain;
     }
 
-    // DX11_V621: how much scum covers this point, hoisted out of the block
-    // below because water transparency needs it - raster does
-    // `fresnel *= 1 - info.b`, so scum is what turns fouled water opaque.
+    // How much scum covers this point, hoisted out of the block below because water transparency needs it:
+    // raster does `fresnel *= 1 - info.b`, so scum turns fouled water opaque.
     float waterScumCoverage = 0.0f;
 
     // Scum. A separate albedo/normal pair that REPLACES the ripple normal where
@@ -3547,29 +3118,13 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       }
     }
 
-    // DX11_V632_KENSHI_WATER_COLOUR_GAIN. Kenshi's water is not lit physically,
-    // and that is precisely where its biome colour comes from. In
-    // lightingFunctions.hlsl the sun diffuse is `PI * dotNL * lightColor *
-    // FresnelDiffuse` - multiplying by PI where a normalised diffuse BRDF
-    // divides by it - and the ambient is `irradianceCube.rgb * .a * 4.0f`.
-    // waterColour reaches the image only through
-    // `(sunLight.diffuse + envLight.diffuse) * albedo`, so a correctly lit
-    // path-traced surface is about an order of magnitude less saturated than
-    // the raster one at every depth. This restores that gain as a dial.
-    //
-    // MOVED by V755 to just before the scum blend - see the note there. It used
-    // to sit here, after it, and multiplied the scum film as well.
-
     if (kenshiWaterNormalTelemetryMode == 0.0f)
     {
-      // DX11_V610_KENSHI_WATER_DIRECTIONAL_CLAMP. Test the actual reflected ray
-      // first. Normals that already keep it above the requested clearance pass
-      // through bit-for-bit; only the harmful slope direction is shortened.
-      //
-      // For N(s)=normalize(Ng+s*T), T tangent to Ng, solving
-      // dot(Ng, reflect(I,N(s)))=q gives this positive quadratic root. This is
-      // the exact largest retained slope for the selected clearance q, without
-      // trigonometry, iteration, extra rays or texture reads.
+      // Directional clearance clamp: test the actual reflected ray first; normals that already keep it above
+      // the requested clearance pass through unchanged, and only the harmful slope is shortened. For
+      // N(s)=normalize(Ng+s*T), T tangent to Ng, solving dot(Ng, reflect(I,N(s)))=q gives this positive
+      // quadratic root: the exact largest retained slope for clearance q, with no iteration, extra rays or
+      // texture reads.
       const vec3 waterIncidentDirection = -minimalRayInteraction.viewDirection;
       const float waterIncidentNormal = dot(waterIncidentDirection, waterTriangleNormal);
       const float waterFlatClearance = max(-waterIncidentNormal, 0.0f);
@@ -3598,31 +3153,19 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       }
     }
 
-    // DX11_V627_KENSHI_WATER_SIMULATED_DEPTH. Raster's continuous depth blend,
-    // measured along the incoming camera ray instead of read from a depth buffer.
-    //
+    // Simulated depth: raster's continuous depth blend, measured along the camera ray instead of read from
+    // a depth buffer:
     //   fresnel  = dot(viewDir, normal); fresnel = 1 - pow(1 - fresnel, 2);
     //   fresnel *= 1 - info.b;                        // opaque scum
     //   alpha    = lerp(1, saturate(depth * invOpacity), fresnel);
     //   alpha   *= saturate(depth / 2);
-    //
-    // `fresnel` here is really "how close to straight down are we looking": it
-    // goes to 1 head-on and 0 at grazing, so water is transparent when looked
-    // into and opaque when looked across, which is the behaviour that makes a
-    // lake read as a lake. Scum removes it.
-    //
-    // Depth cannot come from the game's compositor depth map, so a primary ray
-    // probes through the water surface. Transparency scales the depth RANGE,
-    // never the maximum shoreline contribution: at zero depth the bottom is
-    // fully visible for every non-zero setting, while smaller settings reach
-    // opaque water sooner. A miss joins a hit at TMax continuously.
+    // `fresnel` is really "how close to straight down are we looking": water is transparent looked into and
+    // opaque looked across; scum removes it. A primary ray probes through the surface for the depth.
+    // Transparency scales the depth range, never the maximum shoreline contribution: at zero depth the
+    // bottom is fully visible for any non-zero setting. A miss joins a hit at TMax continuously.
 #if defined(RAY_TRACING_PRIMARY_RAY)
-    // DX11_V756: `waterInvOpacityParam` is this ZONE's value, falling back to
-    // the frame global. It used to be the global outright, which on typical
-    // Kenshi water was 3x to 50x too transparent - sixty of the seventy-nine
-    // authored zones are "water visibility" 10, i.e. opaque by ten units of
-    // depth, while the values the global actually carried measured 500, 100 and
-    // 30. That is what made shallow water read as colourless.
+    // waterInvOpacityParam is this zone's value, falling back to the frame global (most authored zones
+    // have water visibility 10, far less transparent than the global's typical values).
     if (cb.kenshiWaterTransparency < 0.0f && waterInvOpacityParam > 0.0f)
     {
       const float waterTransparencyStrength = -cb.kenshiWaterTransparency;
@@ -3631,13 +3174,10 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       const float waterCameraDistance = length(waterCameraPosition - surfaceInteraction.position);
       const float waterNearBlend = saturate((4000.0f - waterCameraDistance) / 400.0f);
 
-      // DX11_V632_KENSHI_WATER_GLOW_RANGE. The alpha the raster surface would
-      // have. It starts at 1 because that is what Kenshi's DISTANT water writes
-      // unconditionally (`colour.a = 1.0f` in WaterFPDistant, which also clips
-      // everything nearer than 4000), and the near shader drives its own alpha
-      // to 1 across the same boundary with
-      // `lerp(1.0, colour.a, saturate((4000 - dist) / 400))` so the two draws
-      // meet seamlessly. Only the near branch below lowers it.
+      // The alpha the raster surface would have. It starts at 1 because Kenshi's distant water writes
+      // `colour.a = 1.0f` unconditionally (WaterFPDistant, which also clips everything nearer than 4000), and
+      // the near shader drives its own alpha to 1 across the same boundary with
+      // `lerp(1.0, colour.a, saturate((4000 - dist) / 400))`. Only the near branch below lowers it.
       float waterSurfaceAlpha = 1.0f;
 
       // Kenshi's distant water is unconditionally opaque. Besides matching its
@@ -3654,42 +3194,14 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
         RayQuery<0> waterBottomQuery = RayQuery<0>();
         waterBottomQuery.TraceRayInline(
           topLevelAS,
-          // DX11_V757_KENSHI_WATER_PROBE_FORCE_OPAQUE. This was
-          // RAY_FLAG_CULL_NON_OPAQUE, and that is what made water flip to fully
-          // opaque at a camera angle.
-          //
-          // CULL_NON_OPAQUE discards every instance carrying
-          // VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR. That bit is set for
-          // reasons that have nothing to do with whether a surface is a usable
-          // lake bed: alpha blending, emissive particles, translucency, and -
-          // the one that bites here - `surface.isClipPlaneEnabled`
-          // (rtx_instance_manager.cpp, the V649 interior-clip rule). When the
-          // camera orientation brings an interior mask into play, a large set of
-          // ordinary terrain instances acquires the bit at once, the probe stops
-          // seeing the bottom, misses, and returns tMax. `waterDepth ==
-          // waterOpaqueDepth` makes depthAlpha 1 and the whole sheet reads
-          // infinitely deep.
-          //
-          // Measured across two Ctrl+Alt+O captures 8 s apart, same camera, same
-          // water, same lake bed: instances carrying FORCE_NO_OPAQUE went from 23
-          // to 532 frame-wide, and 28 of the 60 terrain instances straddling this
-          // lake's waterline flipped from 0x0/0x1 to 0x8/0x9. The water instance,
-          // the bed geometry, the biome record, invOpacity and every hit distance
-          // were byte-identical between the two frames.
-          //
-          // FORCE_OPAQUE is what every other resolve path in the engine already
-          // uses (geometry_resolver.slangh, integrator_indirect.slangh), and ray
-          // flags override instance flags - which is exactly why those paths never
-          // saw this. A depth measurement wants the nearest geometric surface
-          // below the sheet; alpha-test and clip-plane detail are irrelevant to
-          // it, and being immune to instance-flag churn is the point.
-          //
-          // Self-intersection is not a risk: the clipmap is a flat plane at the
-          // water level, the origin is pushed below it along +Y, and the ray
-          // direction is the incoming view direction, whose Y is negative for any
-          // camera above the water. Y only decreases, so the sheet cannot be
-          // re-hit. A camera BELOW the surface is not handled here and was not
-          // handled before either - V630 covers that case separately.
+          // RAY_FLAG_FORCE_OPAQUE, not CULL_NON_OPAQUE: a depth measurement wants the nearest geometric surface
+          // below the sheet. CULL_NON_OPAQUE discards every instance carrying FORCE_NO_OPAQUE, which is set for
+          // shading reasons (alpha blending, emissive particles, translucency, interior-clip marking) - when an
+          // interior mask engages, much ordinary terrain acquires the bit, the probe misses and the water reads
+          // infinitely deep. Every other resolve path already uses FORCE_OPAQUE (ray flags override instance
+          // flags). No self-intersection: the clipmap is a flat plane, the origin is pushed below it, and the
+          // view direction's Y is negative for a camera above water. A camera below the surface is handled
+          // separately (the one-way water rule).
           RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
           OBJECT_MASK_OPAQUE, rayToRayDesc(waterBottomRay));
         while (waterBottomQuery.Proceed())
@@ -3722,20 +3234,10 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
         waterSurfaceAlpha = waterWeight;
       }
 
-      // Raster adds `glow * waterColour * (1 - info.b)` to colour.rgb, and the
-      // pass is `scene_blend alpha_blend`, so the framebuffer then scales the
-      // whole thing by alpha - which is why the weight here is the surface alpha
-      // and nothing else.
-      //
-      // V627 additionally multiplied by waterNearBlend and computed this inside
-      // the near branch, which is BACKWARDS: it made glow strongest at the camera
-      // and hard-zero past 4000, a bright disc with an edge. Raster does the
-      // opposite, because the glow block sits outside every #ifdef in water.hlsl
-      // (:209) so the DISTANT shader adds it too, at alpha 1 - its maximum. The
-      // ring the user saw in raster at that distance is the near/distant handover
-      // going opaque, not glow at all.
-      //
-      // Still primary-only, so water never becomes an indirect emitter.
+      // Raster adds `glow * waterColour * (1 - info.b)` to colour.rgb with `scene_blend alpha_blend`, so the
+      // framebuffer scales it by alpha - hence the surface alpha is the only weight. The glow block sits
+      // outside every #ifdef in water.hlsl, so the distant shader adds it too, at alpha 1. Primary-only, so
+      // water never becomes an indirect emitter.
       kenshiWaterPrimaryGlow = kenshiWaterColour * cb.kenshiWaterGlow
         * (1.0f - waterScumCoverage) * waterSurfaceAlpha;
     }
@@ -3768,25 +3270,11 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
   opaqueSurfaceMaterialInteraction.albedo = surface.isMatte ? vec3(0) : albedoToAdjustedAlbedo(albedo, metallic, opacity);
   opaqueSurfaceMaterialInteraction.baseReflectivity = surface.isMatte ? vec3(0) : calcBaseReflectivity(albedo, metallic, opacity);
 
-  // DX11_V622_KENSHI_WATER_REFLECTIVITY. Water keeps its full Fresnel specular
-  // no matter how much it transmits.
-  //
-  // `calcBaseReflectivity` scales reflectivity by opacity, which is right for
-  // what opacity means on an OPAQUE material - a particle, a decal, an
-  // alpha-tested fence, something that is partly ABSENT. Water is not absent.
-  // It is fully present and reflects about 2% at normal incidence whatever the
-  // depth behind it; Fresnel governs the reflect/transmit split, not coverage.
-  //
-  // Applying the particle assumption to water is what made V621 unusable: at the
-  // shoreline `opacity` goes to 0, so albedo AND reflectivity went to 0 and the
-  // shallows rendered as a solid dark band with no specular at all. It also
-  // maximised the stochastic-alpha variance, because the two outcomes per pixel
-  // were "black surface" and "see straight through" - hence the noise band at
-  // the transition.
-  //
-  // Albedo KEEPS the opacity scaling: that term really is the surface's own
-  // diffuse contribution, and it should fade out as the water becomes a window.
-  // Only the specular is restored.
+  // Water keeps its full Fresnel specular however much it transmits. calcBaseReflectivity scales
+  // reflectivity by opacity, which is right for an opaque material that is partly absent (a particle,
+  // decal or alpha-tested fence). Water is fully present and reflects ~2% at normal incidence whatever is
+  // behind it; without this the shallows render as a dark band with no specular. Albedo keeps the opacity
+  // scaling: the surface's own diffuse should fade as the water becomes a window.
   if (isKenshiWaterInteraction && !surface.isMatte)
   {
     opaqueSurfaceMaterialInteraction.baseReflectivity =

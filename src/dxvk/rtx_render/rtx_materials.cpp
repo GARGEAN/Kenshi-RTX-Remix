@@ -87,49 +87,30 @@ template<> OpaqueMaterialData LegacyMaterialData::as() const {
     opaqueMat.setSecondaryTexture(getColorTexture2());
   }
 
-  // DX11_V488_KENSHI_NORMAL_MAPS: feed the game's own normal map into the
-  // generic normal slot. A USD replacement that supplies its own normal map
-  // still wins, because a replacement is not built through this conversion.
+  // Feed the game's own normal map into the generic normal slot. A USD replacement with its own normal
+  // map still wins; replacements are not built through this conversion.
   if (kenshiNormalTexture.isValid()) {
     opaqueMat.setNormalTexture(kenshiNormalTexture);
-    // DX11_V490: the ENCODING cannot be set here. OpaqueMaterialData's fields
-    // are X-macro generated from the USD parameter list, so a non-USD field has
-    // no home on it; the Kenshi flags all live on MaterialData instead and are
-    // applied right after this conversion in rtx_scene_manager.cpp (~1469),
-    // beside setKenshiTerrainBlend.
+    // The encoding cannot be set here: OpaqueMaterialData's fields are X-macro generated from the USD
+    // parameter list, so the Kenshi flags live on MaterialData and are applied right after this conversion
+    // in rtx_scene_manager.cpp, beside setKenshiTerrainBlend.
   }
 
-  // DX11_V533_KENSHI_OBJECT_GLOSS: Kenshi's metal map goes straight into Remix's
-  // metallic slot. The game writes its red channel into its own G-buffer metal
-  // channel and both renderers then do the same lerp(0.04, albedo, metal) F0
-  // split, so no curve is involved. Without it every Kenshi material sits on the
-  // flat rtx.legacyMaterial.metallicConstant and no metal in the game reads as
-  // metal.
+  // Kenshi's metal map goes straight into Remix's metallic slot: the game writes its red channel into
+  // its G-buffer metal channel and both renderers do the same lerp(0.04, albedo, metal) F0 split.
   if (kenshiMetalTexture.isValid() && KenshiOptions::kenshiGameMetalness()) {
     opaqueMat.setMetallicTexture(kenshiMetalTexture);
   }
-  // The gloss MULTIPLIER rides in roughnessConstant.
-  //
-  // DX11_V534: gated on the feature actually being ON. In V533 this ran
-  // unconditionally, so every gloss-family material had its base roughness
-  // replaced by its glossMult even at strength 0 - a material with
-  // `glossMult = 0.1` became roughness 0.1, i.e. near-mirror, no matter where
-  // the slider sat. That was the handful of props that came out glossy at every
-  // setting. With the feature off the field keeps its ordinary meaning.
+  // The gloss multiplier rides in roughnessConstant - only while the feature is on; otherwise the field
+  // keeps its ordinary meaning (a glossMult of 0.1 would become a near-mirror roughness).
   if (kenshiGlossMult > 0.0f && KenshiOptions::kenshiObjectGlossMultiplier() > 0.0f) {
     opaqueMat.setRoughnessConstant(kenshiGlossMult);
   }
 
-  // DX11_V585_KENSHI_WATER_ROUGHNESS_CHANNEL: a DIRECT perceptual roughness,
-  // as opposed to the gloss multiplier above. Kenshi's water has no gloss in
-  // its diffuse alpha, so the object-gloss path would read a meaningless alpha
-  // and invert the value (see the note at the write site in d3d11_rtx.cpp).
-  // `Power` is a fixed-function field this bridge never otherwise uses, and
-  // going through it keeps `kenshiGlossMult` zero for water, which is what
-  // keeps the gloss-in-alpha flag off.
-  //
-  // Deliberately NOT gated on kenshiObjectGlossMultiplier: water's roughness is
-  // its own control and has nothing to do with the object-gloss feature.
+  // A direct perceptual roughness (water), as opposed to the gloss multiplier above. Power is a
+  // fixed-function field the bridge otherwise never uses, which keeps kenshiGlossMult zero for water and
+  // so the gloss-in-alpha flag off. Not gated on kenshiObjectGlossMultiplier: water's roughness is its
+  // own control.
   if (dx11Material.Power > 0.0f) {
     opaqueMat.setRoughnessConstant(std::clamp(dx11Material.Power, 0.0f, 1.0f));
   }
@@ -138,13 +119,9 @@ template<> OpaqueMaterialData LegacyMaterialData::as() const {
   if (getSampler().ptr()) {
     opaqueMat.setSamplerOverride(getSampler());
   }
-  // Ignore colormap alpha of legacy texture if tagged as 'ignoreAlphaOnTextures' 
-  // DX11_V588_KENSHI_WATER_OPACITY: watercolourmap.png is RGBA with alpha 0 in
-  // every texel - the game never reads it, because the water pixel shader
-  // computes its own alpha from Fresnel and scene depth. Taken as opacity it
-  // makes any BLENDED water draw perfectly invisible, which is what happened to
-  // the near-water patches the moment they were admitted. The whole-map grid was
-  // unaffected only because it is not blended, so its alpha is ignored already.
+  // Ignore colormap alpha of legacy texture if tagged as 'ignoreAlphaOnTextures'.
+  // Also for water (Power > 0): watercolourmap.png has zero alpha everywhere - the water pixel shader
+  // computes its own alpha - and taken as opacity it would make a blended water draw invisible.
   bool ignoreAlphaChannel = LegacyMaterialDefaults::ignoreAlphaChannel()
     || dx11Material.Power > 0.0f;
   if (!ignoreAlphaChannel) {

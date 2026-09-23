@@ -114,22 +114,12 @@ namespace fork_hooks {
     }
 
     void fhSyncAtmosphereDistantLights(RtxContext& ctx, const AtmosphereArgs& args) {
-      // Mode gate. Sun/moon distant lights are the sole atmosphere sun path in
-      // Numos.
-      //
-      // DX11_V462: they are also the ONLY sun in skybox-rasterization mode now.
-      // V446 turned the physical atmosphere off so the game's own sky could fill
-      // the probe, which silently removed the injected sun with it - since then
-      // the scene has been lit by sky ambient alone, which is why sunset ground
-      // reads under-lit no matter how far the probe gain is pushed.
-      //
-      // On the Kenshi path the atmosphere args are NOT usable: they are only
-      // populated inside the Numos block in updateAtmosphereConstants and are
-      // stale here. Everything the sun needs is instead taken from what V444/
-      // V445 already extract from the game and push to options each frame -
-      // direction from sunElevation/sunRotation (derived from the unclamped
-      // sunDirectionReal) and colour+intensity from sunRadianceTint. Moons stay
-      // dropped: Kenshi's two moons are stationary and cast no light in raster.
+      // Mode gate. Sun/moon distant lights are the sole atmosphere sun in Numos, and the only sun in
+      // skybox-rasterization mode (where the physical atmosphere is off so the game's sky fills the probe).
+      // On the Kenshi path the atmosphere args are stale (only populated inside the Numos block of
+      // updateAtmosphereConstants), so the sun comes from what the game harvest pushes to options each
+      // frame: direction from sunElevation/sunRotation (from the unclamped sunDirectionReal) and
+      // colour + intensity from sunRadianceTint. Moons stay dropped: Kenshi's moons cast no light in raster.
       const bool numosActive = RtxOptions::skyMode() == SkyMode::PhysicalAtmosphere;
       const bool kenshiSunActive = !numosActive && RtxOptions::kenshiSunDrive();
 
@@ -208,13 +198,9 @@ namespace fork_hooks {
           const Vector3 sunIll(args.sunIlluminance.x, args.sunIlluminance.y, args.sunIlluminance.z);
           const Vector3 sample = fhMul(sunIll, T) * (mieModulation * sunVisibility * args.sunRayBrightness * 0.5f);
           radiance = sample * (radScale / kFhPi);
-          // Sun-light-only tint/scale (fork - DX11_V445). Applied here and
-          // nowhere else on purpose: this is the one place that affects the sun
-          // AS A LIGHT without touching args.sunIlluminance, which is the
-          // atmosphere's source illuminant for the sky, the moon and the sun
-          // disc alike. A game-driven sun colour pushed into sunIlluminance
-          // tints the entire sky and, when the game fades it to zero at night,
-          // blacks the atmosphere out completely.
+          // Sun-light-only tint/scale, applied here and nowhere else: this affects the sun as a light without
+          // touching args.sunIlluminance, the atmosphere's illuminant for the sky, moon and sun disc (a
+          // game-driven colour there would tint the whole sky and black it out at night).
           const Vector3 sunTint = RtxOptions::sunRadianceTint();
           radiance = Vector3(radiance.x * std::max(sunTint.x, 0.0f),
                              radiance.y * std::max(sunTint.y, 0.0f),
@@ -237,9 +223,7 @@ namespace fork_hooks {
       }
 
       // ---- Moons (lazily created; mirror sampleAtmosphereMoonLight radiance) ----
-      // DX11_V462: Numos only. Kenshi's two moons are stationary spheres that
-      // cast no light in the game's own raster, so injecting moonlight on the
-      // Kenshi path would invent illumination the reference does not have.
+      // Numos only: Kenshi's two moons cast no light in the game's own raster.
       if (!numosActive) {
         for (uint32_t i = 0; i < MAX_MOONS; ++i) {
           if (g_atmoLights.moons[i]) {

@@ -44,10 +44,9 @@ struct GeometryResolverState : IBasePayloadState
   f16vec4 _accumulatedRotation;
   float accumulatedHitDistance;
   
-  // V647: the first camera trace uses a vec3 direction. Preserve it here so
-  // clip continuation evaluates the hardware hit distance on that same ray.
-  // Half rounding moves the restart by hitDistance * directionError and can
-  // place it beyond a floor immediately behind rejected terrain.
+  // The first camera trace uses a vec3 direction. Preserve it so clip continuation evaluates the
+  // hardware hit distance on that same ray; half-precision rounding moves the restart by
+  // hitDistance * directionError and can place it past a floor right behind rejected terrain.
   vec3 _direction;
   f16vec3 attenuation;
   uint8_t _rayMask;

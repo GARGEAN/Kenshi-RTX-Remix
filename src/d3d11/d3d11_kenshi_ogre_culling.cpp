@@ -37,9 +37,9 @@ namespace dxvk {
     };
     thread_local ThreadStats t_stats;
 
-    // V784: shipped Kenshi constructs Moon/Moon2 with planet01.mesh, stores
-    // their controllers in these two globals, and stores the Entity at +0.
-    // Validate the constructor/call sites before reading any game-owned pointer.
+    // Shipped Kenshi constructs Moon/Moon2 with planet01.mesh, stores their controllers in these two
+    // globals, and stores the Entity at +0. Validate the constructor/call sites before reading any
+    // game-owned pointer.
     bool supportedMoonLayout(const std::uint8_t* game, std::size_t imageSize) {
       const auto* profile = kenshi_executable::identify(game);
       if (!profile || imageSize < profile->imageSize) return false;

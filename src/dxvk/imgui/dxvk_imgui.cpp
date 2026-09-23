@@ -2878,18 +2878,9 @@ namespace dxvk {
         ImGui::Unindent();
       }
 
-      // DX11_V487_KENSHI_PAGE: every Kenshi-specific control in one place.
-      //
-      // These had accumulated across the Sky Tuning header and the terrain
-      // section, which made them hard to find and easy to mistake for stock
-      // Remix options. Grouping them also makes the boundary explicit: what is
-      // in here is translated from the game's own data, and what is outside is
-      // ordinary Remix tuning.
-      //
-      // A few stock Remix options are repeated here on purpose - sky brightness
-      // and the probe light brightness are tuned constantly alongside these and
-      // are meaningless to set independently of them. They are the SAME options,
-      // not copies, so changing them here changes them everywhere.
+      // Every Kenshi-specific control in one place, separate from stock Remix tuning: what is in here is
+      // translated from the game's own data. A few stock options (sky brightness, probe light brightness)
+      // are repeated because they are tuned alongside these; they are the same options, not copies.
       if (RemixGui::CollapsingHeader("Kenshi", collapsingHeaderClosedFlags)) {
         RemixGui::Checkbox("Project Telemetry", &KenshiOptions::kenshiTelemetryObject());
         RemixGui::SetTooltipToLastWidgetOnHover(
@@ -3132,9 +3123,8 @@ namespace dxvk {
             "shells see-through from outside while still blocking light.\n"
             "Off restores the old blanket two-sided behaviour.");
 
-          // DX11_V759: the heat haze reads a deferred G-buffer target that the
-          // path-traced world never writes, so it runs at full strength on every
-          // pixel instead of falling off with distance.
+          // The heat haze reads a deferred G-buffer target the path-traced world never writes, so without this
+          // it runs at full strength on every pixel.
           RemixGui::Checkbox("Heat Haze Depth", &KenshiOptions::kenshiHeatHazeDepthObject());
           RemixGui::SetTooltipToLastWidgetOnHover(
             "Give Kenshi's heat-haze post process the scene depth its distance falloff\n"
@@ -3154,8 +3144,7 @@ namespace dxvk {
             "mid-range objects shimmer less; lower brings it closer.\n"
             "Needs Heat Haze Depth on.");
 
-          // DX11_V760: buildings and props under construction, and the
-          // green/red placement ghost.
+          // Buildings and props under construction, and the green/red placement ghost.
           RemixGui::Checkbox("Construction Scaffold", &KenshiOptions::kenshiConstructionObject());
           RemixGui::SetTooltipToLastWidgetOnHover(
             "Reproduce the under-construction look: the building is cut away above the\n"
@@ -3178,8 +3167,6 @@ namespace dxvk {
           ImGui::Unindent();
         }
 
-        // DX11_V536: blood roughness has existed since V522 but was only ever
-        // settable from a config file.
         if (RemixGui::CollapsingHeader("Blood##Kenshi", collapsingHeaderFlags)) {
           ImGui::Indent();
           RemixGui::DragFloat("Blood Roughness", &KenshiOptions::kenshiBloodRoughnessObject(),
@@ -3195,8 +3182,6 @@ namespace dxvk {
           ImGui::Unindent();
         }
 
-        // DX11_V583_KENSHI_WATER_MENU: the water controls, which until now were
-        // config-file only.
         if (RemixGui::CollapsingHeader("Water##Kenshi", collapsingHeaderFlags)) {
           ImGui::Indent();
           RemixGui::Checkbox("Path-Traced Water", &KenshiOptions::kenshiWaterAdmitObject());
@@ -3343,10 +3328,6 @@ namespace dxvk {
           ImGui::Unindent();
         }
 
-        // DX11_V532_KENSHI_TERRAIN_MENU: every terrain control in one place,
-        // next to the rest of the Kenshi ones, instead of buried in Remix's
-        // generic "Terrain [Experimental]" section.
-        // DX11_V636_KENSHI_INTERIOR_CLIP.
         if (RemixGui::CollapsingHeader("Building Interiors##Kenshi", collapsingHeaderFlags)) {
           ImGui::Indent();
           RemixGui::Checkbox("Interior Culling", &KenshiOptions::kenshiInteriorClipObject());
@@ -3506,9 +3487,6 @@ namespace dxvk {
         // Sky mode selection.
         skyModeCombo.getKey(&RtxOptions::skyModeObject());
         RemixGui::SetTooltipToLastWidgetOnHover("Skybox Rasterization: Traditional skybox rendering\nPhysical Atmosphere: Hillaire atmospheric scattering");
-
-        // DX11_V487: the Kenshi-specific controls that used to live here have
-        // moved to their own "Kenshi" header above, alongside the rest of them.
 
         if (RtxOptions::skyMode() == SkyMode::SkyboxRasterization) {
           RemixGui::DragFloat("Sky Brightness", &RtxOptions::skyBrightnessObject(), 0.01f, 0.01f, FLT_MAX, "%.3f", sliderFlags);
@@ -4925,9 +4903,6 @@ namespace dxvk {
         default: break;
         }
       }
-
-      // DX11_V532: the Kenshi terrain controls that used to live here have
-      // moved to Game Settings -> Kenshi -> Terrain, with the rest of them.
 
       RemixGui::Separator();
       if (TerrainBaker::enableBaking()) {

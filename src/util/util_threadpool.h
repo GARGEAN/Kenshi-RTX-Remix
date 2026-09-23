@@ -292,7 +292,7 @@ namespace dxvk {
     using OnAddCondition = std::conditional_t<LowLatency, Nop, dxvk::condition_variable>;
     using TaskMutex = std::conditional_t<LowLatency, Nop, dxvk::mutex>;
 
-    // V719: opt-in geometry policy. Other pools retain their original policy.
+    // Opt-in geometry policy. Other pools keep their original policy.
     struct IdleState {
       std::mutex mutex;
       std::condition_variable condition;

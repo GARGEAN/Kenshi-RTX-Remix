@@ -134,10 +134,8 @@
 // shadow-march taps). Sampled with the linear/REPEAT cloud noise sampler.
 #define BINDING_ATMOSPHERE_CLOUD_PLACEMENT_MAP 216
 
-// DX11_V399_KENSHI_TERRAIN_BUFFER: Kenshi's terrain parameter sets. The count is
-// unbounded in practice - the terrain-blended rock/exterior family carries a
-// material per object - so these cannot live in the constant buffer, where a
-// fixed array overflowed and made the excess share another set's tiling.
+// Kenshi terrain parameter sets. Unbounded in practice (terrain-blended rocks carry one per
+// object), so they live in a buffer rather than a fixed constant-buffer array.
 #define BINDING_KENSHI_TERRAIN_BUFFER 217
 #define BINDING_KENSHI_BLOOD_BUFFER   218
 

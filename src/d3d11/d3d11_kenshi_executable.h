@@ -7,9 +7,9 @@
 #include "../util/log/log.h"
 
 namespace dxvk::kenshi_executable {
-// V794: offsets verified against stock 1.0.68 and the exact 1.0.65 executable
-// produced by RE_Kenshi 0.3.5's official courgette patch. Whole-file MD5 of the
-// latter: df4a5a7ef8a29deb24b70e7b7f4a222a. No checksum bypass or pattern hook.
+// Offsets verified against stock 1.0.68 and the exact 1.0.65 executable produced by RE_Kenshi
+// 0.3.5's official courgette patch (whole-file MD5 df4a5a7ef8a29deb24b70e7b7f4a222a).
+// No checksum bypass or pattern hook.
 struct Guard { uint32_t rva; const char* hex; };
 struct Profile {
   const char* name;

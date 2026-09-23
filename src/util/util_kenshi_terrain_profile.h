@@ -1,6 +1,6 @@
 #pragma once
 
-// V697: opt-in CPU accounting. No renderer class or CPU/GPU layout changes.
+// Opt-in CPU accounting. No renderer class or CPU/GPU layout changes.
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -79,8 +79,8 @@ namespace dxvk::terrain_profile {
   inline thread_local uint32_t cityVerified = 0, cityMismatches = 0;
   static_assert(sizeof(stageNames) / sizeof(*stageNames) == stageCount);
   static_assert(sizeof(counterNames) / sizeof(*counterNames) == Count);
-  // V705: switch lanes only at ordered frame/CS-command boundaries. Queued
-  // backend work must not lose profiling when the main thread reaches the end.
+  // Switch lanes only at ordered frame/CS-command boundaries. Queued backend work must not lose profiling
+  // when the main thread reaches the end.
   inline thread_local bool timedLane = false;
   inline thread_local uint64_t captureId = 0;
 #ifdef KENSHI_PROFILE_TEST
@@ -171,8 +171,8 @@ namespace dxvk::terrain_profile {
   }
 #ifndef KENSHI_PROFILE_TEST
   inline TimedAction pollTimedCapture(bool cameraValid, uint64_t& id) {
-    // Process-local, non-persistent one-shot control. No environment/config edit
-    // or launcher needed. Poll one inexpensive event every64 EndFrame calls.
+    // Process-local, non-persistent one-shot control. No environment/config edit or launcher needed. Poll
+    // one inexpensive event every 64 EndFrame calls.
     struct Control {
       HANDLE event = nullptr;
       uint32_t polls = 0;
@@ -220,8 +220,8 @@ namespace dxvk::terrain_profile {
       workerJobs[group].fetch_add(1, std::memory_order_relaxed);
     }
   };
-  // V720: legacy reports are opt-in too. A finite CPU capture also enables them
-  // on its owning lane; this does not enable the crash recorder or change its state.
+  // Legacy reports are opt-in too. A finite CPU capture also enables them on its owning lane; this does
+  // not enable the crash recorder or change its state.
   inline bool diagnosticsEnabled() {
 #ifdef KENSHI_PROFILE_TEST
     return enabled();
@@ -232,7 +232,7 @@ namespace dxvk::terrain_profile {
   inline void count(Counter counter, uint64_t n = 1) {
     if (enabled()) state.totals[state.group].counters[counter] += n;
   }
-  // V713: mutually exclusive draw classes; change reasons may overlap.
+  // Mutually exclusive draw classes; change reasons may overlap.
   enum class GeometryReason : uint32_t { Draw, New, Topology, Pose, Vertex, Shader, Update, Instance };
   inline void geometryReason(bool skinned, bool particle, GeometryReason reason) {
     if (!enabled()) return;

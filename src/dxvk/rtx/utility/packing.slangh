@@ -500,19 +500,10 @@ GENERIC_PACKED_FLAG_TEST(8)
 GENERIC_PACKED_FLAG_TEST(16)
 GENERIC_PACKED_FLAG_TEST(32)
 
-// DX11_V456: transfer-function decode for the rasterized sky probe.
-//
-// The probe is filled by re-rasterizing the game's own sky shaders, so it holds
-// whatever those shaders wrote - which for a game that composites its sky in a
-// display-referred (gamma-encoded) space is NOT linear radiance. Sampling it
-// directly then feeds encoded values to the path tracer, which flattens the sky:
-// blacks are lifted (a near-black night sky visibly glows) and highlights are
-// compressed (bright stars read dimmer than in raster), and no linear
-// brightness scale can correct both ends at once because the error is a curve,
-// not a factor.
-//
-// cb.skyProbeDecodeGamma == 1.0 leaves the sample untouched, which is the
-// default and is bit-identical to the previous behaviour.
+// Transfer-function decode for the rasterized sky probe. The probe holds whatever the game's sky
+// shaders wrote, which for a sky composited in display-referred (gamma-encoded) space is not linear
+// radiance: blacks lift and highlights compress, and no linear scale can fix both ends. 1.0 (the
+// default) leaves the sample untouched.
 float3 decodeSkyProbe(float3 probeSample)
 {
   if (cb.skyProbeDecodeGamma == 1.0f)

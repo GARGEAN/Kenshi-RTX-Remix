@@ -40,17 +40,11 @@ namespace dxvk {
       "visibility rays never run the terrain compositor in any mode - they read opacity, which it does not affect. "
       "0 = full blending on indirect rays, 1 = one tiled base layer on indirect rays, 2 = macro colour only on indirect rays.");
 
-    // DX11_V528_KENSHI_TERRAIN_BIOME_BLEND. Gated on the CPU: with this off the
-    // blend mask is never written, so every terrain record is byte-identical to
-    // the V399 single-set runtime and the selector cannot execute at all. That
-    // makes it a true kill switch for a feature whose predecessor (V405-V414)
-    // ended in device loss at save load.
-    // DX11_V531_KENSHI_TERRAIN_GLOSS. Defaults to 0, i.e. off: the mapping from
-    // Kenshi's deferred gloss to perceptual roughness is a judgement call, and
-    // the material families that carry no gloss stay on the flat
-    // rtx.legacyMaterial.roughnessConstant - so the two populations have to be
-    // reconciled by eye rather than by a fixed number. Live: the value reaches
-    // the shader through a constant, so the slider takes effect immediately.
+    // Biome blend is gated on the CPU: off, the blend mask is never written, so every terrain record is a
+    // single-set record and the selector cannot run - a true kill switch.
+    // Terrain gloss defaults to 0 (off): mapping Kenshi's deferred gloss to roughness is a judgement call,
+    // and families without gloss stay on rtx.legacyMaterial.roughnessConstant, so the two are reconciled by
+    // eye. Live: the value reaches the shader through a constant.
     RTX_OPTION("rtx.kenshiTerrain", float, glossStrength, 0.0f,
       "How strongly Kenshi's own terrain gloss drives path-traced roughness. The game stores it in the alpha "
       "of each terrain detail layer and blends it with the same weights as the colour; this maps it as "

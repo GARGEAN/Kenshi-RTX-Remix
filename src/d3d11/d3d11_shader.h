@@ -80,12 +80,9 @@ namespace dxvk {
     // bound pixel shader proves no specific semantic for the sampled slot.
     std::string        semanticName;
     uint32_t           semanticIndex = 0;
-    // DX11_V390_PS_LINKED_UV_CAPTURE: one xfb variant per captured semantic.
-    // The combined position+UV replay already selects the semantic the pixel
-    // shader samples the albedo with; this standalone path used to be locked
-    // to the single "best" name-scored output, which is the lowest-index
-    // TEXCOORD. Kenshi's terrain shows why that is not the same thing: its
-    // TEXCOORD0 is the world normal and the colour-map UV is TEXCOORD3.
+    // One xfb variant per captured semantic: the pixel shader may sample its albedo with a different
+    // TEXCOORD than the lowest-index one (Kenshi's terrain: TEXCOORD0 is the world normal, the colour-map
+    // UV is TEXCOORD3).
     std::unordered_map<uint64_t, D3D11TexcoordCaptureVariant> variants;
   };
 
@@ -113,18 +110,11 @@ namespace dxvk {
     bool     ambiguous = false;
   };
 
-  // DX11_V392_WORLD_PROJECTED_UV: a pixel shader that projects a map over the
-  // world computes its texture coordinate inside the shader from an
-  // interpolated world position, so there is no vertex attribute to capture
-  // and no input semantic to prove. Such a texture is rejected by the
-  // sampled-semantic contract and its surface renders untextured - which is
-  // exactly why Kenshi's distant terrain is white while raster draws it with
-  // `$distantColour`.
-  //
-  // The affine the shader applies lives in its constant buffer, so the profile
-  // records where, by REFLECTED VARIABLE NAME rather than by fixed offset, and
-  // the values are read per draw. The UV is then reproduced on the RT side by
-  // TexGenMode::WorldPositions plus the surface's texture transform.
+  // A pixel shader that projects a map over the world computes its texture coordinate from an
+  // interpolated world position, so there is no vertex attribute to capture and no input semantic to
+  // prove, and the texture would be rejected (Kenshi's distant terrain, `$distantColour`). The profile
+  // records where the shader's affine lives by reflected variable name; the values are read per draw and
+  // the UV is reproduced with TexGenMode::WorldPositions plus the surface's texture transform.
   struct D3D11WorldProjectedUvProfile {
     bool     valid = false;
     uint32_t resourceSlot = 0;      // sampled texture this coordinate feeds
@@ -341,20 +331,15 @@ namespace dxvk {
       return m_usesDiscard;
     }
 
-    // DX11_V546_COLOR0_TINT: which components of the COLOR0 input this PIXEL
-    // shader actually reads, as an xyzw bitmask (bit 0 = r ... bit 3 = a).
-    // Read from the input signature's ReadWriteMask, so it reflects real use
-    // rather than declaration - see DxbcSgnEntry::usedMask.
-    //
-    // Zero for a shader that ignores COLOR0 (or has none), and zero for every
-    // non-pixel stage. In Kenshi this cleanly separates the three cases: 0 = no
-    // tint, 0x7 = albedo tint in rgb, 0xF = tint plus a second-texture-set
-    // blend in alpha.
+    // Which components of the COLOR0 input this pixel shader reads, as an xyzw bitmask (bit 0 = r ...
+    // bit 3 = a), from the input signature's ReadWriteMask (see DxbcSgnEntry::usedMask). Zero for a
+    // shader that ignores COLOR0 and for non-pixel stages. In Kenshi: 0 = no tint, 0x7 = albedo tint in
+    // rgb, 0xF = tint plus a second-texture-set blend in alpha.
     uint32_t GetColor0UsedMask() const {
       return m_color0UsedMask;
     }
 
-    // V734: IA storage width does not say which skin influences the VS reads.
+    // IA storage width does not say which skin influences the VS reads.
     bool UsesThreeExplicitSkinWeights() const {
       return m_skinWeightUsedMask == 7u && m_skinIndexUsedMask == 7u;
     }
@@ -368,11 +353,9 @@ namespace dxvk {
       return m_opacityCutoutProfile.valid ? &m_opacityCutoutProfile : nullptr;
     }
 
-    // DX11_V758_KENSHI_TERRAIN_BLEND_MASK: which blendMap channels this terrain
-    // pixel shader actually consumes, derived from its own instruction stream
-    // at shader creation. 0 on every shader that is not a multi-biome terrain
-    // permutation - and on one whose shape the derivation does not recognise,
-    // which is exactly the pre-V758 behaviour for an unlisted shader.
+    // Which blendMap channels this terrain pixel shader consumes, derived from its instruction stream at
+    // creation. 0 for anything that is not a multi-biome terrain permutation, or whose shape the
+    // derivation does not recognise.
     uint32_t GetKenshiTerrainBlendChannelMask() const {
       return m_kenshiTerrainBlendChannelMask;
     }
@@ -437,14 +420,14 @@ namespace dxvk {
 
     // DX11_V281_FIXED_FUNCTION (parsed for pixel shaders only)
     bool m_usesDiscard = false;
-    // DX11_V546_COLOR0_TINT (pixel shaders only). See GetColor0UsedMask().
-    // Placed next to m_usesDiscard so it lands in that bool's tail padding.
+    // Pixel shaders only; see GetColor0UsedMask(). Placed next to m_usesDiscard to use that bool's tail
+    // padding.
     uint8_t m_color0UsedMask = 0;
     uint8_t m_skinWeightUsedMask = 0;
     uint8_t m_skinIndexUsedMask = 0;
     D3D11OpacityCutoutProfile m_opacityCutoutProfile;
     uint8_t m_kenshiProjection = 0;
-    // DX11_V758_KENSHI_TERRAIN_BLEND_MASK (pixel shaders only).
+    // Pixel shaders only.
     uint8_t m_kenshiTerrainBlendChannelMask = 0;
     D3D11WorldProjectedUvProfile m_worldProjectedUv;
 

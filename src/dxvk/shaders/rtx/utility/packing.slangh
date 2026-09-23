@@ -501,35 +501,19 @@ GENERIC_PACKED_FLAG_TEST(16)
 GENERIC_PACKED_FLAG_TEST(32)
 
 
-// DX11_V458: transfer-function decode for the rasterized sky probe.
-//
-// The probe is filled by re-rasterizing the game's own sky shaders, so it holds
-// whatever those shaders wrote. Kenshi writes linear HDR (its sky target is
-// VK_FORMAT_B10G11R11_UFLOAT_PACK32, confirmed at runtime) and then crushes the
-// low end in its OWN exposure/tonemap pass - a pass this path bypasses
-// entirely. Sampling the probe directly therefore yields a flattened sky:
-// blacks lifted (a near-black night sky visibly glows) and highlights
-// compressed relative to raster. No linear brightness scale corrects both ends,
-// because the error is a curve, not a factor.
-//
-// An exponent > 1 crushes the low end while preserving or expanding the top,
-// which is the shape of the missing tonemap. cb.skyProbeDecodeGamma == 1.0
-// leaves the sample untouched and is the default.
-// Takes the exponent as a PARAMETER rather than reading cb: this header is
-// included by shaders whose `cb` is CompositeArgs or DebugViewArgs, not
-// RaytraceArgs, so touching cb here fails to compile everywhere else.
+// Transfer-function decode for the rasterized sky probe. The probe holds whatever the game's sky
+// shaders wrote: Kenshi writes linear HDR (B10G11R11_UFLOAT) and crushes the low end in its own
+// exposure/tonemap pass, which this path bypasses, so sampling the probe directly lifts blacks and
+// compresses highlights - a curve, not a factor. An exponent > 1 crushes the low end while preserving
+// the top; 1.0 (the default) leaves the sample untouched.
+// Takes its parameters explicitly rather than reading cb: this header is also included by shaders
+// whose `cb` is CompositeArgs or DebugViewArgs.
 float3 decodeSkyProbe(float3 probeSample, float decodeGamma, float blackPoint, float lightGain)
 {
-  // Black point first: lift the floor off before any curve, so the curve is
-  // applied to a signal whose darks are already where they belong.
-  //
-  // This is the operator that matches the measured defect. The probe is
-  // UNBOUNDED HDR, so decodeGamma only crushes values below 1.0 - above it an
-  // exponent EXPANDS (pow(5,2.2)=37), which detonated the sun disc and produced
-  // violent auto-exposure plus environment-sampling fireflies. Subtracting a
-  // constant cannot amplify anything: it removes the lifted floor (the star
-  // texture's dark background, which glows where raster is black) and leaves a
-  // bright star of 1.6 at 1.55.
+  // Black point first, so the curve applies to a signal whose darks are already where they belong. The
+  // probe is unbounded HDR, so decodeGamma only crushes values below 1.0 and expands those above it;
+  // subtracting a constant cannot amplify anything - it removes the lifted floor (the star texture's dark
+  // background) and barely touches bright stars.
   float3 result = max(probeSample - float3(blackPoint), float3(0.0f, 0.0f, 0.0f));
 
   if (decodeGamma != 1.0f)

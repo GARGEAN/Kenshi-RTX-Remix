@@ -109,8 +109,8 @@ private:
   // instead of scanning all tracking hash buckets.
   std::unordered_map<XXH64_hash_t, ReplacementSpatialMap> m_materialSpatialMaps;
 
-  // V733: a claimed owner must still participate in nearest-owner selection at
-  // its old position. Store values, not RI pointers, so retirement is harmless.
+  // A claimed owner must still take part in nearest-owner selection at its old position. Store values,
+  // not RI pointers, so retirement is harmless.
   struct SkinnedTrackingClaim {
     XXH64_hash_t vertexPositionHash;
     XXH64_hash_t materialHash;

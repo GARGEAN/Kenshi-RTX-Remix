@@ -73,21 +73,10 @@ namespace {
       std::dec));
   }
 
-  // DX11_V651_ENTRY_STEAL_PROBE. Diagnostic only: nothing below changes which
-  // entry a draw resolves to.
-  //
-  // Every reuse test in this file - exactMatch, the vertex-data fallback, the
-  // post-VS identity match - compares material, geometry and bone hashes and
-  // never the transform. Two copies of one mesh are therefore interchangeable to
-  // the cache, so a ceiling in one building can claim the entry that belonged to
-  // the identical ceiling in another, and which draw wins depends on submission
-  // order. OGRE re-sorts by camera distance, which is why the candidate
-  // explanation predicts exactly the reported behaviour: quiet when the game is
-  // paused with a still camera, active as soon as the camera moves or the scene
-  // animates.
-  //
-  // This records whether that actually happens, and at what rate. Silent while
-  // the pairing is stable.
+  // Entry-steal probe, diagnostic only. Every reuse test here (exactMatch, the vertex-data fallback, the
+  // post-VS identity match) compares material, geometry and bone hashes but never the transform, so
+  // identical copies of a mesh are interchangeable and which draw wins depends on submission order.
+  // Records whether and how often that happens; silent while the pairing is stable.
   void noteEntryReuse(const DrawCallState& drawCall, const BlasEntry& blas,
                       const char* branch, uint32_t frameId) {
     if (!(kenshi_telemetry::enabled() && KenshiOptions::kenshiLogEntrySteal()))
@@ -181,10 +170,9 @@ DrawCallCache::~DrawCallCache() {}
 DrawCallCache::CacheState DrawCallCache::get(const DrawCallState& drawCall, BlasEntry** out, BlasEntry* ownedEntry) {
   // First, find the right bucket:
   XXH64_hash_t hash = drawCall.getGeometryData().getHashForRule<rules::TopologicalHash>();
-  // DX11_V631_KENSHI_PART_MASK. The source topology is identical for intact
-  // and amputated bodies, but their generated BLAS index streams are not.
-  // Partition the runtime cache without changing the authored asset hash used
-  // for replacement matching.
+  // The source topology is identical for intact and amputated bodies, but their generated BLAS index
+  // streams are not. Partition the runtime cache without changing the authored asset hash used for
+  // replacement matching.
   const uint32_t kenshiHiddenMask =
     drawCall.getGeometryData().kenshiHiddenMask;
   if (kenshiHiddenMask != 0u) {
@@ -204,9 +192,8 @@ DrawCallCache::CacheState DrawCallCache::get(const DrawCallState& drawCall, Blas
       &postVsCaptureIdentity, sizeof(postVsCaptureIdentity), hash);
   }
   auto range = m_entries.equal_range(hash);
-  // V729: skinned history belongs to the tracked character, not to the first
-  // unclaimed copy of a shared mesh. Reordered draws previously retained a
-  // different character's skinned vertices as their previous positions.
+  // Skinned history belongs to the tracked character, not to the first unclaimed copy of a shared mesh;
+  // otherwise reordered draws take another character's skinned vertices as their previous positions.
   if (drawCall.getSkinningState().numBones > 0u) {
     const uint32_t frame = m_device->getCurrentFrameId();
     for (auto candidate = range.first; candidate != range.second; ++candidate) {
@@ -259,31 +246,13 @@ DrawCallCache::CacheState DrawCallCache::get(const DrawCallState& drawCall, Blas
       postVsCaptureIdentityMatch(drawCall, entry)
       && (!updatedThisFrame
        || !drawCall.getGeometryData().postVsCapturedPositionsDynamic);
-    // DX11_V425_SKINNED_REMATCH: an ANIMATING skinned mesh must still be
-    // recognised as the object it was last frame.
-    //
-    // Requiring the bone hash to match here makes that impossible by
-    // definition: a mesh that is animating changes its bone hash every frame,
-    // so `exactMatch` fails (it compares bones too) and this test failed as
-    // well, and the draw allocated a FRESH BlasEntry every single frame. That
-    // routes it to KBuildBVH, which clears `previousPositionBuffer`; with
-    // `objectToWorld` identity for Kenshi's skinned draws `hasTransformChanged`
-    // is false too, so `isStatic` comes out true and the motion branch in
-    // surface_interaction never runs. Zero motion vectors for anything skinned
-    // that is actually moving - measured as the character body smearing at high
-    // zoom while its weapon, a rigid draw with a real instance transform,
-    // resolved correctly. It is also the per-frame identity churn seen as an
-    // "unstable geometry hash" on the animal pack.
-    //
-    // The bone hash keeps both of its real jobs. `exactMatch` above still
-    // compares it, which is what separates SIMULTANEOUS instances of one shared
-    // skeletal mesh (nine animals in a pack differ only in their palettes), and
-    // `processGeometryInfo` still compares it to choose kUpdateBVH over
-    // kUpdateInstance, so a changed pose still refits the BLAS. What it must
-    // not do is prevent a moving mesh from being recognised at all.
-    //
-    // `!updatedThisFrame` is retained and is what keeps this safe: an entry
-    // already claimed by another instance this frame is never handed out twice.
+    // An animating skinned mesh must still be recognised as the object it was last frame. Its bone hash
+    // changes every frame, so requiring it here would allocate a fresh BlasEntry per frame (kBuildBVH
+    // clears previousPositionBuffer) and skinned motion vectors would be zero. The bone hash keeps its real
+    // jobs: exactMatch above still compares it (separating simultaneous instances of one skeletal mesh,
+    // e.g. a pack of animals), and processGeometryInfo still uses it to choose kUpdateBVH, so a changed
+    // pose refits the BLAS. `!updatedThisFrame` keeps this safe: an entry claimed this frame is never
+    // handed out twice.
     const bool reusableLegacyOutput =
       !postVsCaptureInvolved(drawCall, entry)
       && !updatedThisFrame
@@ -350,10 +319,9 @@ DrawCallCache::CacheState DrawCallCache::get(const DrawCallState& drawCall, Blas
     const bool vertexDataMatches =
       blas.input.getGeometryData().getHashForRule<rules::VertexDataHash>()
         == drawCall.getGeometryData().getHashForRule<rules::VertexDataHash>();
-    // DX11_V425_SKINNED_REMATCH: same reasoning as the single-entry path above.
-    // Entries already touched this frame were skipped further up, so dropping
-    // the bone-hash requirement lets a moving skinned mesh rematch its own
-    // entry across frames without letting two simultaneous instances share one.
+    // Same reasoning as the single-entry path above: entries touched this frame were skipped further up,
+    // so dropping the bone-hash requirement lets a moving skinned mesh rematch its own entry without
+    // letting two simultaneous instances share one.
     if (vertexDataMatches) {
       noteEntryReuse(drawCall, blas, "bucket:legacyVertex", m_device->getCurrentFrameId());
       *out = &blas;

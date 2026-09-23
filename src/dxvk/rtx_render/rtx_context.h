@@ -75,9 +75,8 @@ namespace dxvk {
   namespace fork_hooks {
     void initAtmosphere(RtxContext&);
     void updateAtmosphereConstants(RtxContext&, RaytraceArgs&);
-    // DX11_V463: injects/updates/drops the sun distant light. Declared here as
-    // well as in rtx_fork_hooks.h because rtx_context.cpp resolves fork_hooks
-    // through this header.
+    // Injects/updates/drops the sun distant light. Declared here as well as in rtx_fork_hooks.h because
+    // rtx_context.cpp resolves fork_hooks through this header.
     void syncAtmosphereDistantLights(RtxContext&, const AtmosphereArgs&);
     void bindAtmosphereLuts(RtxContext&);
     void dispatchScreenOverlay(RtxContext&, Resources::RaytracingOutput&);
@@ -141,25 +140,22 @@ namespace dxvk {
 
     void commitGeometryToRT(const DrawParameters& params, DrawCallState& drawCallState, bool geometryCacheOnlySceneSubmit = false,
                            bool geometrySkyDisabledAtSubmission = false);
-    // V691 verification-only snapshot of logical native bindings, not GPU completion.
+    // Verification-only snapshot of logical native bindings, not GPU completion.
     std::vector<uint8_t> snapshotTerrainNativeState() const;
     void commitExternalGeometryToRT(ExternalDrawState&& state);
 
     static void blitImageHelper(Rc<DxvkContext> ctx, const Rc<DxvkImage>& srcImage, const Rc<DxvkImage>& dstImage, VkFilter filter);
 
     /**
-      * \brief DX11_V759. Write Remix's primary depth into Kenshi's deferred
-      * G-buffer target 2, in the encoding the game's heat-haze post process
-      * reads it with: distance / farClip, and 0 where nothing was hit.
-      *
-      * Called at the injection boundary, after injectRTX has placed the
-      * path-traced image. The game's compositor clears that target earlier in
-      * the frame and its heat-haze pass samples it later, so this is the one
-      * window in which the write is both safe and visible.
-      *
-      * \param [in] gameDepthImage: the game's R32_SFLOAT target 2, recognised
-      *   structurally at its consuming draw by the D3D11 bridge.
-      */
+     * \brief Write Remix's primary depth into Kenshi's deferred G-buffer target 2, in the
+     * encoding the game's heat-haze post process reads: distance / farClip, and 0 where
+     * nothing was hit. Called at the injection boundary, after injectRTX has placed the
+     * path-traced image: the compositor clears that target earlier in the frame and the
+     * heat-haze pass samples it later.
+     *
+     * \param [in] gameDepthImage: the game's R32_SFLOAT target 2, recognised
+     *   structurally at its consuming draw by the D3D11 bridge.
+     */
     void kenshiWriteHeatHazeDepth(const Rc<DxvkImage>& gameDepthImage);
     void captureKenshiSignOverlay(const DrawParameters& params, const Matrix4& projection);
 
@@ -175,25 +171,16 @@ namespace dxvk {
     }
     static void triggerUsdCapture() { s_triggerUsdCapture = true; }
 
-    // DX11_V336_GBUFFER_BURST: dump primary linearZ for `frames` consecutive
-    // frames, so an alternation can be seen directly instead of inferred from
-    // single-frame samples that always fire at the same point in the frame.
+    // Dump primary linearZ for `frames` consecutive frames, so an alternation is seen directly.
     static void triggerGBufferBurst(uint32_t frames) {
       if (!kenshi_telemetry::fileOutputEnabled()) return;
       if (!kenshi_telemetry::enabled()) return;
       s_gbufferBurstFramesRemaining.store(frames, std::memory_order_relaxed);
     }
 
-    // DX11_V388_PROBE_WINDOW: hold the GPU-print probe open, at the CURRENT mouse
-    // position, for `frames` frames - without CTRL being held.
-    //
-    // The probe normally samples only while CTRL is down, which makes it
-    // impossible to pair with the on-demand diagnostics window: that window is
-    // armed by a keypress and covers 8 frames, so lining a separate CTRL-hold up
-    // with it is a coordination problem the user should never have been asked to
-    // solve. One keypress now does both - Ctrl+Alt+O arms the trace AND probes
-    // wherever the cursor already is, so the probe reading and the draw trace
-    // describe the same frames by construction and the join always works.
+    // Hold the GPU-print probe open at the current mouse position for `frames` frames, without Ctrl held.
+    // Ctrl+Alt+O arms this together with the trace, so the probe reading and the draw trace describe the
+    // same frames.
     static void triggerGpuPrintWindow(uint32_t frames) {
       if (!kenshi_telemetry::enabled()) return;
       s_gpuPrintWindowFramesRemaining.store(frames, std::memory_order_relaxed);
@@ -300,10 +287,9 @@ namespace dxvk {
     uint32_t m_frameLastInjected = kInvalidFrameIndex;
     bool m_captureStateForRTX = true;
 
-    // DX11_V759. Staging image for kenshiWriteHeatHazeDepth. The game's target
-    // carries no storage usage - a D3D11 texture without a UAV bind flag never
-    // gets VK_IMAGE_USAGE_STORAGE_BIT - so the compute pass writes here at
-    // render resolution and a blit scales the result into the game's texture.
+    // Staging image for kenshiWriteHeatHazeDepth: the game's target has no storage usage (no UAV bind
+    // flag), so the compute pass writes here at render resolution and a blit scales it into the game's
+    // texture.
     Resources::Resource m_kenshiHeatHazeDepth;
     std::unique_ptr<KenshiSignOverlay> m_kenshiSignOverlay;
     void compositeKenshiSignOverlay(const Resources::RaytracingOutput& rtOutput, bool outputIsGammaEncoded);

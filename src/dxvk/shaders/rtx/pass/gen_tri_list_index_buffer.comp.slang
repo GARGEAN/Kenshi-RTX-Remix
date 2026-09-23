@@ -52,11 +52,9 @@ void main(uint idx : SV_DispatchThreadID)
 
   generateIndices(idx, dst, src, cb);
 
-  // DX11_V631_KENSHI_PART_MASK. skin.hlsl writes a per-vertex clip value from
-  // `(partData.y & hiddenMask)`. character.hlsl then clips every interpolated
-  // pixel for which that value is non-zero, so one masked vertex removes the
-  // triangle apart from measure-zero edges. PT has no raster clip stage; make
-  // the same triangle degenerate while retaining index count and primitive ID.
+  // skin.hlsl writes a per-vertex clip value from `(partData.y & hiddenMask)` and character.hlsl clips
+  // every pixel where it is non-zero, so one masked vertex removes the triangle. PT has no raster clip
+  // stage: make the same triangle degenerate, keeping index count and primitive ID.
   if (cb.kenshiHiddenMask != 0u)
   {
     uint tri[3];

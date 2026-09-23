@@ -1,8 +1,8 @@
 #pragma once
 #include "util_kenshi_telemetry.h"
 
-// V698: cache only the existing CPU-shadow bounds calculation. This revision
-// describes shadow bytes, not arbitrary GPU or mapped-buffer writes.
+// Cache only the existing CPU-shadow bounds calculation. This revision describes shadow bytes, not
+// arbitrary GPU or mapped-buffer writes.
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -65,8 +65,8 @@ namespace dxvk::terrain_bounds {
     std::unordered_map<Key, Bounds, KeyHash> m_entries;
   };
 
-  // V706: the cached result depends on shadow bytes and layout, not the draw's
-  // terrain classification or current camera/object transform.
+  // The cached result depends on shadow bytes and layout, not the draw's terrain classification or
+  // current camera/object transform.
   inline bool eligible(bool immediate, bool fromShadow, bool originalSource) {
     return immediate && fromShadow && originalSource;
   }

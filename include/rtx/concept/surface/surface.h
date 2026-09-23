@@ -324,17 +324,15 @@ struct Surface
     set { data0b.z = newValue ? packedFlagSet(data0b.z, 1 << 3) : packedFlagUnset(data0b.z, 1 << 3); }
   }
 
-  // V747: native distant-town albedo and gloss, stored in a previously free flag.
+  // Kenshi distant-town draw: native albedo and gloss.
   property bool kenshiDistantTown
   {
     get { return packedFlagGet(data0b.z, 1 << 4); }
     set { data0b.z = newValue ? packedFlagSet(data0b.z, 1 << 4) : packedFlagUnset(data0b.z, 1 << 4); }
   }
 
-  // V761: this draw is a building UNDER CONSTRUCTION. On the surface rather than
-  // the material because the opaque material's flags field is a uint16 and its
-  // usable range (bits 2-15) is already full - V760 put this at material flag
-  // offset 14, which is bit 16, and it was silently dropped.
+  // Building under construction. Kept on the surface because the opaque material's uint16 flags
+  // field is full (bits 2-15); a material flag past bit 15 is silently dropped.
   property bool kenshiConstruction
   {
     get { return packedFlagGet(data0b.z, 1 << 5); }
@@ -496,8 +494,7 @@ struct Surface
       ? uint8_t((data13.z >> 9) & 0x3) : uint8_t(4); }
   }
 
-  // 3 bits at 16: TexGenMode outgrew two bits when WorldPositions was added.
-  // Bit 15 remains free; bits 17-18 were the old field.
+  // Bits 16-18. Bit 15 is free.
   property uint8_t texcoordGenerationMode
   {
     get { return uint8_t((data13.z >> 16) & 0x7); }
@@ -547,11 +544,9 @@ struct Surface
     get { return asfloat(data15.xyz); }
   }
 
-  // Bits 0-7 mode, bits 8-15 blood roughness as unorm8. Packed together so the
-  // roughness needs no RaytraceArgs change; the mode test is unaffected because
-  // this getter masks to the low 8 bits. DX11_V538 relies on that: the roughness
-  // is packed for every surface, including terrain draws that carry no character
-  // blood mode at all, so ground blood gets a real roughness instead of zero.
+  // Bits 0-7: mode; bits 8-15: blood roughness (unorm8), so the getter masks to the low 8 bits.
+  // Roughness is packed for every surface, including terrain with no blood mode, so ground blood
+  // gets a real roughness.
   property uint kenshiBloodMode
   {
     get { return data15.w & 0xFFu; }
@@ -589,7 +584,7 @@ struct SurfaceInteraction : MinimalSurfaceInteraction
   vec2 textureCoordinates = 0..xx;
   vec2 textureGradientX = 0..xx;
   vec2 textureGradientY = 0..xx;
-  // V743: native vertex-interpolated projection, shared by triplanar/features.
+  // Native vertex-interpolated projection, shared by triplanar and terrain features.
   vec3 kenshiProjection = 0.f;
   vec3 kenshiProjectionDx = 0.f;
   vec3 kenshiProjectionDy = 0.f;
@@ -605,12 +600,8 @@ struct SurfaceInteraction : MinimalSurfaceInteraction
   float triangleArea = 0.f;
   // rgb is the sampled, tinted blood colour; a is the final blend influence.
   vec4 kenshiBlood = 0.0f;
-  // V760: the hit's OBJECT-space height, interpolated from the same positions
-  // the BLAS was built from. Kenshi's under-construction shader measures build
-  // progress against the raw IA POSITION.y (`position.y / upperPos.x` in the
-  // vertex shader), so reconstructing the cutout needs object space, not world:
-  // a building placed on a slope is rotated, and its world Y is not its height
-  // in the mesh. Three multiply-adds on values already in registers.
+  // Object-space height of the hit, interpolated from the BLAS positions. The construction cutout
+  // compares raw POSITION.y as the game's shader does; world Y is wrong for rotated buildings.
   float kenshiObjectY = 0.f;
 };
 

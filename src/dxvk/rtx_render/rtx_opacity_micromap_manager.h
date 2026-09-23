@@ -190,8 +190,8 @@ namespace dxvk {
     Rc<DxvkBuffer> opacityMicromapTriangleIndexBuffer;
     Rc<DxvkBuffer> opacityMicromapBuffer;
     VkMicromapEXT opacityMicromap = VK_NULL_HANDLE;      // Built micromap handle
-    // A shared binding owns its geometry remap and retains the original owner.
-    // Only that owner destroys the VkMicromap; V748 retirement accounts it once.
+    // A shared binding owns its geometry remap and retains the original owner. Only that owner destroys
+    // the VkMicromap; retirement accounts it once.
     Rc<DxvkOpacityMicromap> sharedMicromapOwner;
 
     explicit DxvkOpacityMicromap(DxvkDevice& device);

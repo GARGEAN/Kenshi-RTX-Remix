@@ -83,12 +83,9 @@ enum class TexGenMode : uint8_t {
   ViewPositions,
   CascadedViewPositions,
   ViewNormals,
-  // DX11_V392_WORLD_PROJECTED_UV: texture coordinates generated from the hit's
-  // WORLD position rather than its view position, so the mapping is stationary
-  // as the camera moves. Games that project a map over the world compute this
-  // UV inside the pixel shader from an interpolated world position, which is
-  // not a vertex attribute and so cannot be captured as one; the surface's
-  // textureTransform carries the affine the shader applied.
+  // Texture coordinates generated from the hit's world position (stationary as the camera moves),
+  // for shaders that project a map over the world in the pixel shader. textureTransform carries the
+  // affine the shader applied.
   WorldPositions,
   KenshiTriplanar,
   KenshiTerrainFeature,

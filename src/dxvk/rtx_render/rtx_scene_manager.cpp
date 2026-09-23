@@ -203,29 +203,26 @@ namespace dxvk {
                  LegacyMaterialData::kKenshiTerrainBiomeSetCount>;
     std::atomic<float> s_kenshiWaterParams[19] = {};
 
-    // DX11_V636_KENSHI_INTERIOR_CLIP. Mutex rather than atomics: this is a
-    // struct that must be read as a consistent whole, unlike the water params
+    // Mutex rather than atomics: this struct must be read as a consistent whole, unlike the water params
     // where each scalar stands alone.
     std::mutex s_kenshiInteriorVolumeMutex;
     std::vector<SceneManager::KenshiInteriorVolume> s_kenshiInteriorVolumes;
     uint32_t s_kenshiInteriorVolumeFrame = 0u;
-    // DX11_V618: the per-BIOME table, five fixed slots addressed by the
-    // material's own blendChannel. Written from the submit thread, read when the
-    // buffer is built, so it takes a mutex like the terrain sets do.
+    // The per-biome water table: five fixed slots addressed by the material's own blendChannel. Written
+    // from the submit thread and read when the buffer is built, so it takes a mutex like the terrain sets.
     struct KenshiWaterBiomeRecord {
       SceneManager::KenshiWaterParams params;
       SceneManager::KenshiWaterBiomeTextures textures;
       bool valid = false;
     };
     KenshiWaterBiomeRecord s_kenshiWaterBiomes[SceneManager::kKenshiWaterBiomeCount];
-    // DX11_V623: the whole-map trio, shared by every biome.
+    // The whole-map water textures, shared by every biome.
     SceneManager::KenshiWaterBiomeTextures s_kenshiWaterGlobalTextures;
     std::mutex s_kenshiWaterZoneMutex;
     std::atomic<float> s_kenshiWetness { 0.0f };
     std::atomic<float> s_kenshiWaterHeight { 0.0f };
-    // DX11_V557: Kenshi's dust is a BIOME property, published the same
-    // last-draw-wins way V541 proved correct for wetness - every shader
-    // carrying it reports the same value at the same instant.
+    // Kenshi's dust is a biome property, published last-draw-wins like wetness: every shader carrying it
+    // reports the same value at the same instant.
     std::atomic<float> s_kenshiDustColourR { 0.0f };
     std::atomic<float> s_kenshiDustColourG { 0.0f };
     std::atomic<float> s_kenshiDustColourB { 0.0f };
@@ -599,37 +596,11 @@ namespace dxvk {
       return ObjectCacheState::kInvalid;
     }
 
-    // Set to 1 if inspection of the GeometryData structures contents on CPU is desired
-    //
-    // DX11_V379_BLAS_INPUT_DUMP: turned ON. This is the last unexamined link for
-    // Kenshi's invisible geometry.
-    //
-    // The BLAS never reads the game's vertex buffer - it reads THIS buffer, which
-    // Remix fills either by a straight copyBuffer (interleaved GPU-friendly input) or
-    // by the interleaveGeometry compute dispatch. Every stage on either side of it has
-    // now been measured correct for the wall: admission, camera, per-instance
-    // transform (cross-checked against Kenshi's own capture data), instance mask,
-    // hidden/GC, TLAS presence, BLAS reference, merged-vs-dynamic routing, bucket
-    // build, culling, winding, and BLAS update-mode validity. Rays still report a
-    // genuine miss. The bytes handed to the acceleration structure are what is left.
-    //
-    // Kenshi's own vertex buffers are device-local and cannot be read (`mapped=0` for
-    // every draw, and RenderDoc's converted captures omit buffer contents), but this
-    // one is Remix's, so making it HOST_VISIBLE lets it be read directly with no
-    // staging copy or compute pass. Upstream left the switch here for exactly this.
-    //
-    // Cost: geometry buffers move out of device-local memory, so expect lower
-    // performance while this is enabled. It is a diagnostic build, not a shipping one.
-    //
-    // REVERTED to 0 after it answered its question. Measured cost with it on: about
-    // 20 fps, because every BLAS build and every ray hit then reads vertex data from
-    // system RAM across PCIe. The `[blas-input]` dump below reports "unmapped" while
-    // this is 0, which is the honest result rather than a wrong one - set it back to
-    // 1 only for a deliberate one-off inspection, never for a play session.
-    //
-    // What it established, so it need not be re-run: the wall segment's BLAS input is
-    // byte-perfect - readable=97664 >= needed=97608, stride=56, attrOffset=0, and
-    // vertices matching RenderDoc's VS Input to the digit.
+    // Set to 1 if inspection of the GeometryData structures contents on CPU is desired.
+    // This makes Remix's geometry buffers (the BLAS input, filled by copyBuffer or the interleave dispatch)
+    // host-visible, so the `[blas-input]` dump below can read them; it reports "unmapped" while this is 0.
+    // It moves geometry out of device-local memory and costs ~20 fps: one-off inspection only, never for
+    // play.
     #define DEBUG_GEOMETRY_MEMORY 0
     constexpr VkMemoryPropertyFlags memoryProperty = DEBUG_GEOMETRY_MEMORY ? (VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
@@ -647,24 +618,12 @@ namespace dxvk {
       result = ObjectCacheState::kUpdateBVH;
     }
 
-    // DX11_V395_LATE_VERTEX_STREAMS: the same reasoning for streams that ARRIVE
-    // (or vanish) after a geometry has already been interleaved once.
-    //
-    // The cache state is decided from the index, vertex-position and vertex
-    // shader hashes only. Streams the D3D11 bridge recovers by replaying the
-    // vertex shader - UVs, and now world normals - are GPU-written and cannot
-    // be hashed CPU-side, so they are deliberately absent from that identity.
-    // Static geometry therefore lands on kUpdateInstance and is never
-    // re-interleaved, which freezes whatever streams it happened to have the
-    // FIRST time it was seen: a terrain chunk whose first submission lost the
-    // per-frame capture budget kept an interleaved layout with no texcoord and
-    // no normal for the life of its BLAS. On screen that is a tile stuck at a
-    // single colour (its UV resolves to 0,0) and flat shaded, permanently,
-    // while every per-draw counter reads clean because the bridge did ship
-    // both streams on later frames.
-    //
-    // Presence is the whole trigger - the contents of these buffers change
-    // identity through the position/index hashes as usual.
+    // Streams that arrive (or vanish) after a geometry was already interleaved. The cache state is decided
+    // from the index, vertex-position and vertex-shader hashes only; streams the bridge recovers by
+    // replaying the VS (UVs, world normals) are GPU-written and cannot be hashed CPU-side. Static geometry
+    // lands on kUpdateInstance and is never re-interleaved, which would freeze whatever streams it had the
+    // first time it was seen (a terrain chunk stuck with no texcoord and no normal). A change in presence
+    // is the trigger; contents change identity through the position/index hashes as usual.
     const bool normalPresenceChanged =
       input.normalBuffer.defined() != output.normalBuffer.defined();
     const bool texcoordPresenceChanged =
@@ -784,9 +743,8 @@ namespace dxvk {
       }
       case ObjectCacheState::kUpdateBVH: {
         bool invalidateHistory = historyLayoutChanged;
-        // V734: the copied vertex span follows this draw. dispatchSkinning uses
-        // output.vertexCount; retaining an older, larger count can overrun the
-        // newly sized input/output buffers after a range change.
+        // The copied vertex span follows this draw. dispatchSkinning uses output.vertexCount; keeping an
+        // older, larger count can overrun the newly sized input/output buffers after a range change.
         output.vertexCount = input.vertexCount;
 
         // Stride changed, so we must recreate the previous buffer and use identical data
@@ -806,32 +764,9 @@ namespace dxvk {
           // Mark this object for realignment
           invalidateHistory = true;
         }
-        // DX11_V333_NO_HISTORY_PINGPONG (diagnostic): Kenshi routes ~48 of its
-        // 126 recognised draws through kUpdateBVH EVERY frame, because their
-        // captured vertices are stored in camera space and so genuinely
-        // re-hash whenever the camera moves. That makes this ping-pong run
-        // per-frame for the exact set of objects the user sees flickering, and
-        // the symptom alternates per frame just as the swap does.
-        //
-        // Test the parity mechanism directly: interleave into a single buffer
-        // and point the previous-position lookup at it. Motion vectors for
-        // these objects collapse to zero (denoiser ghosting while the camera
-        // moves), which is a visible cost but CANNOT hide geometry, so any
-        // change in presence is attributable to the swap rather than to this
-        // side effect.
-        // DX11_V423_RESTORE_HISTORY_PINGPONG: the V333 diagnostic above was
-        // ANSWERED - "History ping-pong (DX11_V333, suppressed): no change to
-        // flicker. Not the mechanism." - but the diagnostic was never reverted,
-        // so every dynamic object in the game has been rendering with
-        // previous == current, i.e. an exactly zero motion vector, ever since.
-        //
-        // That is invisible for rigid geometry, whose motion vector comes from
-        // the instance transform, which is why character WEAPONS track fine.
-        // It is total for anything whose motion lives in its vertices, which is
-        // exactly what V421's skinned characters are: objectToWorld is identity
-        // by construction and all movement is baked into the skinned positions.
-        // The reported symptom - body smearing into mush at high zoom while the
-        // weapon resolves correctly - is this constant, not a skinning bug.
+        // History ping-pong: the previous-position buffer is the last update's data. Required for anything
+        // whose motion lives in its vertices (skinned characters, whose objectToWorld is identity): without it
+        // previous == current and their motion vectors are zero.
         static constexpr bool kUseHistoryPingPong = true;
 
         if (kUseHistoryPingPong) {
@@ -853,10 +788,9 @@ namespace dxvk {
 
         // The dynamic diagnostic performs the complete GPU interleave while frontend state restoration protects the native draw.
 
-        // V734: the interleaver has written bind-pose vertices here; skinning
-        // runs later. Copying this buffer to history records bind pose as the
-        // previous world position. A changed layout has no compatible history.
-        // Leave the previous-position binding absent for this update instead.
+        // The interleaver has written bind-pose vertices here and skinning runs later, so copying this buffer
+        // to history would record the bind pose as the previous world position. A changed layout has no
+        // compatible history; leave the previous-position binding absent for this update instead.
 
         // Assign the previous buffer using the last slice (copy most params from the position, just change buffer).
         // Without the ping-pong there is only one buffer, so previous == current
@@ -888,16 +822,9 @@ namespace dxvk {
       const DxvkBufferSlice slice = DxvkBufferSlice(output.historyBuffer[0]);
       const auto& colorBuffer = drawCallState.geometryData.color0Buffer;
 
-      // DX11_V514_COLOR0_INTERLEAVED_LAYOUT: this RaytraceBuffer describes
-      // `historyBuffer`, so it must carry the layout of THAT buffer, not the
-      // layout of the draw call's source buffer. The two agree only when the
-      // geometry took the already-interleaved fast copy; when it was
-      // re-interleaved, color0 sits at the interleaved offset with the
-      // interleaved stride. Copying the source geometry makes the hit shader
-      // stride across the wrong floats entirely.
-      //
-      // Source and interleaved layouts can differ in both offset and stride,
-      // so the retained buffer must describe the generated history layout.
+      // This RaytraceBuffer describes historyBuffer, so it must carry that buffer's layout, not the draw's
+      // source layout: they agree only when the geometry took the already-interleaved fast copy; when
+      // re-interleaved, color0 sits at the interleaved offset and stride.
       const bool sourceLayoutPreserved =
         preserveVertexLayout;
 
@@ -940,14 +867,12 @@ namespace dxvk {
   }
 
 
-  // DX11_V330_CENSUS_ON_DEMAND. A plain counter, never a Vulkan object, so it is
-  // safe as a translation-unit static (objects holding device resources here
-  // outlive the device and crash at unload).
+  // Census request counter. A plain counter, never a Vulkan object, so it is safe as a TU static
+  // (objects holding device resources here outlive the device and crash at unload).
   static std::atomic<uint32_t> s_vramCensusFramesRequested { 0u };
 
-  // DX11_V332_IDENTITY_CHURN per-frame tallies, read and cleared by the census
-  // in onFrameEnd. Plain counters, never Vulkan objects, so they are safe as
-  // translation-unit statics.
+  // Per-frame identity-churn tallies, read and cleared by the census in onFrameEnd. Plain counters, safe
+  // as TU statics.
   static std::atomic<uint32_t> s_frameCacheExisted { 0u };
   static std::atomic<uint32_t> s_frameCacheFresh { 0u };
   static std::atomic<uint32_t> s_frameBuildBvh { 0u };
@@ -1008,10 +933,9 @@ namespace dxvk {
   void SceneManager::onFrameEnd(Rc<DxvkContext> ctx, bool raytracedThisFrame) {
     ScopedCpuProfileZone();
 
-    // DX11_V526. Ground blood decals are gathered by SubmitDraw during the game's
-    // own deferred passes and consumed by every ray tracing pass afterwards, so
-    // the list belongs to the frame - clearing it when the buffer is read left
-    // eleven of the twelve passes reading an empty list.
+    // Ground blood decals are gathered by SubmitDraw during the game's deferred passes and consumed by
+    // every ray tracing pass afterwards, so the list belongs to the frame (clearing it on read would leave
+    // later passes with an empty list).
     m_kenshiTerrainBloodDecals.clear();
 
     // DX11_V234_VRAM_LEAK_DIAG: periodic per-category resource census to locate the unbounded
@@ -1035,56 +959,24 @@ namespace dxvk {
       // (kBufferCacheLimit overflow silently drops draws) so buffer-object
       // churn is visible directly.
       const uint32_t fid = m_device->getCurrentFrameId();
-      // DX11_V332_IDENTITY_CHURN: read-and-clear every frame, not only on
-      // census frames, so each reported figure covers exactly one frame rather
-      // than everything since the last census.
-      // DX11_V350_DRAW_TRACE: consume one frame of the trace window here, so
-      // the scene-side rows cover the same frames as the census beside them.
-      // DX11_V355_INSTANCE_DUMP: everything the raytracer knows about every
-      // instance, once per frame, while the trace window is open.
-      //
-      // The per-draw trace established that the scene DESCRIPTION is constant
-      // for the flickering geometry - identical submission, constant transform,
-      // 100% cache reuse, flat instance and TLAS counts - while the output
-      // still alternates. So the difference has to be in per-instance state the
-      // tracer consumes, and aggregate counters cannot show it because both
-      // classes sit inside the same totals.
-      //
-      // Intended for a view containing only a handful of objects: a stable mesh
-      // and an unstable one side by side, dumped every frame, then diffed field
-      // by field. With few objects the volume is small enough to log everything
-      // rather than sample, which is what every previous attempt got wrong.
+      // Identity-churn tallies are read and cleared every frame, so each figure covers exactly one frame.
+      // While the trace window is open, consume one frame of it here (so scene-side rows match the census)
+      // and dump everything the raytracer knows about every instance. Intended for a view with a handful of
+      // objects - a stable mesh and an unstable one side by side - diffed field by field across frames.
       if ((kenshi_telemetry::enabled() && s_drawTraceFramesRemaining.load(std::memory_order_relaxed) > 0u)) {
         const uint32_t fidNow = m_device->getCurrentFrameId();
 
-        // DX11_V357_SCREEN_MAP: project each instance's world position into
-        // normalized screen space and log it, so a row in this dump can be tied
-        // to an object the user can actually see. Every analysis so far has had
-        // to guess which rows were "the flickering building" versus "the stable
-        // prop" from family and world coordinates, which is unreliable and has
-        // already produced one wrong reading. With sx/sy, a screenshot and this
-        // log line up directly: "the bottle is centre-left" identifies a row.
-        // sx/sy are 0..1 across the viewport, origin top-left; sz is the view
-        // depth, and behind=1 marks an instance behind the camera.
+        // Project each instance's world position into normalized screen space, so a row can be matched to an
+        // object in a screenshot. sx/sy are 0..1 across the viewport, origin top-left; sz is the view depth;
+        // behind=1 marks an instance behind the camera.
         const RtCamera& mapCamera = getCamera();
         const Matrix4d worldToProj =
           mapCamera.getViewToProjection() * mapCamera.getWorldToView();
 
-        // DX11_V379_BLAS_INPUT_DUMP: the actual vertex bytes the acceleration
-        // structure was built from, decoded at the geometry's own stride and
-        // position offset.
-        //
-        // Safe to read here: this runs at census time over geometry built on an
-        // EARLIER frame, so the copy/interleave that filled it has completed. The
-        // buffer is host-visible only because DEBUG_GEOMETRY_MEMORY is 1 in this
-        // build; with it at 0 the mapPtr is null and this reports "unmapped" rather
-        // than misreporting.
-        //
-        // What to look for: positions matching the object-space extents the mesh
-        // actually has (Kenshi's wall segment is about +-50 x +-92 units, per
-        // RenderDoc's mesh view), versus zeros, non-finite values, or every vertex
-        // identical - any of which produce degenerate triangles that no ray can hit
-        // while every count and pointer upstream still reads correct.
+        // The vertex bytes the acceleration structure was built from, decoded at the geometry's own stride and
+        // position offset. Safe here: the census runs over geometry built on an earlier frame. Readable only
+        // with DEBUG_GEOMETRY_MEMORY 1; otherwise reports "unmapped". Look for zeros, non-finite values or
+        // identical vertices - degenerate triangles no ray can hit while everything upstream reads correct.
         uint32_t blasInputDumpBudget = 6u;
 
         for (const RtInstance* inst : m_instanceManager.getInstanceTable()) {
@@ -1169,16 +1061,10 @@ namespace dxvk {
             " age=", inst->getFrameAge(),
             " cat=0x", std::hex, inst->getCategoryFlags().raw(), std::dec,
             " matHash=0x", std::hex, inst->getMaterialDataHash(), std::dec,
-            // DX11_V356_BUILD_GEOMETRY: the one link never measured. A bucket
-            // builds its BLAS by concatenating each instance's
-            // blasEntry->buildGeometries; an instance whose list is EMPTY
-            // contributes no triangles at all while remaining present, masked,
-            // transformed and correct in every field measured so far - which is
-            // exactly the state the flickering buildings are in. The list is
-            // cached across frames (fillGeometryInfoFromBlasEntry is skipped
-            // when the geometry "hasn't changed"), so a stale or dropped cache
-            // would be invisible anywhere else. bldGeo=0 on a frame where the
-            // object is absent would close this out.
+            // A bucket builds its BLAS by concatenating each instance's blasEntry->buildGeometries. An instance
+            // with an empty list contributes no triangles while remaining present and correct in every other
+            // field; the list is cached across frames, so a stale or dropped cache would be invisible anywhere
+            // else.
             " bldGeo=", blas != nullptr ? blas->buildGeometries.size() : size_t(0),
             " bldRanges=", blas != nullptr ? blas->buildRanges.size() : size_t(0),
             " blasFrameUpd=", blas != nullptr ? blas->frameLastUpdated : 0u,
@@ -1191,17 +1077,9 @@ namespace dxvk {
             " xformT=[", vk.transform.matrix[0][3], ",",
                          vk.transform.matrix[1][3], ",",
                          vk.transform.matrix[2][3], "]",
-            // DX11_V366_XFORM_SHAPE: translation alone cannot tell a real
-            // placement from an artifact - Kenshi reuses the same building
-            // model all over the map, so identical geometry at two positions is
-            // normal scene content, not evidence of duplication. The reported
-            // giveaway is the ANGLE: duplicates sit at improbable orientations.
-            //
-            // A legitimate OGRE placement is a clean rigid transform:
-            // orthonormal basis, unit axis lengths, determinant +1. Log the
-            // basis lengths and the determinant so a sheared, scaled, mirrored
-            // or otherwise degenerate transform identifies itself, and the full
-            // rotation rows so the orientation can be inspected directly.
+            // A legitimate OGRE placement is a clean rigid transform (orthonormal basis, unit axis lengths,
+            // determinant +1). Log the basis lengths, determinant and rotation rows so a sheared, scaled or
+            // mirrored transform identifies itself.
             " axisLen=[",
               std::sqrt(vk.transform.matrix[0][0]*vk.transform.matrix[0][0]
                       + vk.transform.matrix[1][0]*vk.transform.matrix[1][0]
@@ -1219,18 +1097,9 @@ namespace dxvk {
                                          - vk.transform.matrix[1][2]*vk.transform.matrix[2][0])
             + vk.transform.matrix[0][2] * (vk.transform.matrix[1][0]*vk.transform.matrix[2][1]
                                          - vk.transform.matrix[1][1]*vk.transform.matrix[2][0]),
-            // DX11_V368_GEOMETRY_EXTENT: the object-space bounding box of the
-            // vertices actually handed to the BLAS.
-            //
-            // linearZ during an explosion shows ONE continuous surface covering
-            // the whole frame at close range - a single triangle stretched
-            // across and through the camera - while the composite is pure black
-            // because it carries no usable material. Instance transforms are
-            // measured rigid (axisLen=[1,1,1] det=1), so the wrongness is in the
-            // vertex POSITIONS, not the placement. A mesh whose extent is
-            // kilometres wide, or non-finite, is the exploding one; a real
-            // Kenshi building is a few metres across. This names it directly
-            // instead of inferring from screen position.
+            // Object-space bounding box of the vertices handed to the BLAS. A mesh kilometres wide or non-finite
+            // is an exploding one (a real Kenshi building is a few metres across); instance transforms are rigid,
+            // so that wrongness is in the vertex positions.
             " aabbMin=[", blas != nullptr ? blas->input.getGeometryData().boundingBox.minPos.x : 0.f, ",",
                           blas != nullptr ? blas->input.getGeometryData().boundingBox.minPos.y : 0.f, ",",
                           blas != nullptr ? blas->input.getGeometryData().boundingBox.minPos.z : 0.f, "]",
@@ -1254,25 +1123,14 @@ namespace dxvk {
       AccelManager::fetchAndResetTlasStats(tlasHidden, tlasGc, tlasZeroMask, tlasInTlas);
       uint32_t tlasNullBlas = 0, tlasZeroXform = 0;
       AccelManager::fetchTlasContentStats(tlasNullBlas, tlasZeroXform);
-      // DX11_V381_CENSUS_FETCH_ORDER: these two are read-AND-RESET, so they must be
-      // fetched only when the census actually prints. They were being fetched here,
-      // every frame, outside the `if (censusDue)` guard below - which zeroed them on
-      // every frame and left the printed value as just the sliver accumulated before
-      // this point in the current frame. That is why `mergedInst`/`dynInst` read 0 on
-      // most windows and why every `cacheSkip`/`cacheMembers` read 0 while the
-      // per-bucket detail log proved restores were happening. Declared here, fetched
-      // inside the guard.
+      // These two are read-and-reset, so they are fetched only when the census prints (inside the guard
+      // below); fetching every frame would zero them.
       AccelManager::BlasRouteStats blasRoute;
       AccelManager::CacheRestoreStats cacheRestore;
       static VkDeviceSize s_lastCensusUsedBytes = 0;
       static uint32_t s_lastGrowthCensusFrame = 0;
-      // DX11_V330_CENSUS_ON_DEMAND: the old steady-state heartbeat was every
-      // 18000 frames - 5 minutes at 60fps, 10 at 30 - so in practice the census
-      // only ever sampled the loading phase and every question about what the
-      // settled RT scene contained was unanswerable. Two changes: the hotkey
-      // arms a run of frames directly (below), and the background heartbeat
-      // drops to 1800 frames (~30s at 60fps) so unattended runs still get a
-      // usable time series.
+      // The hotkey arms a run of census frames directly, and the background heartbeat is 1800 frames (~30 s
+      // at 60 fps) so unattended runs still get a usable time series.
       const bool censusRequested = s_vramCensusFramesRequested.load(std::memory_order_relaxed) > 0u;
       if (censusRequested)
         s_vramCensusFramesRequested.fetch_sub(1u, std::memory_order_relaxed);
@@ -1315,33 +1173,28 @@ namespace dxvk {
       }
       if (censusDue) {
         s_lastCensusUsedBytes = usedBytes;
-        // DX11_V381_CENSUS_FETCH_ORDER: read-and-reset only when printing, so the
-        // reported value is "accumulated since the previous census".
+        // Read-and-reset only when printing, so the value is "accumulated since the previous census".
         AccelManager::fetchAndResetBlasRouteStats(blasRoute);
         AccelManager::fetchAndResetCacheRestoreStats(cacheRestore);
         KENSHI_DIAGNOSTIC_INFO(str::format("[Remix-DX11][vram] frame=", fid,
           " src=", censusRequested ? "hotkey" : "auto",
-          // DX11_V332_IDENTITY_CHURN. existed/fresh = did the draw's geometry
-          // identity match the cache. buildBVH/updateBVH/updateInstance = what
-          // that cost. Sustained fresh>0 in a static scene IS the flicker.
+          // existed/fresh = did the draw's geometry identity match the cache; buildBVH/updateBVH/updateInstance =
+          // what that cost. Sustained fresh > 0 in a static scene is identity churn.
           " existed=", churnExisted,
           " fresh=", churnFresh,
           " buildBVH=", churnBuildBvh,
           " updateBVH=", churnUpdateBvh,
           " updateInst=", churnUpdateInst,
-          // DX11_V334_TLAS_STATS: the last stage before a ray can hit anything.
+          // TLAS stats: the last stage before a ray can hit anything.
           " inTlas=", tlasInTlas,
           " tlasHidden=", tlasHidden,
           " tlasGC=", tlasGc,
           " tlasZeroMask=", tlasZeroMask,
-          // DX11_V344_TLAS_CONTENTS: present-but-inert entries.
+          // Present-but-inert TLAS entries.
           " tlasNullBlas=", tlasNullBlas,
           " tlasZeroXform=", tlasZeroXform,
-          // DX11_V375_BLAS_ROUTE: instances split by BLAS route. `instances` and
-          // `inTlas` are NOT comparable - a merged bucket is one TLAS entry for
-          // many instances - so account for the split rather than inferring loss
-          // from the difference (which was misread as 555 lost instances).
-          // mergedInst + dynInst should equal the non-rejected instance count.
+          // Instances split by BLAS route. `instances` and `inTlas` are not comparable (a merged bucket is one
+          // TLAS entry for many instances); mergedInst + dynInst should equal the non-rejected instance count.
           " mergedInst=", blasRoute.mergedBucketInstances,
           " dynInst=", blasRoute.dynamicBlasInstances,
           " buckets=", blasRoute.mergedBuckets,
@@ -1349,18 +1202,15 @@ namespace dxvk {
           " bucketsSkipped=", blasRoute.mergedBucketsSkipped,
           " bucketsNoBlas=", blasRoute.mergedBucketNoBlas,
           " dynBlas=", blasRoute.dynamicBlasCount,
-          // DX11_V380_CACHE_ACCOUNTING: the previously dark restore path.
-          // cacheSkip should equal cacheMembers - a shortfall means instances were
-          // skipped by the bucket cache that no restored bucket represents, i.e.
-          // silently absent from the TLAS.
+          // Cached-bucket restore accounting: cacheSkip should equal cacheMembers; a shortfall means instances
+          // skipped by the bucket cache that no restored bucket represents, i.e. absent from the TLAS.
           " cacheSkip=", cacheRestore.skippedInstances,
           " cacheMembers=", cacheRestore.memberInstances,
           " cacheBuckets=", cacheRestore.bucketsRestored,
           " cacheEntries=", cacheRestore.tlasEntries,
           " cacheNoBlas=", cacheRestore.bucketsNoBlas,
           " noCapture=", s_submitWithoutCapture.load(std::memory_order_relaxed),
-          // DX11_V343_CAPTURE_GATE: per-frame, so a frame where the whole
-          // capture set collectively failed is visible as such.
+          // Per frame, so a frame where the whole capture set failed is visible as such.
           " injectSkip=", s_injectSkipReason.load(std::memory_order_relaxed),
           " capAtt=", s_capAttempts.load(std::memory_order_relaxed),
           " capOk=", s_capCaptured.load(std::memory_order_relaxed),
@@ -1406,7 +1256,7 @@ namespace dxvk {
 
     m_cameraManager.onFrameEnd();
     m_instanceManager.onFrameEnd();
-    // V663: clear() discarded this scene's BLAS owners; it cannot become history.
+    // clear() discarded this scene's BLAS owners; it cannot become history.
     m_previousFrameSceneAvailable = !sceneCleared && raytracedThisFrame && RtxOptions::enablePreviousTLAS();
 
     m_bufferCache.clear();
@@ -1579,14 +1429,9 @@ namespace dxvk {
     ReplacementInstance* replacementInstance = m_drawCallTracker.findOrCreateReplacementInstance(input, renderMaterialData, m_rayPortalManager);
     terrain_profile::owner(replacementInstance);
 
-    // DX11_V426_KENSHI_ANIMAL_INSTANCE_TRACE: V425 proved that native
-    // skinning and BLAS reuse are healthy for the 8,634-index animal family,
-    // but only one member of a visible pack reaches RT. Their game transform
-    // is identity while bone 0 carries their world position, so record the
-    // ReplacementInstance pairing alongside the existing trace-window
-    // instance dump. This is deliberately diagnostic-only: it distinguishes
-    // RI reassociation from later RtInstance/TLAS loss before the world-anchor
-    // is allowed to alter matching behaviour.
+    // Animal instance trace (diagnostic only): Kenshi's skinned animals have an identity game transform
+    // with bone 0 carrying their world position, so record the ReplacementInstance pairing alongside the
+    // trace-window instance dump, to separate RI reassociation from later RtInstance/TLAS loss.
     const bool traceKenshiAnimal =
       (kenshi_telemetry::enabled() && s_drawTraceFramesRemaining.load(std::memory_order_relaxed) > 0u) &&
       input.getSkinningState().numBones > 0u &&
@@ -1780,23 +1625,12 @@ namespace dxvk {
       return renderMaterialData;
     }
 
-    // DX11_V624/V627_KENSHI_WATER_TRANSLUCENT. Water becomes a TRANSLUCENT
-    // material when transparency is asked for, unless simulated depth explicitly
-    // keeps it on the opaque lighting/denoising path.
-    //
-    // This is the only material type that can transmit deterministically. On the
-    // opaque path a sub-threshold `opacity` does not blend on a primary ray - it
-    // DELETES the surface for that pixel (resolve.slangh, resolveVertexFinalContinue),
-    // a per-pixel coin flip between "full water" and "no water". That mechanism
-    // exists for particle soup and cannot represent one large coherent surface,
-    // which is what made V621/V622 unusable.
-    //
-    // Remix agrees: its own rtx.translucentMaterial.animatedWaterEnable is
-    // documented for "draw calls in the AnimatedWater category AND a translucent
-    // material". The opaque route was always the bridge's deviation.
-    //
-    // Keeping the opaque path for transparency == 0 leaves V620 reachable live,
-    // so the proven behaviour is one slider away and needs no rebuild.
+    // Water becomes a translucent material when transparency is asked for, unless simulated depth keeps it
+    // on the opaque lighting/denoising path. Only the translucent material transmits deterministically: on
+    // the opaque path a sub-threshold `opacity` deletes the surface for that pixel on primary rays
+    // (resolveVertexFinalContinue) - a per-pixel coin flip that cannot represent one large coherent
+    // surface. Remix documents rtx.translucentMaterial.animatedWaterEnable for exactly this pairing
+    // (AnimatedWater + translucent material). transparency == 0 keeps the opaque path.
     if (KenshiOptions::kenshiWaterTransparency() > 0.0f
      && !KenshiOptions::kenshiWaterSimulatedDepth()
      && input.testCategoryFlags(InstanceCategories::AnimatedWater)) {
@@ -1806,11 +1640,8 @@ namespace dxvk {
       // which is exactly the reflectivity the opaque path was destroying.
       waterMaterial.setRefractiveIndex(1.33f);
 
-      // THE DEPTH FALLOFF, and the reason this route was chosen. The
-      // transmittance colour is applied over this distance of real path length
-      // through the medium, so Beer-Lambert reproduces Kenshi's own curve
-      // instead of us hand-rolling it: the game saturates to opaque at
-      // 1 / invOpacity, measured 0.002 -> 500 units.
+      // The depth falloff: the transmittance colour applies over this distance of real path length, so
+      // Beer-Lambert reproduces Kenshi's curve (opaque at 1 / invOpacity).
       float kenshiWetnessUnused = 0.0f;
       float kenshiWaterHeightUnused = 0.0f;
       getKenshiWetness(kenshiWetnessUnused, kenshiWaterHeightUnused);
@@ -1860,23 +1691,22 @@ namespace dxvk {
       input.getMaterialData().kenshiCharacterHairTexture);
     renderMaterialData.setKenshiCharacterBeardTexture(
       input.getMaterialData().kenshiCharacterBeardTexture);
-    // DX11_V491: the head's own normal map (character.hlsl s6).
+    // The head's own normal map (character.hlsl s6).
     renderMaterialData.setKenshiCharacterHeadNormalTexture(
       input.getMaterialData().kenshiCharacterHeadNormalTexture);
-    // DX11_V766: the muscle-blend normal map (character.hlsl s4).
+    // The muscle-blend normal map (character.hlsl s4).
     renderMaterialData.setKenshiMuscleBlendTexture(
       input.getMaterialData().kenshiCharacterBlendNormalTexture);
-    // DX11_V490: which encoding the game's normal map uses, so the shader does
-    // not decode a tangent-space RGB texture as octahedral.
+    // Which encoding the game's normal map uses, so the shader does not decode a tangent-space RGB texture
+    // as octahedral.
     renderMaterialData.setKenshiNormalEncoding(
       input.getMaterialData().kenshiNormalEncoding);
-    // DX11_V533: only where the pixel shader declares `glossMult`, which is what
-    // proves this material's diffuse alpha is gloss and not coverage.
+    // Only where the pixel shader declares glossMult, which proves this material's diffuse alpha is gloss,
+    // not coverage.
     renderMaterialData.setKenshiGlossInAlpha(
       input.getMaterialData().kenshiGlossMult > 0.0f);
-    // DX11_V550: the draw's second texture set. Set only where the pixel shader
-    // declares a second diffuse map by name, which is what proves the secondary
-    // texture is an albedo rather than a mask.
+    // The draw's second texture set. Set only where the pixel shader declares a second diffuse map by name,
+    // which proves the secondary texture is an albedo, not a mask.
     renderMaterialData.setKenshiDualTextureSet(
       input.getMaterialData().kenshiDualTextureSet);
     renderMaterialData.setKenshiDualNormalTexture(
@@ -1899,10 +1729,9 @@ namespace dxvk {
       input.getMaterialData().kenshiVestMaskTexture);
     renderMaterialData.setKenshiVestColor(
       input.getMaterialData().kenshiVestColor);
-    // DX11_V760: the under-construction scaffold contract. Set only where the
-    // pixel shader declares `constructionState` AND `scaffoldTiling` AND binds
-    // a `grid_map`, which together are what prove this draw is objects.hlsl
-    // compiled with CONSTRUCTION rather than an ordinary building.
+    // The under-construction scaffold contract. Set only where the pixel shader declares constructionState
+    // and scaffoldTiling and binds a grid_map, which proves this is objects.hlsl compiled with
+    // CONSTRUCTION.
     renderMaterialData.setKenshiConstruction(
       input.getMaterialData().kenshiConstruction);
     renderMaterialData.setKenshiConstructionGridTexture(
@@ -1913,12 +1742,9 @@ namespace dxvk {
       input.getMaterialData().kenshiDustNoiseTexture);
     renderMaterialData.setKenshiDustColour(
       input.getMaterialData().kenshiDustColour);
-    // DX11_V766: two more pieces of Kenshi normal state ride in the spare bits
-    // of this word. The material `flags` field is FULL - offsets 0-13 occupy
-    // bits 2-15 and V554 took the last one - while this one uses 9 of 16 bits
-    // and is written unconditionally on every opaque material, so it costs
-    // nothing and grows no struct. Bit 9 is the green flip, bits 10-15 the
-    // muscle blend in 1/63 steps.
+    // Two more pieces of Kenshi normal state ride in the spare bits of this word (the material `flags`
+    // field is full): bit 9 is the green flip, bits 10-15 the muscle blend in 1/63 steps. Written
+    // unconditionally on every opaque material, so it grows no struct.
     const uint32_t kenshiMuscleSteps = uint32_t(std::lround(
       std::clamp(input.getMaterialData().kenshiMuscleBlend, 0.0f, 1.0f) * 63.0f));
     const uint16_t kenshiCharacterHairChannels = uint16_t(
@@ -2141,22 +1967,14 @@ namespace dxvk {
         &input->getGeometryData().boundingBox);
   }
 
-  // DX11_V655_BINDLESS_SURFACE_AUDIT
-  //
-  // m_bufferCache is cleared every frame (onFrameEnd) and BufferRefTable::track
-  // appends in submission order, deduplicating only against the entry directly
-  // before it. A bindless buffer index is therefore meaningful for exactly one
-  // frame. updateBufferCache has a single caller, inside processGeometryInfo,
-  // which runs only for a BLAS touched this frame; processInstanceBuffers then
-  // copies blas.modifiedGeometryData.*BufferIndex AND offsetFromSlice() into the
-  // surface. So an instance that survives a frame without its BLAS being touched
-  // - anti-culled, or simply not re-submitted - keeps last frame's index beside a
-  // current offset. When the table then shrinks (a scene collapse drops realScene
-  // from ~1030 to ~330) that index lands past descriptorCount, and
-  // createDescriptorSet never writes those slots, so the shader reads a stale or
-  // dummy descriptor at a real suballocation offset.
-  //
-  // Detection is free of side effects. The repair is opt-in.
+  // Bindless surface audit. m_bufferCache is cleared every frame and BufferRefTable::track appends in
+  // submission order (deduplicating only against the previous entry), so a bindless buffer index is
+  // valid for exactly one frame. processInstanceBuffers copies blas.modifiedGeometryData.*BufferIndex
+  // and offsetFromSlice() into the surface, but updateBufferCache only runs for a BLAS touched this
+  // frame - so an instance that survives without its BLAS being touched (anti-culled, not re-submitted)
+  // keeps last frame's index beside a current offset, and when the table shrinks that index can land
+  // past descriptorCount (stale or dummy descriptor). Detection has no side effects; the repair is
+  // opt-in.
   void SceneManager::auditAndRepairInstanceBufferIndices() {
     terrain_profile::Scope sceneCpuAuditInstances(terrain_profile::Stage::SceneAuditInstances);
     const bool audit = (kenshi_telemetry::enabled() && KenshiOptions::kenshiLogBindlessAudit());
@@ -2192,13 +2010,9 @@ namespace dxvk {
         continue;
       }
 
-      // Touched this frame means processGeometryInfo already refreshed the
-      // indices through updateBufferCache, so it is not part of the DEFECT being
-      // measured. V655b still REPAIRS it: repairing only the untouched set left
-      // the question of whether some other path also submits a bad index, and
-      // re-tracking everything makes "every submitted surface is valid this
-      // frame" true by construction, which is what the test needs to be
-      // decisive. Cost is one table entry per distinct BLAS per frame.
+      // Touched this frame means processGeometryInfo already refreshed the indices, so it is not part of the
+      // defect being measured - but it is still repaired, so that "every submitted surface is valid this
+      // frame" holds by construction. Cost: one table entry per distinct BLAS per frame.
       const bool touchedThisFrame = (blas->frameLastTouched == frameId);
 
       if (!touchedThisFrame) {
@@ -2324,18 +2138,11 @@ namespace dxvk {
     }
   }
 
-  // DX11_V656_BUFFER_TABLE_AUDIT
-  //
-  // V655b settled that every surface's bindless index is IN RANGE. It did not
-  // establish that the table entry the index names still refers to a live
-  // buffer. createDescriptorSet writes engineObject.getDescriptor().buffer
-  // whenever engineObject.defined() is true, and defined() only tests that the
-  // slice has a buffer pointer - a released DxvkBuffer still passes it, and the
-  // descriptor then carries a dead or null VkBuffer beside a real suballocation
-  // offset. That is the shape of every fake-OOM address this session: a read
-  // below every tracked allocation, at 72-101 MB.
-  //
-  // Detection only. Runs immediately before the table is published.
+  // Buffer-table entry audit (detection only; runs right before the table is published): an in-range
+  // bindless index can still name a dead buffer. createDescriptorSet writes
+  // engineObject.getDescriptor().buffer whenever engineObject.defined(), which only tests that the slice
+  // has a buffer pointer - a released DxvkBuffer still passes, leaving a dead or null VkBuffer beside a
+  // real suballocation offset.
   void SceneManager::auditBufferTableEntries() {
     terrain_profile::Scope sceneCpuAuditBuffers(terrain_profile::Stage::SceneAuditBuffers);
     if (!(kenshi_telemetry::enabled() && KenshiOptions::kenshiLogBufferTableAudit())) {
@@ -2403,8 +2210,7 @@ namespace dxvk {
       }
     }
 
-    // The band that matters is 72-101 MB: if the largest live descriptor offset
-    // sits there, the faulting resource is in this table.
+    // The largest live descriptor offset tells whether a faulting address band belongs to this table.
     static uint32_t s_lastFrame = 0u;
     const uint32_t frameId = m_device->getCurrentFrameId();
     const bool interesting = (nullHandles > 0u) || (rangeOverruns > 0u);
@@ -2509,9 +2315,8 @@ namespace dxvk {
         same = existing.objMin[c] == volume.objMin[c]
             && existing.objMax[c] == volume.objMax[c];
       }
-      // V641: the TRANSFORM is part of the identity. Comparing only geometry
-      // merged two instances of the same house into one entry, so the second
-      // building silently kept its intruding terrain.
+      // The transform is part of the identity: comparing only geometry would merge two instances of the same
+      // house into one entry.
       for (uint32_t col = 0; col < 4u && same; ++col) {
         for (uint32_t row = 0; row < 4u && same; ++row) {
           same = existing.worldViewProj[col][row] == volume.worldViewProj[col][row];
@@ -2536,9 +2341,8 @@ namespace dxvk {
   }
 
   void SceneManager::registerKenshiWater(const KenshiWaterParams& params) {
-    // DX11_V601: the first 13 only. Rain (13) and the scum trio (14-16) are
-    // carried by the near-water shaders alone, and the distant one reports zero
-    // for all of them - publishing them here let it erase them every frame.
+    // The first 13 only: rain (13) and the scum trio (14-16) come from the near-water shaders alone, and
+    // the distant one reports zero for all of them.
     const float* source = &params.tileScaleX;
     for (uint32_t i = 0; i < 13u; ++i)
       s_kenshiWaterParams[i].store(source[i], std::memory_order_relaxed);
@@ -2565,9 +2369,8 @@ namespace dxvk {
     auto& record = s_kenshiWaterBiomes[channel];
     const bool isNew = !record.valid;
     record.params = params;
-    // DX11_V619: keep a texture only while the draw actually supplies one. A
-    // near patch is frustum culled the moment you look away, and a biome that
-    // loses its maps to a null must not lose its look with them.
+    // Keep a texture only while the draw actually supplies one: a near patch is frustum culled when the
+    // camera turns away, and the biome must not lose its maps with it.
     if (!textures.scum.isImageEmpty())         record.textures.scum = textures.scum;
     if (!textures.scumNormal.isImageEmpty())   record.textures.scumNormal = textures.scumNormal;
     if (!textures.rain.isImageEmpty())         record.textures.rain = textures.rain;
@@ -2629,16 +2432,10 @@ namespace dxvk {
   }
 
   void SceneManager::buildKenshiInteriorBuffer(Rc<DxvkContext> ctx) {
-    // DX11_V650_KENSHI_INTERIOR_SHELL. Concatenate the active shells' own
-    // triangles into one buffer. This replaces the bounding box as the cull
-    // volume - the box survives only as the broad-phase reject inside each
-    // record, because measurement showed the shells are neither convex (2 of 32)
-    // nor vertical-walled (median wall 3.6 degrees off vertical), so no box or
-    // sampled field can stand in for them.
-    //
-    // Sole producer of the volume set: the accepted count published here is what
-    // RtxContext copies into the constants, so the buffer and the count cannot
-    // disagree about which volume is in which slot.
+    // Concatenate the active shells' own triangles into one buffer; each record's box is only a broad-phase
+    // reject (shells are neither convex nor vertical-walled, so no box or sampled field can stand in for
+    // them). The sole producer of the volume set: the accepted count published here is what RtxContext
+    // copies into the constants, so buffer and count cannot disagree about slots.
     static constexpr uint32_t kMaxVolumes = 4u;
     static constexpr uint32_t kHeaderVec4 = 2u;   // count, then per-volume offsets
 
@@ -2654,10 +2451,9 @@ namespace dxvk {
       if (!volume.valid || volume.blob == nullptr || volume.blob->empty())
         continue;
 
-      // The affine guard, unchanged in intent from V641: WVP = VP * world with
-      // world affine, so dividing VP out must return an affine matrix. A wrong
-      // convention, a mismatched camera or a projective result all break the
-      // bottom row, and are rejected rather than published.
+      // The affine guard: WVP = VP * world with world affine, so dividing VP out must return an affine
+      // matrix. A wrong convention, a mismatched camera or a projective result breaks the bottom row and is
+      // rejected rather than published.
       const Matrix4& o2w = volume.objectToWorld;
       const float affineError = std::abs(o2w[0][3]) + std::abs(o2w[1][3])
                               + std::abs(o2w[2][3]) + std::abs(o2w[3][3] - 1.0f);
@@ -2715,9 +2511,8 @@ namespace dxvk {
   }
 
   void SceneManager::buildKenshiWaterZoneBuffer(Rc<DxvkContext> ctx) {
-    // DX11_V618. Five fixed records addressed by blendChannel, not a growing
-    // list of rects. Slot 4 is the base biome - the unblended `water` material,
-    // which raster weights by `1 - sum(blendMap)`.
+    // Five fixed records addressed by blendChannel. Slot 4 is the base biome - the unblended `water`
+    // material, which raster weights by `1 - sum(blendMap)`.
     KenshiWaterBiomeRecord biomes[kKenshiWaterBiomeCount];
     {
       std::lock_guard<std::mutex> lock(s_kenshiWaterZoneMutex);
@@ -2725,23 +2520,18 @@ namespace dxvk {
         biomes[i] = s_kenshiWaterBiomes[i];
     }
 
-    // 4 uint header + 20 uints (5 vec4s) per biome, matching the stride the hit
-    // shader indexes with.
-    //
-    // DX11_V756: grown from 4 vec4s to 5 for the zone's own `invOpacity`. The
-    // shader indexes this in vec4 units (`1 + biome * 5`), so BOTH water paths -
-    // the opaque block and kenshiWaterShade - and the validity probe inside each
-    // biome-selection loop have to move together. Five sites; there is no
-    // derived constant to change on the shader side.
+    // 4 uint header + 20 uints (5 vec4s) per biome, matching the stride the hit shader indexes with
+    // (`1 + biome * 5` in vec4 units). Changing the record size means updating both water paths (the
+    // opaque block and kenshiWaterShade) and the validity probe in each biome-selection loop: five sites,
+    // no shared constant.
     constexpr uint32_t kRecordUints = 20u;
     std::vector<uint32_t> data;
     data.resize(4u + size_t(kKenshiWaterBiomeCount) * kRecordUints, 0u);
     data[0] = kKenshiWaterBiomeCount;
 
-    // DX11_V623: header words 1-3 carry the whole-map colour, flow and blend
-    // indices, two 16-bit indices per uint32. The opaque water path reaches
-    // these through material slots; the translucent one has no spare slots, so
-    // it reads them here instead and both paths stay in sync by construction.
+    // Header words 1-3 carry the whole-map colour, flow and blend indices, two 16-bit indices per uint32.
+    // The opaque water path reaches these through material slots; the translucent one has no spare slots
+    // and reads them here, so both paths stay in sync.
     {
       KenshiWaterBiomeTextures globals;
       {
@@ -2782,27 +2572,18 @@ namespace dxvk {
       // folds its blend weight into the base biome instead.
       dst[12] = biome.valid ? 1.0f : 0.0f;
 
-      // DX11_V756_KENSHI_WATER_ZONE_VISIBILITY. The zone's own depth range,
-      // `1 / "water visibility"` as authored in FCS. Zero means this zone never
-      // reported one and the shader keeps the frame global, which is the same
-      // rule every other per-biome field here follows.
+      // The zone's own depth range, `1 / "water visibility"` as authored in FCS. Zero means the zone never
+      // reported one and the shader keeps the frame global, as for every other per-biome field.
       dst[16] = biome.params.invOpacity;
       dst[17] = 0.0f;
       dst[18] = 0.0f;
       dst[19] = 0.0f;
 
-      // DX11_V619: this biome's OWN maps, as packed bindless indices.
-      //
-      // trackTexture only RESERVES an index; the descriptor table is published
-      // by m_bindlessResourceManager.prepareSceneData, which runs a few lines
-      // after this function inside prepareSceneData. An index reserved after
-      // that publish points past the end of what the GPU can see and loses the
-      // device (V526). Verified for this call site: buildKenshiWaterZoneBuffer
-      // is called immediately before that publish, so these are safe to sample
-      // this frame. Do not move either call without re-checking the other.
-      //
-      // Two 16-bit indices per uint32, exactly as KenshiTerrainArgs packs its
-      // per-layer normal maps.
+      // This biome's own maps, as packed bindless indices (two 16-bit indices per uint32, as
+      // KenshiTerrainArgs packs its normal maps). trackTexture only reserves an index; the descriptor table
+      // is published by m_bindlessResourceManager.prepareSceneData right after this, inside
+      // prepareSceneData. An index reserved after that publish points past what the GPU can see and loses
+      // the device, so do not move either call without re-checking the other.
       auto waterTextureIndex = [&](const TextureRef& texture) -> uint32_t {
         if (texture.isImageEmpty())
           return kSurfaceMaterialInvalidTextureIndex;
@@ -2848,16 +2629,14 @@ namespace dxvk {
     s_kenshiWaterParams[13].store(rainAmount, std::memory_order_relaxed);
   }
 
-  // DX11_V621: `invOpacity` exists only on the near shaders - the distant one
-  // has no depth and no alpha at all - so it is published on its own rather
-  // than being zeroed by every distant draw, exactly like rain and scum.
+  // `invOpacity` exists only on the near shaders (the distant one has no depth or alpha), so it is
+  // published on its own rather than being zeroed by every distant draw, like rain and scum.
   void SceneManager::registerKenshiWaterInvOpacity(float invOpacity) {
     if (invOpacity > 0.0f)
       s_kenshiWaterParams[17].store(invOpacity, std::memory_order_relaxed);
   }
 
-  // DX11_V628: `glow` is another near-water-only constant. Preserve it across
-  // distant draws so simulated depth can reproduce the raster surface term.
+  // `glow` is another near-water-only constant; preserve it across distant draws.
   void SceneManager::registerKenshiWaterGlow(float glow) {
     if (glow >= 0.0f)
       s_kenshiWaterParams[18].store(glow, std::memory_order_relaxed);
@@ -2921,16 +2700,12 @@ namespace dxvk {
   uint32_t SceneManager::setKenshiTerrainArgs(const LegacyMaterialData& materialData,
                                              bool hasTexcoords) {
     terrain_profile::Scope terrainCpuArgs(terrain_profile::Stage::TerrainArgs);
-    // DX11_V398_KENSHI_TERRAIN_PER_MATERIAL: content-address one complete
-    // six-layer set so cached surface materials can retain its stable index.
-    //
-    // DX11_V528_KENSHI_TERRAIN_BIOME_BLEND: a boundary tile registers one record
-    // per biome, all through the same packer, and the primary record carries the
-    // blend map plus the neighbours' record indices. Every texture referenced by
-    // every record is tracked HERE - inside determineMaterialData, therefore
-    // during scene building and before m_bindlessResourceManager.prepareSceneData
-    // publishes the descriptor table. That ordering is the V527 rule and it is
-    // the reason these indices are safe to sample.
+    // Content-address one complete six-layer set so cached surface materials can keep its stable index. A
+    // boundary tile registers one record per biome through the same packer, and the primary record carries
+    // the blend map plus the neighbours' record indices. Every texture of every record is tracked here -
+    // inside determineMaterialData, during scene building, before
+    // m_bindlessResourceManager.prepareSceneData publishes the descriptor table - which is what makes these
+    // indices safe to sample.
     auto toFloat4 = [](const Vector4& v) {
       return float4 { v.x, v.y, v.z, v.w };
     };
@@ -2943,8 +2718,8 @@ namespace dxvk {
     auto& textureManager = m_device->getCommon()->getTextureManager();
     textureManager.markTerrainTexture(overlayIndex);
 
-    // V745: regional maps keep the material's native sampler. Track the detail
-    // sampler before descriptor publication, with the same filtering policy.
+    // Regional maps keep the material's native sampler. Track the detail sampler before descriptor
+    // publication, with the same filtering policy.
     Rc<DxvkSampler> detailSampler = materialData.getSampler2();
     if (detailSampler == nullptr) detailSampler = materialData.getSampler();
     if (detailSampler != nullptr) {
@@ -3029,8 +2804,7 @@ namespace dxvk {
       std::memcpy(&args.slopeMin.w, &packedNormal23, sizeof(uint32_t));
       std::memcpy(&args.slopeMax.z, &packedNormal45, sizeof(uint32_t));
       args.textureFade = toFloat4(source.textureFade);
-      // DX11_V530: the composite reads only .xy of each slope vector, so .zw
-      // are spare and already carry packed extras elsewhere in this record.
+      // The composite reads only .xy of each slope vector, so .zw are spare and carry packed extras.
       args.slopeBlend.z = materialData.kenshiTerrainHeightWarp.x;
       args.slopeBlend.w = materialData.kenshiTerrainHeightWarp.y;
       args.set = 1u;
@@ -3326,11 +3100,8 @@ namespace dxvk {
   }
 
   void SceneManager::buildKenshiTerrainBuffer(Rc<DxvkContext> ctx) {
-    // DX11_V530: once per frame, from prepareSceneData. This used to run inside
-    // getKenshiTerrainBuffer, which bindCommonRayTracingResources calls once per
-    // ray tracing PASS - so the whole record array was re-uploaded twelve times
-    // a frame to no purpose. Records only ever change during scene building,
-    // which has already finished by the time this runs.
+    // Once per frame, from prepareSceneData: getKenshiTerrainBuffer runs once per ray tracing pass, and
+    // records only change during scene building, which has finished by now.
     ensureKenshiTerrainBuffer(m_kenshiTerrainArgs.size());
 
     if (!m_kenshiTerrainArgs.empty()) {
@@ -3415,16 +3186,10 @@ namespace dxvk {
       const LegacyMaterialData& legacy = drawCall.getMaterialData();
       const RasterBuffer& projection = drawCall.getGeometryData().kenshiBloodProjectionBuffer;
 
-      // DX11_V538: the roughness is packed for EVERY surface, not only those
-      // carrying character blood. Terrain blood writes the same
-      // surfaceInteraction.kenshiBlood and runs the same downstream roughness
-      // blend, but a terrain draw has no character blood mode - so it was
-      // reading roughness bits of ZERO, i.e. a perfect mirror, which is both why
-      // the slider did nothing for ground blood and why it threw stark white
-      // specular highlights where decals overlapped.
-      //
-      // Safe against the `kenshiBloodMode != 0` character test because the
-      // shader-side property already masks to the low 8 bits (surface.h).
+      // The roughness is packed for every surface, not only those carrying character blood: terrain blood
+      // uses the same downstream roughness blend but has no character blood mode, and would otherwise read a
+      // roughness of zero (a mirror). Safe against the `kenshiBloodMode != 0` character test, which masks to
+      // the low 8 bits (surface.h).
       const float bloodRoughness = std::min(1.0f, std::max(0.0f,
         KenshiOptions::kenshiBloodRoughness()));
       const uint32_t bloodRoughnessBits = uint32_t(bloodRoughness * 255.0f + 0.5f);
@@ -3576,22 +3341,13 @@ namespace dxvk {
       result = onSceneObjectAdded(ctx, drawCallState, pBlas, geometryCacheOnly);
     }
 
-    // DX11_V332_IDENTITY_CHURN: this is the one place that decides whether a
-    // draw is RECOGNISED as an object seen before, and it is the question the
-    // building flicker turns on. Counting instances or cache entries cannot
-    // answer it - a population of 125 is equally consistent with 125 objects
-    // being reused and 125 objects being replaced wholesale every frame, and
-    // that ambiguity has already produced one wrong conclusion in this journal.
-    //
-    // `existed` counts draws whose geometry identity matched something already
-    // in the cache; `fresh` counts draws that minted a new identity. In a
-    // static outdoor scene viewed from a moving camera, a healthy frame is
-    // almost entirely `existed` + `updateInstance`. Sustained non-zero `fresh`
-    // means identities are churning, and `buildBVH` then says that churn is
-    // paying for a full BLAS rebuild each time.
-    // DX11_V350_DRAW_TRACE: the scene-side half of the per-draw row. This is
-    // where the cache decision is made, and the D3D11 bridge cannot observe it.
-    // Joined to the bridge's row by drawCallID.
+    // This is the one place that decides whether a draw is recognised as an object seen before, which
+    // instance counts cannot show (125 instances is equally consistent with reuse and with wholesale
+    // replacement). `existed` counts draws whose geometry identity matched the cache; `fresh` counts new
+    // identities. A healthy static scene is almost entirely existed + updateInstance; sustained fresh
+    // means churn, and buildBVH shows what it costs.
+    // Draw trace: the scene-side half of the per-draw row (the cache decision the bridge cannot see),
+    // joined to the bridge's row by drawCallID.
     if ((kenshi_telemetry::enabled() && s_drawTraceFramesRemaining.load(std::memory_order_relaxed) > 0u)) {
       const char* stateName =
         result == ObjectCacheState::KBuildBVH ? "buildBVH"
@@ -3699,17 +3455,9 @@ namespace dxvk {
     // Note: The material data can be modified in instance manager
     RtInstance* instance = m_instanceManager.processSceneObject(m_cameraManager, m_rayPortalManager, *pBlas, drawCallState, renderMaterialData, existingInstance);
 
-    // DX11_V324_CAPTURED_GEOMETRY_TRACE: post-VS captured geometry from the
-    // world-space path reaches this point with verified-valid world vertices
-    // and a camera that exactly matches the game's, yet produces no ray hits.
-    // Capture and camera are therefore exonerated and the failure lies at or
-    // below this boundary, where nothing was previously observable. Record
-    // what the scene manager actually did with such a draw: whether the BLAS
-    // was built/updated or merely reused, and whether an RtInstance was
-    // produced at all. Bounded and logging-only.
-    // Restricted to the WORLD-space capture path. The first attempt logged any
-    // captured draw and its whole budget was spent on SV_Position captures at
-    // startup, yielding zero records for the path under investigation.
+    // Captured-geometry trace, restricted to the world-space capture path: whether the scene manager
+    // built/updated or merely reused the BLAS, and whether an RtInstance was produced. Bounded and
+    // logging-only.
     if (drawCallState.getGeometryData().postVsCaptureIdentity != kEmptyHash
      && !drawCallState.getGeometryData().postVsPositionIsHomogeneousClip) {
       static uint32_t s_capturedGeometryTraceCount = 0;
@@ -3759,18 +3507,6 @@ namespace dxvk {
                      traceTransform.objectToWorld[3][2], "]",
           " materialIgnored=", renderMaterialData.getIgnored() ? 1 : 0));
 
-        // The BLAS interleave probe that lived here has served its purpose and
-        // was REMOVED: it read back the interleaved positions and found them
-        // identical to the capture buffer (valid world coordinates, stride 32
-        // = position + normal + UV). The interleaver is therefore correct.
-        //
-        // It was also actively harmful as a permanent fixture. It called
-        // flushCommandList() and blocked mid-frame inside scene processing -
-        // the same class of mid-frame flush that previously made ALL captured
-        // geometry disappear when the capture submission throttle engaged.
-        // Any probe that disturbs frame submission cannot be trusted to
-        // measure a rendering symptom. Diagnostics of this kind must be
-        // temporary and must never be the state a visual result is judged in.
       }
     }
 
@@ -3884,10 +3620,9 @@ namespace dxvk {
       samplerIndex2 = trackSampler(drawCallState.getMaterialData().getSampler2());
     }
 
-    // DX11_V763: carried to the cache-tracking site at the end of this function,
-    // which is the only place that can say whether a changed progress produced a
-    // NEW surface material or was collapsed onto an existing one. Declared here
-    // because that site is shared by every material type.
+    // Carried to the cache-tracking site at the end of this function, the only place that can tell
+    // whether a changed progress produced a new surface material or was collapsed onto an existing one.
+    // Declared here because that site is shared by every material type.
     float kenshiConstructionLogState = -1.0f;
     uint32_t kenshiConstructionLogGrid = kSurfaceMaterialInvalidTextureIndex;
 
@@ -3910,9 +3645,9 @@ namespace dxvk {
     hashKenshiCharacterTexture(renderMaterialData.getKenshiCharacterHeadMaskTexture());
     hashKenshiCharacterTexture(renderMaterialData.getKenshiCharacterHairTexture());
     hashKenshiCharacterTexture(renderMaterialData.getKenshiCharacterBeardTexture());
-    // V724: armor recolor constants also live outside the generic variant.
-    // The usual mask is already the secondary texture, but include the actual
-    // extension texture here so the key follows what surface creation consumes.
+    // Armour recolour constants also live outside the generic variant. The usual mask is already the
+    // secondary texture, but include the actual extension texture so the key follows what surface
+    // creation consumes.
     const bool kenshiColorMask = renderMaterialData.getKenshiColorMask();
     preCreationHash = XXH64(&kenshiColorMask, sizeof(kenshiColorMask), preCreationHash);
     if (kenshiColorMask) {
@@ -3923,9 +3658,8 @@ namespace dxvk {
                                color2.x, color2.y, color2.z, color2.w };
       preCreationHash = XXH64(colors, sizeof(colors), preCreationHash);
     }
-    // V723: clothing is stored outside the generic material variant, so neither
-    // getHash() nor forEachTexture() includes it. Separate clothing before this
-    // cache can return another character's already-created surface material.
+    // Clothing is stored outside the generic material variant, so neither getHash() nor forEachTexture()
+    // includes it; separate clothing before this cache can return another character's surface material.
     const bool kenshiCharacterVest = renderMaterialData.getKenshiCharacterVest();
     preCreationHash = XXH64(&kenshiCharacterVest, sizeof(kenshiCharacterVest), preCreationHash);
     if (kenshiCharacterVest) {
@@ -3940,13 +3674,9 @@ namespace dxvk {
       renderMaterialData.getKenshiCharacterHairChannels();
     preCreationHash = XXH64(&kenshiCharacterHairChannels,
       sizeof(kenshiCharacterHairChannels), preCreationHash);
-    // DX11_V763: build progress, for exactly the reason V723 gives for clothing
-    // and V724 for the armour recolour - the construction contract is stored
-    // OUTSIDE the generic material variant, so neither getHash() nor
-    // forEachTexture() includes it, and without it this cache hands one
-    // building's already-created surface material to another. Two buildings of
-    // the same type at different progress share every other term of this key,
-    // which is why placing a second one showed it at the first one's progress.
+    // Build progress, for the same reason as clothing and the armour recolour: the construction contract
+    // is outside the generic material variant, so without it this cache would hand one building's surface
+    // material to another of the same type at a different progress.
     const bool kenshiConstructionMaterial = renderMaterialData.getKenshiConstruction();
     preCreationHash = XXH64(&kenshiConstructionMaterial,
       sizeof(kenshiConstructionMaterial), preCreationHash);
@@ -4064,28 +3794,20 @@ namespace dxvk {
 
       trackTexture(opaqueMaterialData.getNormalTexture(), normalTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
       trackTexture(opaqueMaterialData.getTangentTexture(), tangentTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
-      // DX11_V491_KENSHI_HEAD_NORMAL: a Kenshi character's head sits in NEGATIVE
-      // V of the same draw and has its own normal map, so the body's map reads
-      // unrelated texels there. Carry the head map in the TANGENT slot: the GPU
-      // material struct is exactly full at kSurfaceMaterialGPUSize, and the
-      // bridge never supplies a tangent texture for any Kenshi material (Remix
-      // derives its tangent frame from UVs). Only for head materials, so a USD
-      // replacement with a real tangent map keeps it. The shader reads it back
-      // under the same flag and does not treat it as a tangent map.
+      // A character's head sits in negative V of the same draw and has its own normal map. Carry it in the
+      // tangent slot: the GPU material struct is full at kSurfaceMaterialGPUSize, and no Kenshi material
+      // supplies a tangent texture (Remix derives tangents from UVs). Only for head materials, so a USD
+      // replacement with a real tangent map keeps it; the shader reads it back under the same flag.
       if (renderMaterialData.getKenshiCharacterHead()
        && renderMaterialData.getKenshiCharacterHeadNormalTexture().isValid()) {
         trackTexture(renderMaterialData.getKenshiCharacterHeadNormalTexture(),
                      tangentTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
       }
       trackTexture(opaqueMaterialData.getHeightTexture(), heightTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
-      // DX11_V766_KENSHI_MUSCLE_NORMAL: character.hlsl's second body normal map,
-      // lerped with the first by `muscleBlend` on the raw DXT5nm pair. It takes
-      // heightTextureIndex, dead on every Kenshi material because this bridge
-      // supplies no height map and never sets HAS_DISPLACEMENT - and the GPU
-      // record is exactly full at kSurfaceMaterialGPUSize. The muscle amount in
-      // the hair-channel word is what proves this is the Kenshi case rather than
-      // a replacement's real height map; writeGPUData is exempted on the same
-      // test so the POM-disable branch cannot wipe the index.
+      // character.hlsl's second body normal map, lerped with the first by muscleBlend on the raw DXT5nm
+      // pair. It takes heightTextureIndex (the GPU record is full). The muscle amount in the hair-channel
+      // word distinguishes it from a replacement's real height map; writeGPUData is exempted on the same
+      // test so the POM-disable branch cannot wipe the index, and hasValidDisplacement() keeps POM off.
       if ((renderMaterialData.getKenshiCharacterHairChannels() >> 10u) != 0u
        && renderMaterialData.getKenshiMuscleBlendTexture().isValid()) {
         trackTexture(renderMaterialData.getKenshiMuscleBlendTexture(),
@@ -4109,39 +3831,18 @@ namespace dxvk {
       kenshiTerrainBlend = renderMaterialData.getKenshiTerrainBlend();
       kenshiCharacterHead = renderMaterialData.getKenshiCharacterHead();
 
-      // DX11_V552_KENSHI_COLOR_MASK: the two recolour colours ride in constants
-      // that are dead on a textured, non-emissive material - albedoOpacityConstant
-      // is only the fallback when no albedo texture loads, and the emissive pair
-      // does nothing while emission is off. Emission is forced off here so the
-      // aliased fields cannot also be read as light.
-      // DX11_V554_KENSHI_CHARACTER_VEST: three indices a character material
-      // never uses. Kenshi's character shader binds no metal, roughness or
-      // emissive map at all, so on a legacy-captured character these are all
-      // BINDING_INDEX_INVALID and free; the clothing colour goes in
-      // albedoOpacityConstant, dead once an albedo texture loads.
-      // DX11_V557: the dust noise, in tangentTextureIndex. Tracked HERE, inside
-      // determineMaterialData - during scene building and before
-      // m_bindlessResourceManager.prepareSceneData publishes the descriptor
-      // table. That ordering is the V527 rule and is what makes the index safe
-      // to sample; reserving one at binding time is what produces the
-      // out-of-VRAM box that is really a device loss.
-      // DX11_V571: write the COLOUR whenever the material HAS one, and bind the
-      // noise separately. These two were gated on the same condition and must
-      // not be - that mismatch is what made dust paint WHITE.
-      //
-      // V568 made the capture record a dust colour whenever the constants read,
-      // including the many load-time draws where the noise texture is not bound
-      // yet (measured: 250 consecutive draws with noise=0). Those materials were
-      // hashed as dust materials by V565 but skipped this write, so they kept
-      // `albedoOpacityConstant` at its DEFAULT - opaque WHITE. Dust then
-      // accumulates over the following seconds, the noise binds, the hash still
-      // matches, and the cached WHITE material is reused: dust renders white
-      // however correct the colour on the capture side is.
-      //
-      // The colour is a property of the material; the noise is a binding. Gate
-      // each on its own condition. DX11_V573 makes W an explicit presence plus
-      // amount-component selector rather than a dynamic amount, which may
-      // legitimately be zero during loading.
+      // Kenshi material extensions carried in otherwise dead fields:
+      //  - colour mask: the two recolour colours ride in albedoOpacityConstant (only a fallback when no
+      //    albedo texture loads) and the emissive pair; emission is forced off so they cannot be read as
+      //    light.
+      //  - character vest: three indices a character material never uses (no metal, roughness or emissive
+      //    map); the clothing colour in albedoOpacityConstant.
+      //  - dust noise, in tangentTextureIndex. Tracked here, inside determineMaterialData, before
+      //    m_bindlessResourceManager.prepareSceneData publishes the descriptor table; an index reserved at
+      //    binding time points past the published table and loses the device.
+      // Dust colour and noise are gated separately: the colour is a property of the material, the noise a
+      // binding. A material first seen before its noise binds must still get its colour, or the cached
+      // material keeps the default opaque white. W is a presence plus amount-component selector.
       const bool kenshiHasDustColour =
            renderMaterialData.getKenshiDustColour().w > 0.0f
         && !renderMaterialData.getKenshiCharacterVest()
@@ -4156,10 +3857,8 @@ namespace dxvk {
         trackTexture(renderMaterialData.getKenshiDustNoiseTexture(),
           tangentTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
 
-        // DX11_V570: the last unverified link. The capture log proves the right
-        // colour reaches the MATERIAL; this proves what reaches the SURFACE
-        // MATERIAL the shader reads, which is the only step never measured.
-        // One line per distinct surface-material colour, so it cannot flood.
+        // What reaches the surface material the shader reads (the capture log only shows the material). One
+        // line per distinct surface-material colour.
         {
           static std::mutex sDustSurfMutex;
           static std::unordered_set<uint64_t> sDustSurfSeen;
@@ -4187,22 +3886,16 @@ namespace dxvk {
         trackTexture(renderMaterialData.getKenshiVestMaskTexture(),
           emissiveColorTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
         albedoOpacityConstant = renderMaterialData.getKenshiVestColor();
-        // DX11_V555: these three slots no longer hold what their names say, so
-        // the ordinary consumers must be off on both sides. The shader gates its
-        // texture reads on the same flag; this stops emission independently, the
-        // way V552 does for the armour mask.
+        // These three slots no longer hold what their names say, so the ordinary consumers must be off on both
+        // sides: the shader gates its texture reads on the same flag, and emission is stopped here as for the
+        // armour mask.
         enableEmissive = false;
       }
 
-      // DX11_V760_KENSHI_CONSTRUCTION: a building that is still being built.
-      // The scaffold lattice takes kenshiCharacterHairTextureIndex and the three
-      // scalars take emissiveColorConstant - all four dead on a textured,
-      // non-emissive building material, and the GPU record is exactly full at
-      // kSurfaceMaterialGPUSize. See the flag in shared_constants.h.
-      //
-      // Emission is forced off for the same reason V552 forces it off: the
-      // constant no longer means a colour, so letting the ordinary emissive path
-      // read it would make every unfinished building glow with its own progress.
+      // A building still being built. The scaffold lattice takes kenshiCharacterHairTextureIndex and the
+      // three scalars take emissiveColorConstant - all unused on a textured, non-emissive building material
+      // (the GPU record is full). Emission is forced off, or the ordinary emissive path would make every
+      // unfinished building glow with its own progress.
       const bool kenshiConstruction =
            renderMaterialData.getKenshiConstruction()
         && renderMaterialData.getKenshiConstructionGridTexture().isValid()
@@ -4230,10 +3923,9 @@ namespace dxvk {
         trackTexture(renderMaterialData.getKenshiColorMaskTexture(),
           secondaryTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
       }
-      // DX11_V551: a dual-set material reuses the first two character-mask
-      // indices for its SECOND normal and metal maps. The two cases are
-      // mutually exclusive - a character material never sets the dual flag -
-      // so the same two slots serve both without a size increase.
+      // A dual-set material reuses the first two character-mask indices for its second normal and metal
+      // maps. The cases are mutually exclusive (a character material never sets the dual flag), so the same
+      // slots serve both.
       if (renderMaterialData.getKenshiDualTextureSet() && !kenshiCharacterHead
        && !RtxOptions::useWhiteMaterialMode()) {
         trackTexture(renderMaterialData.getKenshiDualNormalTexture(),
@@ -4241,10 +3933,8 @@ namespace dxvk {
         trackTexture(renderMaterialData.getKenshiDualMetalTexture(),
           kenshiCharacterHeadMaskTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
       }
-      // DX11_V599_KENSHI_WATER_SCUM: water is the third mutually-exclusive user
-      // of these three slots, on exactly the argument V551 makes above - a
-      // character material is never water, and the GPU surface material has no
-      // room to grow. Scum albedo, scum normal and the rain map ride here.
+      // Water is the third mutually exclusive user of these slots (a character material is never water):
+      // scum albedo, scum normal and the rain map ride here.
       if (drawCallState.testCategoryFlags(InstanceCategories::AnimatedWater)
        && !kenshiCharacterHead && !renderMaterialData.getKenshiDualTextureSet()
        && !RtxOptions::useWhiteMaterialMode()) {
@@ -4254,14 +3944,8 @@ namespace dxvk {
           kenshiCharacterHeadMaskTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
         trackTexture(renderMaterialData.getKenshiCharacterHairTexture(),
           kenshiCharacterHairTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
-        // DX11_V620: the BEARD slot too, which V618 put the water blend map in
-        // and then never tracked. The index stayed invalid, so the blend sample
-        // never loaded, `waterBlendLoaded` was always false, and every hit fell
-        // through to the BASE biome record. Only non-blended water materials
-        // register into that record, so it raced last-draw-wins between them and
-        // the whole surface flipped character with camera angle - the exact
-        // symptom the biome table was built to remove, reintroduced by a missing
-        // trackTexture call.
+        // The beard slot carries the water blend map and must be tracked too: without a valid index the blend
+        // sample never loads and every hit falls through to the base biome record.
         trackTexture(renderMaterialData.getKenshiCharacterBeardTexture(),
           kenshiCharacterBeardTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
 
@@ -4288,8 +3972,7 @@ namespace dxvk {
           kenshiCharacterBeardTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
       }
       if (renderMaterialData.getKenshiGlossInAlpha()) {
-        // Bounded per SUBJECT: the roughness/metal indices actually written to
-        // the surface material, which is the half V533 could not see.
+        // Bounded per subject: the roughness/metal indices actually written to the surface material.
         static uint32_t sGlossMaterialLogCount = 0;
         if (sGlossMaterialLogCount < 16u) {
           ++sGlossMaterialLogCount;
@@ -4397,20 +4080,14 @@ namespace dxvk {
         kenshiCharacterHairTextureIndex,
         kenshiCharacterBeardTextureIndex,
         renderMaterialData.getKenshiCharacterHairChannels(),
-        // DX11_V490: only meaningful when a normal texture is present; 0 keeps
-        // Remix's octahedral decode for USD replacements.
+        // Only meaningful when a normal texture is present; 0 keeps Remix's octahedral decode for USD
+        // replacements.
         renderMaterialData.getKenshiNormalEncoding(),
-        // DX11_V534: this was MISSING in V533. The constructor parameter has a
-        // default, so the omission compiled silently and the flag was never set
-        // on any material - the entire object-gloss shader path was unreachable.
-        // Any new argument here needs adding at BOTH ends.
+        // The constructor parameters have defaults, so a missing argument here compiles silently and the flag
+        // is never set. Any new argument needs adding at both ends.
         renderMaterialData.getKenshiGlossInAlpha(),
-        // DX11_V550. Added at BOTH ends in the same edit - see the V534 note
-        // immediately above, which is exactly the trap this comment guards.
         renderMaterialData.getKenshiDualTextureSet(),
-        // DX11_V552. Both ends, same edit - see the V534 note above.
         renderMaterialData.getKenshiColorMask(),
-        // DX11_V554. Both ends, same edit - see the V534 note above.
         renderMaterialData.getKenshiCharacterVest()
       };
 
@@ -4445,8 +4122,8 @@ namespace dxvk {
     assert(surfaceMaterial.has_value());
     assert(surfaceMaterial->validate());
 
-    // V776: include the primary terrain splat mask and any other ordinary
-    // material slots, in addition to the arrays registered by setKenshiTerrainArgs.
+    // Include the primary terrain splat mask and any other ordinary material slots, in addition to the
+    // arrays registered by setKenshiTerrainArgs.
     if (kenshiTerrain) {
       auto& textures = m_device->getCommon()->getTextureManager();
       surfaceMaterial->forEachTextureIndex([&](uint32_t slot) { textures.markTerrainTexture(slot); });
@@ -4456,23 +4133,15 @@ namespace dxvk {
     const uint32_t index = m_surfaceMaterialCache.track(*surfaceMaterial);
     m_preCreationSurfaceMaterialMap[preCreationHash] = index;
 
-    // DX11_V763: the decisive line. The bridge is proven to re-read progress
-    // every step (the [D3D11Rtx][construction] log ramps), so the remaining
-    // question is whether a changed progress reaches the GPU as a NEW material.
-    // Logs on CHANGE, not first-N: V761's cap of 6 was consumed within 85ms of
-    // placement and could therefore say nothing about any later frame.
-    // A ramping `index` means the GPU is being fed new materials and any
-    // remaining fault is in the shader; a frozen one means it is still cached.
+    // Logs whether a changed build progress reaches the GPU as a new material: a ramping `index` means new
+    // materials are fed and any remaining fault is in the shader; a frozen one means it is still cached.
     if (kenshiConstructionLogState >= 0.0f) {
       static dxvk::mutex sConstructionMutex;
       static float sLastState = -1.0f;
       static uint32_t sLines = 0;
       std::lock_guard<dxvk::mutex> lock(sConstructionMutex);
-      // V764: trigger on the STATE alone. V763 also triggered on a changed
-      // index, and a construction building has two sub-meshes whose surface
-      // material indices alternate (238/239) - that alternation consumed the
-      // whole 64-line cap at state=0 and the log could say nothing about the
-      // ramp it was added to observe.
+      // Trigger on the state alone: a construction building has two sub-meshes whose surface material
+      // indices alternate, which would use up the line cap.
       if (sLines < 64u && kenshiConstructionLogState != sLastState) {
         ++sLines;
         sLastState = kenshiConstructionLogState;
@@ -4786,8 +4455,8 @@ namespace dxvk {
 
   void SceneManager::collectUnusedTerrainTextures() {
     const uint32_t frame = m_device->getCurrentFrameId();
-    // V780: cache-only releases are staggered away from texture/root marking and
-    // the bridge's 60-frame slice pass. No live-instance/geometry GC is deferred.
+    // Cache-only releases are staggered away from texture/root marking and the bridge's 60-frame slice
+    // pass. No live-instance/geometry GC is deferred.
     if (frame % 30u == 15u) opaque_preparation::collect(this, frame);
     if (frame % 30u != 0u) return;
     const auto protectionStart = std::chrono::steady_clock::now();
@@ -4833,7 +4502,7 @@ namespace dxvk {
     // enumeration would free slots which an existing instance can use again.
     for (const auto* instance : m_instanceManager.getInstanceTable()) {
       keepMaterial(instance->surface.surfaceMaterialIndex);
-      // V780: blood overlays live on the surface, outside the material record.
+      // Blood overlays live on the surface, outside the material record.
       keep(instance->surface.kenshiBloodTextureIndex);
       keep(instance->getOmmOpacityTextureIndex());
       keep(instance->getSecondaryOpacityTextureIndex());
@@ -4871,20 +4540,17 @@ namespace dxvk {
     sceneCpuMaintenance.finish();
     terrain_profile::Scope sceneCpuResources(terrain_profile::Stage::SceneResources);
 
-    // DX11_V527. Ground blood decals MUST be packed here, before the bindless
-    // table below is finalized: trackTexture only reserves an index, and an index
-    // reserved after the table has been uploaded points past its end. Doing this
-    // from bindCommonRayTracingResources instead cost a GPU page fault and a
-    // VK_ERROR_DEVICE_LOST that the game reports as an out-of-video-memory box.
+    // Ground blood decals must be packed here, before the bindless table below is finalized: trackTexture
+    // only reserves an index, and one reserved after the table upload points past its end (a device loss
+    // that the game reports as out of video memory).
     buildKenshiTerrainBuffer(ctx);
     buildKenshiTerrainBloodBuffer(ctx);
     buildKenshiWaterZoneBuffer(ctx);
     buildKenshiInteriorBuffer(ctx);
 
     auto& textureManager = m_device->getCommon()->getTextureManager();
-    // DX11_V655: must run BEFORE the publish below - the repair reserves new
-    // bindless indices, and an index reserved after the publish points past the
-    // end of what the GPU can see (the V526/V527 rule).
+    // Must run before the publish below: the repair reserves new bindless indices, and an index reserved
+    // after the publish points past what the GPU can see.
     auditAndRepairInstanceBufferIndices();
     auditBufferTableEntries();
 

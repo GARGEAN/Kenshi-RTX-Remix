@@ -175,9 +175,8 @@ namespace dxvk {
     static void processGeometryBuffers(const InterleavedGeometryDescriptor& desc, RaytraceGeometry& output);
     static void processGeometryBuffers(const RasterGeometry& input, RaytraceGeometry& output);
     static size_t computeOptimalVertexStride(const RasterGeometry& input, bool forceNormals = false);
-    // DX11_V524. Bakes Kenshi's bind-pose blood projection straight from the
-    // draw's own vertex buffers. Static: it needs no RtxGeometryUtils state, and
-    // the call site is D3D11Rtx::SubmitDraw inside an EmitCs lambda.
+    // Bakes Kenshi's bind-pose blood projection from the draw's own vertex buffers. Static: it needs no
+    // RtxGeometryUtils state, and it is called from D3D11Rtx::SubmitDraw inside an EmitCs lambda.
     static void dispatchKenshiBloodProjection(
       DxvkContext* ctx,
       const DxvkBufferSlice& output,

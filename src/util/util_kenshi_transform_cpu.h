@@ -3,7 +3,7 @@
 #include "util_kenshi_terrain_profile.h"
 
 namespace dxvk::transform_cpu {
-  // V718: main-lane finite validation and process-local, expiring comparison.
+  // Main-lane finite validation and process-local, expiring comparison.
   inline std::atomic<bool> optimized { true };
   inline thread_local bool valid = true;
   inline thread_local uint32_t layoutRemaining = 0, layoutVerified = 0, layoutMismatches = 0;

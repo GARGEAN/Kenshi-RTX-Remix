@@ -3,8 +3,8 @@
 #include "util_kenshi_terrain_profile.h"
 
 namespace dxvk::city_cpu {
-  // V716: process-local comparison controls. No persistent configuration or
-  // renderer layout changes. Baseline leases expire if the capture runner exits.
+  // Process-local comparison controls. No persistent configuration or renderer layout changes. Baseline
+  // leases expire if the capture runner exits.
   inline std::atomic<bool> optimized { true };
   inline thread_local uint32_t keyRemaining = 0, keyVerified = 0, keyMismatches = 0;
   inline thread_local bool keyValid = true;

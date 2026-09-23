@@ -610,12 +610,10 @@ struct RtLight {
     m_originalLightRadius = sphereLight.getRadius();
   }
 
-  // DX11_V765_KENSHI_LIGHT_GC. Same two fields, but with a radius the caller
-  // supplies rather than the fixed lightConversionSphereLightFixedRadius one.
-  // Adds no members: this writes the existing anti-culling union, so RtLight's
-  // 264-byte size check is unaffected. NOTE that RtLight::copyFrom only copies
-  // that union when m_anticullingType is GameLight, so a caller using this MUST
-  // also add the light as GameLight or the radius is dropped on the first copy.
+  // Same two fields, with a caller-supplied radius instead of lightConversionSphereLightFixedRadius.
+  // Adds no members (writes the existing anti-culling union; RtLight stays 264 bytes).
+  // RtLight::copyFrom only copies that union for GameLight, so a caller using this must add the light as
+  // GameLight or the radius is dropped on the first copy.
   void cacheLightReplacementAntiCullingProperties(const Vector3& position, const float radius) const {
     m_originalPosition = position;
     m_originalLightRadius = radius;

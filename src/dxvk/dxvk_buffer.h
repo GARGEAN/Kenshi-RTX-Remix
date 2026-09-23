@@ -94,17 +94,9 @@ namespace dxvk {
       std::string  name;
     };
 
-    // DX11_V614_FREED_RANGE_RING: `remove()` used to erase the entry outright,
-    // so a fault inside a freed range could only ever be reported as "below
-    // every tracked allocation - freed, or not reached through a device
-    // address". That sentence has ended every use-after-free investigation in
-    // this project since 2026-08-11; the address band it covers is real and
-    // recurring and has never been attributed to a resource.
-    //
-    // Keeping the last kFreedHistory removals lets describe() name the object
-    // and say how long ago it died. Bounded, only allocated once tracking is
-    // enabled (i.e. only with VK_EXT_device_fault), and read exclusively from
-    // the fault path.
+    // Keep the last kFreedHistory removals so describe() can name the object a fault address falls in and
+    // say how long ago it was freed. Bounded, only allocated when tracking is enabled (VK_EXT_device_fault),
+    // and read only from the fault path.
     struct FreedEntry {
       VkDeviceAddress base   = 0;
       VkDeviceSize    size   = 0;

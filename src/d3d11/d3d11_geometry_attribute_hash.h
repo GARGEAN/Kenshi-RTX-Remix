@@ -30,8 +30,8 @@ namespace dxvk {
     for (uint32_t done = 0; done < count;) {
       const uint32_t n = std::min(perChunk, count - done);
       const uint8_t* bytes = source + uint64_t(done) * stride;
-      // V686: contiguous streams already contain precisely the bytes to hash.
-      // Preserve chunk boundaries and the seeded chain so identities stay exact.
+      // Contiguous streams already hold exactly the bytes to hash. Preserve chunk boundaries and the
+      // seeded chain so identities stay exact.
       if (stride != elementBytes) {
         // Constant sizes avoid one out-of-line memcpy per interleaved element.
         switch (elementBytes) {

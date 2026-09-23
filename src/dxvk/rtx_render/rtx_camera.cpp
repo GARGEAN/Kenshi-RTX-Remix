@@ -573,12 +573,9 @@ namespace dxvk
       m_frustum.calculateFrustumGeometry(nearPlane, farPlane, fov, aspectRatio, isLHS);
     }
 
-    // DX11_V765_KENSHI_LIGHT_GC: built every frame now, not only when stock
-    // light anti-culling is on. LightManager::kenshiLightSweep tests each held
-    // Kenshi light's own volume against this frustum, and it has to be valid on
-    // the frame an option is toggled rather than one frame later. Costs one 4x4
-    // multiply and a Setup; nothing else reads this frustum while
-    // rtx.antiCulling.light.enable is false.
+    // Built every frame, not only when stock light anti-culling is on: LightManager::kenshiLightSweep tests
+    // each held Kenshi light's volume against this frustum, and it must be valid on the frame an option is
+    // toggled. Costs one 4x4 multiply and a Setup.
     {
       const float fovScale = RtxOptions::AntiCulling::Light::fovScale();
       const float scaledHalfFov = std::min(fov * fovScale * 0.5f, 1.55f); // Clamp to half fov to 89 degrees

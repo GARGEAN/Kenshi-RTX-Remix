@@ -33,14 +33,18 @@ After a crash, a file named `remix-dx11-crash-<number>.dmp` is written to `%TEMP
 
 ## Building from source
 
-Requires Visual Studio 2022 with the C++ desktop development workload. In PowerShell, from the repository folder:
+Requires Visual Studio 2022 with the C++ desktop development workload and Python on `PATH`. In PowerShell, from the repository folder:
 
 ```powershell
 $env:Path = "C:\Program Files (x86)\Microsoft Visual Studio\Installer;$env:Path"
 .\Build-X64ReleaseNow.ps1
 ```
 
-The script ends with exit code 1 even when the build succeeds; success is indicated by the line `DONE. Output folder`. Copy `_Comp64Release\src\d3d11\d3d11.dll` and `_Comp64Release\src\dxgi\dxgi.dll` over the same files of an existing installation. Both files must come from the same build.
+Success is indicated by the line `DONE. Output folder`. Copy `_Comp64Release\src\d3d11\d3d11.dll` and `_Comp64Release\src\dxgi\dxgi.dll` over the same files of an existing installation. Both files must come from the same build.
+
+The build downloads the DLSS Frame Generation 310.6.0 runtime directly from a pinned NVIDIA commit and verifies its SHA-256. Only `nvngx_dlssg.dll` is downloaded, into the ignored `external/dlss_fg_runtime/` directory; the separate Packman DLFG SDK supplies the headers. `-NoDepsFetch` requires the verified runtime to be present already. Installation includes it in `_output/x64/`.
+
+`package_release.ps1` stages `_output/x64/` by default and checks the FG DLL before packaging. A missing or incorrect runtime stops packaging instead of creating an incomplete archive.
 
 ## Credits and licenses
 

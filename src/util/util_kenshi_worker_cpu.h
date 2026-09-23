@@ -3,7 +3,7 @@
 #include "util_kenshi_terrain_profile.h"
 
 namespace dxvk::worker_cpu {
-  // V719: ordered main-lane control; normal launch parks idle geometry workers.
+  // Ordered main-lane control; a normal launch parks idle geometry workers.
   inline bool waiting = true;
 #ifndef KENSHI_PROFILE_TEST
   inline void poll() {

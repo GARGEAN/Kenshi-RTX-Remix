@@ -1003,9 +1003,9 @@ namespace dxvk {
     const uint32_t frame = m_device->getCurrentFrameId();
     const uint32_t count = m_textureCache.getTotalCount();
     uint32_t released = 0, scanned = 0, terrainReleased = 0;
-    // Caller has marked ALL retained instances, not just this frame's draws.
-    // Age also covers prior-scene history. Exact published views remain owned
-    // by V663's commands until completion; old descriptor sets are not edited.
+    // Caller has marked all retained instances, not just this frame's draws. Age also covers prior-scene
+    // history. Exact published views remain owned by their commands until completion; old descriptor sets
+    // are not edited.
     for (uint32_t work = 0; work < std::min(count, 1024u) && released < 32u; ++work) {
       if (work && (work % 8u == 0u) && std::chrono::steady_clock::now() >= deadline) break;
       ++scanned;

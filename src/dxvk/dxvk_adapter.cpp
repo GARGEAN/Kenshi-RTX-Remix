@@ -429,7 +429,7 @@ namespace dxvk {
 
     // NV-DXVK start: Integrate Aftermath extensions
     kenshi_fault::initialize();
-    // V717: coarse fault checkpoints do not require shader-debug generation.
+    // Coarse fault checkpoints do not require shader-debug generation.
     { DxvkExt* checkpointExtensions[]={&devExtensions.nvDeviceDiagnosticCheckpoints};
       m_deviceExtensions.enableExtensions(1,checkpointExtensions,extensionsEnabled); }
     if (instance->options().enableAftermath) {

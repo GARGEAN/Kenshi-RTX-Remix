@@ -45,67 +45,47 @@ static const uint8_t surfaceMaterialTypeMask = uint8_t(0x3u);
 #define OPAQUE_SURFACE_MATERIAL_FLAG_IS_RAYTRACED_RENDER_TARGET (1 << COMMON_MATERIAL_FLAG_TYPE_OFFSET(3))
 #define OPAQUE_SURFACE_MATERIAL_FLAG_HAS_DISPLACEMENT (1 << COMMON_MATERIAL_FLAG_TYPE_OFFSET(4))
 #define OPAQUE_SURFACE_MATERIAL_FLAG_USE_SECONDARY_TEXTURE_FOR_OPACITY (1 << COMMON_MATERIAL_FLAG_TYPE_OFFSET(5))
-// DX11_V396_KENSHI_TERRAIN: multiply the albedo by the secondary texture sampled
-// at the terrain detail coordinate (see KenshiTerrainArgs). `flags` is a
-// uint16_t on both sides and this is bit 8, so it is the first of the free half.
+// Multiply the albedo by the secondary texture sampled at the terrain detail coordinate
+// (see KenshiTerrainArgs).
 #define OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_TERRAIN_BLEND (1 << COMMON_MATERIAL_FLAG_TYPE_OFFSET(6))
 // Kenshi's character composite stores body and head colour in separate atlases.
 #define OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_CHARACTER_HEAD (1 << COMMON_MATERIAL_FLAG_TYPE_OFFSET(7))
-// DX11_V490_KENSHI_NORMAL_ENCODING: which encoding this material's normal map
-// uses. Remix's own normal maps are OCTAHEDRAL - its asset pipeline produces
-// them that way - and that decode applies a 45 degree rotation plus a linear z
-// reconstruction. A game texture is not encoded that way, so decoding one as
-// octahedral rotates every perturbation by 45 degrees. It still maps flat to
-// flat, which is why it looks like working relief while pointing the wrong way.
-// NEITHER flag set = octahedral, so USD replacements are untouched.
+// Which encoding this material's normal map uses. Remix's own normal maps are octahedral (its asset
+// pipeline produces them), and decoding a game texture that way rotates every perturbation by 45
+// degrees while still mapping flat to flat. Neither flag set = octahedral, so USD replacements are
+// untouched.
 #define OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_NORMAL_RGB (1 << COMMON_MATERIAL_FLAG_TYPE_OFFSET(9))
-// Kenshi's DXT5nm variant: X in alpha, Y in green, Z reconstructed. Defined by
-// creature.material alone.
+// Kenshi's DXT5nm variant: X in alpha, Y in green, Z reconstructed.
 #define OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_NORMAL_DXT5NM (1 << COMMON_MATERIAL_FLAG_TYPE_OFFSET(10))
-// DX11_V533_KENSHI_OBJECT_GLOSS: this material's diffuse texture carries Kenshi's
-// GLOSS in its alpha channel, scaled by the shader's `glossMult`. Set only where
-// the pixel shader actually declares that constant, which is what proves the
-// alpha is gloss rather than coverage. The multiplier itself rides in
-// roughnessConstant, whose ordinary meaning is dead once this flag is set.
+// The diffuse texture's alpha is Kenshi's gloss, scaled by glossMult. Set only where the pixel
+// shader declares glossMult, which proves the alpha is gloss rather than coverage. The multiplier
+// rides in roughnessConstant.
 #define OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_GLOSS_IN_ALPHA (1 << COMMON_MATERIAL_FLAG_TYPE_OFFSET(11))
-// DX11_V550_KENSHI_DUAL_TEXTURE_SET: this material's pixel shader carries TWO
-// complete texture sets and blends between them with the vertex colour's alpha:
+// The pixel shader blends two complete texture sets by vertex-colour alpha:
 //   albedo = lerp(diffuseMap2, base_map, COLOR0.a)
-// Ten of Kenshi's pixel shaders do this (`diffuseMap2`/`normalMap2`/`metalMap2`,
-// or `base_map2`/... under the other naming). The second albedo rides in
-// secondaryTextureIndex, which no material setting this flag uses for anything
-// else - terrain and the character head multiplex the same field the same way.
-// Offset 8 was the one gap left in the flag range.
+// (diffuseMap2/normalMap2/metalMap2, or base_map2/... naming). The second albedo rides in
+// secondaryTextureIndex, which no material with this flag uses otherwise.
 #define OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_DUAL_TEXTURE_SET (1 << COMMON_MATERIAL_FLAG_TYPE_OFFSET(8))
-// DX11_V552_KENSHI_COLOR_MASK: Kenshi's two-colour recolour, the mechanism
-// behind faction-tinted armour and equipment. A two-channel mask texture picks
-// where each of two authored colours is applied, and each colour carries a
-// weight that decides how much of the source texture's luminance survives:
+// Kenshi's two-colour recolour (faction-tinted armour and equipment). A two-channel mask picks
+// where each authored colour applies; each colour's weight sets how much source luminance survives:
 //   lum   = dot(albedo, 1)/3
 //   w1    = lerp(lum, 1, color1.a);  layer = lerp(albedo, color1.rgb*w1, mask.r)
 //   w2    = lerp(lum, 1, color2.a);  albedo = lerp(layer, color2.rgb*w2, mask.g)
-//   metalness = mask.b            (these materials bind no metal_map at all)
-// The mask rides in secondaryTextureIndex, color1 in albedoOpacityConstant and
-// color2 in emissiveColorConstant + emissiveIntensity - all dead on a textured,
-// non-emissive material, and emission is forced off when this flag is set.
+//   metalness = mask.b            (these materials bind no metal_map)
+// Mask in secondaryTextureIndex, color1 in albedoOpacityConstant, color2 in emissiveColorConstant
+// + emissiveIntensity (dead on a textured non-emissive material; emission is forced off).
 #define OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_COLOR_MASK (1 << COMMON_MATERIAL_FLAG_TYPE_OFFSET(12))
-// DX11_V554_KENSHI_CHARACTER_VEST: the worn-clothing layer of Kenshi's
-// character composite - what makes a body's texture change with what it wears.
+// Worn-clothing layer of the character composite:
 //   vestLum  = dot(vest.rgb, 1)/3
 //   clothing = lerp(vest.rgb, colour.rgb * vestLum, mask.r)
 //   albedo   = lerp(skinComposite, clothing, vestNormal.a)
-// vestNormal.a is a per-texel COVERAGE mask, so clothing and skin share one
-// mesh and one draw. Rides in three indices a character material never uses -
-// vest diffuse in metallicTextureIndex, vest normal in roughnessTextureIndex,
-// the recolour mask in emissiveColorTextureIndex - and the clothing colour in
-// albedoOpacityConstant, dead on any textured material.
+// vestNormal.a is a per-texel coverage mask (clothing and skin share one mesh and draw). Vest
+// diffuse in metallicTextureIndex, vest normal in roughnessTextureIndex, recolour mask in
+// emissiveColorTextureIndex, clothing colour in albedoOpacityConstant.
 #define OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_CHARACTER_VEST (1 << COMMON_MATERIAL_FLAG_TYPE_OFFSET(13))
-// DX11_V760/V761: an under-construction building is marked on the SURFACE
-// (RtSurface flags0 bit 5), not here. `flags` is a uint16 and
-// COMMON_MATERIAL_FLAG_TYPE_OFFSET adds 2, so offsets 0-13 occupy bits 2-15 and
-// this field is FULL. V760 defined offset 14 - bit 16 - which no compiler and no
-// assert objected to and which simply never reached the GPU, so the shader never
-// took the branch. Do not add another flag here without widening the field.
+// This flag field is FULL: `flags` is a uint16 and COMMON_MATERIAL_FLAG_TYPE_OFFSET adds 2, so
+// offsets 0-13 occupy bits 2-15. A 15th flag compiles but never reaches the GPU. Per-draw markers
+// (e.g. under-construction buildings) go in RtSurface flags0 instead.
 
 
 #define OPAQUE_SURFACE_MATERIAL_INTERACTION_FLAG_HAS_HEIGHT_TEXTURE (1 << 0)

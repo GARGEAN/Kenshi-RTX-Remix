@@ -36,7 +36,7 @@ namespace dxvk {
   namespace {
     struct PublishedBufferOwners {
       std::vector<Rc<DxvkBuffer>> buffers;
-      // V663: keep the exact view published, not a mutable TextureRef/mip selection.
+      // Keep the exact view published, not a mutable TextureRef/mip selection.
       std::vector<Rc<DxvkImageView>> imageViews;
       std::unordered_set<const DxvkCommandList*> commands;
     };

@@ -1,5 +1,5 @@
-// V715: included inside dxvk. Cache only Legacy -> Opaque conversion; all
-// replacement selection, character extensions and per-instance blood stay live.
+// Included inside namespace dxvk. Caches only the Legacy -> Opaque conversion; replacement selection,
+// character extensions and per-instance blood stay live.
 namespace opaque_preparation {
   using prepared_terrain::Key;
   static void vectorKey(Key& k, const Vector3& v) { k.add(v.x); k.add(v.y); k.add(v.z); }

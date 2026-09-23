@@ -287,11 +287,9 @@ namespace dxvk {
   void RtxGeometryUtils::dispatchSkinning(const Rc<DxvkContext>& ctx,
                                           const DrawCallState& drawCallState,
                                           const RaytraceGeometry& geo) {
-    // V731: use the geometry producer/consumer context. The separate skinning
-    // list was submitted after the main list, allowing that list's BLAS builds
-    // and ray tracing to consume vertices before skinning wrote them. Incidental
-    // flushes changed which draws were affected. A shared context also carries
-    // the interleave -> skinning -> acceleration-build resource barriers.
+    // Use the geometry producer/consumer context. A separate skinning list submitted after the main list
+    // let BLAS builds and ray tracing consume vertices before skinning wrote them. A shared context also
+    // carries the interleave -> skinning -> acceleration-build resource barriers.
 
     ScopedGpuProfileZone(ctx, "performSkinning");
 
@@ -735,13 +733,8 @@ namespace dxvk {
     if (input.isTopologyRaytraceReady()) {
       ctx->copyBuffer(output.indexCacheBuffer, 0, input.indexBuffer.buffer(), input.indexBuffer.offset() + input.indexBuffer.offsetFromSlice(), input.indexCount * input.indexBuffer.stride());
     } else {
-      // DX11_V329_UNVALIDATED_INDEX_RANGE: report how much geometry is reaching
-      // RT with an index range the submitter could not verify. A single-run
-      // visual result is not evidence in this project; this counter is what
-      // says whether the clamping path actually engaged. Logged on the first
-      // occurrence and then every 1024, so it neither floods nor goes
-      // permanently silent after startup (bounded logs in this bridge have
-      // produced misleading negatives repeatedly).
+      // Report how much geometry reaches RT with an index range the submitter could not verify, so it is
+      // known whether the clamping path engaged. Logged on the first occurrence and then every 1024.
       if (kenshi_telemetry::enabled() && input.indexRangeUnvalidated) {
         static uint32_t sUnvalidatedIndexBuilds = 0;
         const uint32_t n = ++sUnvalidatedIndexBuilds;
@@ -812,12 +805,9 @@ namespace dxvk {
   void RtxGeometryUtils::dispatchGenTriList(const Rc<DxvkContext>& ctx, const GenTriListArgs& cb, const DxvkBufferSlice& dstSlice, const RasterBuffer* srcBuffer, const RasterBuffer* kenshiPartBuffer) const {
     ScopedGpuProfileZone(ctx, "generateTriangleList");
     constexpr uint32_t kNumTrianglesToProcessOnCPU = 512;
-    // DX11_V329_UNVALIDATED_INDEX_RANGE: the CPU path dereferences
-    // srcBuffer->mapPtr() unconditionally, which is NULL for a device-local
-    // index buffer. That was unreachable while only strip/fan geometry came
-    // through here; unvalidated triangle lists now do too, and Kenshi's index
-    // buffers are all device-local. Small meshes (primCount <= 512) would have
-    // taken the CPU path and dereferenced null. Require a real mapping.
+    // The CPU path dereferences srcBuffer->mapPtr() unconditionally, which is null for a device-local
+    // index buffer (all of Kenshi's are, and unvalidated triangle lists come through here). Require a real
+    // mapping.
     const bool srcUnmappable = (srcBuffer != nullptr) && (srcBuffer->mapPtr() == nullptr);
     const bool useGPU = (cb.useUint32 != 0)
       || ((srcBuffer != nullptr) && (srcBuffer->isPendingGpuWrite()))
@@ -1136,20 +1126,10 @@ namespace dxvk {
       offset += sizeof(float) * 2;
     }
 
-    // DX11_V549: the format check has to be the SAME one the interleave pass
-    // makes, or the two disagree about whether this vertex has a colour.
-    //
-    // interleaveGeometry clears its local `hasColor0` when
-    // formatConversionUintSupported says no, and then never writes the colour
-    // word - but this function reserved the slot and set output.hasColor0
-    // regardless, so the surface was told there was a colour at color0Offset
-    // and read whatever the interleaved buffer happened to contain. That is
-    // uninitialised memory, which reads as bright per-vertex noise rather than
-    // as the "no vertex colour" the skip intended.
-    //
-    // Latent since the format check was added; it only became visible when a
-    // game turned up whose colour format was declined (Kenshi's RGBA8, V548).
-    // A declined format must mean NO colour, never garbage colour.
+    // Use the same format check as the interleave pass, or the two disagree about whether this vertex has
+    // a colour: interleaveGeometry skips the colour word for an unsupported format, and if the slot were
+    // still reserved here the surface would read uninitialised memory as vertex colour. A declined format
+    // must mean no colour.
     if (input.color0Buffer.defined()
      && interleaver::formatConversionUintSupported(input.color0Buffer.vertexFormat())) {
       output.hasColor0 = true;

@@ -1,4 +1,4 @@
-// Included inside namespace dxvk. V786: cuts from applied native operations.
+// Included inside namespace dxvk. Detects camera cuts from applied native operations.
 namespace native_camera_audit {
 using namespace kenshi_camera_audit;
 using Binary = void (__fastcall*)(void*, const void*);

@@ -1,8 +1,8 @@
 #include "util_kenshi_telemetry.h"
 #pragma once
 
-// V717: bounded, process-local flight recorder. No GPU resource ownership or
-// fence queries. A disabled recorder does not take a lock or read a clock.
+// Bounded, process-local flight recorder. No GPU resource ownership or fence queries. A disabled
+// recorder does not take a lock or read a clock.
 #include <array>
 #include <atomic>
 #include <mutex>
@@ -15,7 +15,7 @@
 namespace dxvk::kenshi_fault {
   enum Kind : uint64_t { Frame=1, Submit, Complete, Batch, CameraCut, SceneReset,
     OmmReset, Memory, Checkpoint, QueueCheckpoint, DeviceLost, Control };
-  // Append pass IDs: preserved V717 reports must retain their original meaning.
+  // Append pass IDs only: preserved reports must keep their original meaning.
   enum Pass : uint64_t { Blas=1, Tlas, PathTrace, Demodulate, Denoise, Composite, Upscale,
     Gbuffer=8, Rtxdi, NeeCache, IntegrateDirect, RtxdiGradient, IntegrateIndirect, IntegrateNee };
   struct Record { uint64_t serial, tick, kind, frame, a, b, c, d; };

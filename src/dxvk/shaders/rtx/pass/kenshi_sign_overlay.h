@@ -1,7 +1,7 @@
 #pragma once
 #include "rtx/utility/shader_types.h"
 
-// V792. Private pass arguments; no shared scene/material layout changes.
+// Private pass arguments; no shared scene/material layout changes.
 struct KenshiSignOverlayArgs {
   uint2 outputExtent;
   uint2 signExtent;

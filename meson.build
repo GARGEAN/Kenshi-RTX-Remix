@@ -61,6 +61,14 @@ fetch_packman_target = custom_target('fetch_packman',
 cpu_family = target_machine.cpu_family()
 build_os = build_machine.system()
 
+if cpu_family == 'x86_64'
+  fg_runtime_script = join_paths(global_src_root_norm, 'scripts-common/ensure-fg-runtime.ps1')
+  fg_runtime_args = get_option('skip_packman_fetch') ? ['-VerifyOnly'] : []
+  fg_runtime_check = run_command('powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+    '-File', fg_runtime_script, fg_runtime_args, check: true)
+  message(fg_runtime_check.stdout().strip())
+endif
+
 if cpu_family == 'x86'
   message('Configuring 32-bit x86 target. Output will be installed under _output/x86.')
 endif
@@ -865,11 +873,10 @@ if dxvk_is_ninja
       install_data(join_paths(dlss_lib_path, 'nvngx_dlssd.dll'), install_dir : output_path, install_tag: target_suffix)
     endif 
 
-    # Use NVIDIA's public 310.6.0 runtime while keeping DLFG headers from the
-    # Remix DLFG package, because the public SDK does not ship those headers.
-    if fs.exists(join_paths(dlss_lib_path, 'nvngx_dlssg.dll'))
-      install_data(join_paths(dlss_lib_path, 'nvngx_dlssg.dll'), install_dir : output_path, install_tag: target_suffix)
-    endif 
+    if cpu_family == 'x86_64'
+      install_data(join_paths(global_src_root_norm, 'external/dlss_fg_runtime/nvngx_dlssg.dll'),
+        install_dir : output_path, install_tag: target_suffix)
+    endif
 
     if fs.exists(join_paths(reflex_lib_path, 'NvLowLatencyVk.dll'))
       install_data(join_paths(reflex_lib_path, 'NvLowLatencyVk.dll'), install_dir : output_path, install_tag: target_suffix)

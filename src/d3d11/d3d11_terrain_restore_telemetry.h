@@ -10,7 +10,7 @@
 
 namespace dxvk { class DxvkContext; }
 
-// V691: per-context restoration barriers; the V690 count model remains as an oracle.
+// Per-context restoration barriers; the older count model remains as an oracle.
 namespace dxvk::terrain_restore {
   bool diagnosticsEnabled();
   std::vector<uint8_t> snapshotNativeState(DxvkContext* context);
@@ -127,8 +127,8 @@ namespace dxvk::terrain_restore {
   using VerifyFn = void (*)(const void*, VerificationBoundary);
   struct Mode { bool defer, verify; };
   inline Mode selectMode(const std::string& value) {
-    // V696: normal launches retain terrain deferral without the expensive oracle.
-    // Eager controls and verification remain explicit diagnostic launch modes.
+    // Normal launches keep terrain deferral without the expensive oracle. Eager controls and verification
+    // remain explicit diagnostic launch modes.
     return { value.empty() || value == "1" || value == "verify" || value == "defer-verify",
              value == "eager-verify" || value == "verify" || value == "defer-verify" };
   }

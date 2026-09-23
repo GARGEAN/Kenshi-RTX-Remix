@@ -64,10 +64,9 @@ void main(uint2 pixel : SV_DispatchThreadID) {
   }
   if (visibility == 0.0) return;
   float4 color = Output[pixel];
-  // V793: only the exact (1, 0.9, 0.4, 0.6) SignHighlight material enters
-  // this pass. The capture supplies coverage and its native 0.9..1 shading;
-  // state the authored colour and opacity explicitly at final composition.
-  // Preserve 40% of the displayed sign's contrast even at full visibility.
+  // Only the exact (1, 0.9, 0.4, 0.6) SignHighlight material enters this pass. The capture supplies
+  // coverage and its native 0.9..1 shading; state the authored colour and opacity explicitly at final
+  // composition, keeping 40% of the displayed sign's contrast even at full visibility.
   float shade = clamp(overlay.r, 0.9, 1.0);
   float3 yellow = float3(1.0, 0.9, 0.4) * shade;
   float3 displayColor = cb.outputIsGammaEncoded != 0 ? color.rgb : linearToGamma(max(color.rgb, 0.0));

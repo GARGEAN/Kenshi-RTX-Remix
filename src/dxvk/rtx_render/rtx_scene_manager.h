@@ -71,15 +71,12 @@ public:
 protected:
   BufferRefTable<RaytraceBuffer> m_bufferCache;
 
-  // DX11_V398_KENSHI_TERRAIN_PER_MATERIAL: every distinct terrain parameter set
-  // in the scene, content-addressed so a set keeps its index across frames and
-  // a cached surface material can store it. See setKenshiTerrainArgs.
+  // Every distinct terrain parameter set in the scene, content-addressed so a set keeps its index across
+  // frames and a cached surface material can store it. See setKenshiTerrainArgs.
   std::vector<KenshiTerrainArgs> m_kenshiTerrainArgs;
 
-  // DX11_V525. Kenshi's ground blood decals for this frame. Global rather than
-  // per-surface: a terrain chunk can carry several, and the raster pass draws one
-  // per (chunk x splat), so associating each draw with a chunk buys nothing the
-  // hit shader's rect test does not already do.
+  // Kenshi's ground blood decals for this frame. Global rather than per surface: a terrain chunk can
+  // carry several, and the hit shader's rect test does the association.
   struct KenshiTerrainBloodDecal {
     Vector4 rect;              // originX, originZ, 1/sizeX, 1/sizeZ
     TextureRef texture;
@@ -179,50 +176,36 @@ public:
   Rc<DxvkBuffer> getBillboardsBuffer() const { return m_accelManager.getBillboardsBuffer(); }
   bool isPreviousFrameSceneAvailable() const { return m_previousFrameSceneAvailable && getSurfaceMappingBuffer().ptr() != nullptr; }
 
-  // DX11_V330_CENSUS_ON_DEMAND: arm the VRAM/scene census for the next `frames`
-  // frame ends. The census reports the only numbers that say what the RT scene
-  // actually CONTAINS (instances, geoEntries, frameBuffers, asMiB), and its
-  // periodic schedule spends itself during loading and then goes quiet for
-  // ~18000 frames - so every sample ever taken has come from the load, never
-  // from the gameplay frame being looked at. Driven from the D3D11 bridge's
-  // Ctrl+Alt+O hotkey so a run of consecutive frames is recorded around the
-  // chosen moment; a run rather than one frame because the question is
-  // frame-to-frame churn, which a single sample cannot show.
-  //
-  // Static (no instance needed, adds no data member) and backed by an atomic
-  // counter, so the bridge can arm it from the submit thread without reaching
-  // through a SceneManager it does not own.
+  // Arm the VRAM/scene census for the next `frames` frame ends, from the D3D11 bridge's Ctrl+Alt+O
+  // hotkey, so consecutive frames around a chosen moment are recorded (frame-to-frame churn needs a
+  // run). Static and atomic-backed, so the bridge can arm it from the submit thread and it adds no data
+  // member.
   static void requestVramCensus(uint32_t frames);
 
-  // DX11_V335_REPRESENTATION_SWITCH: pushed from the D3D11 bridge each frame -
-  // how many draws reached the RT scene without a position capture, and so
-  // carry a different geometry representation than on frames where the capture
-  // succeeded. Reported on the census line beside the stable counters.
+  // Pushed from the D3D11 bridge each frame: how many draws reached the RT scene without a position
+  // capture (a different geometry representation than on frames where capture succeeded). Reported on
+  // the census line.
   static void reportSubmitWithoutCapture(uint32_t count);
 
-  // DX11_V337_STALE_REUSE: draws served from an earlier frame's captured bytes.
+  // Draws served from an earlier frame's captured bytes.
   static void reportStaleCaptureReuse(uint32_t count);
 
-  // DX11_V338_STALE_SHAPE: mean/max age in frames of reused capture bytes, and
-  // the number of draws truncated to fit a shorter older capture.
+  // Mean/max age in frames of reused capture bytes, and the number of draws truncated to fit a shorter
+  // older capture.
   static void reportStaleCaptureShape(uint32_t ageSum, uint32_t ageMax, uint32_t clamped);
 
-  // DX11_V343_CAPTURE_GATE: per-frame capture outcome. The unstable geometry
-  // blinks as a CLASS and in sync, which is a frame-level gate; these counters
-  // exist only in the submit summary, which prints every few seconds and so can
-  // never show whether a single frame's captures collectively failed.
+  // Per-frame capture outcome, so a frame whose captures collectively failed is visible (the submit
+  // summary only prints every few seconds).
   static void reportCaptureStats(uint32_t attempts, uint32_t captured,
                                  uint32_t budgetRejected, uint32_t failed);
 
-  // DX11_V349_INJECT_GATE: 0 = RTX injected, 1 = no real scene draw preceded
-  // the UI draw, 2 = UI target was not the full output, 3 = both, 4 = the UI
-  // path was never reached. Non-zero means the frame reached the screen as
+  // 0 = RTX injected, 1 = no real scene draw preceded the UI draw, 2 = UI target was not the full
+  // output, 3 = both, 4 = the UI path was never reached. Non-zero means the frame reached the screen as
   // pure game raster.
   static void reportInjectSkipReason(uint32_t reason);
 
-  // DX11_V350_DRAW_TRACE: arm per-draw scene-side tracing for `frames` frames.
-  // Emits the cache decision the D3D11 bridge cannot see, keyed by drawCallID
-  // so the two halves join into one row per draw per frame.
+  // Arm per-draw scene-side tracing for `frames` frames: the cache decision the D3D11 bridge cannot see,
+  // keyed by drawCallID so both halves join into one row per draw per frame.
   static void requestDrawTrace(uint32_t frames);
 
   const std::vector<Rc<DxvkSampler>>& getSamplerTable() const { return m_samplerCache.getObjectTable(); }
@@ -232,14 +215,11 @@ public:
     LegacyMaterialData& materialData,
     const std::array<TextureRef, LegacyMaterialData::kKenshiTerrainLayerCount>& normalTextures,
     const Vector4& textureFade);
-  // DX11_V528: the neighbouring biome sets for one boundary material, keyed by
-  // their own content so two tiles that meet the same biomes share one entry.
-  // DX11_V540: the game's weather wetness and water level, published by
-  // whichever draw last declared them. Global by nature, so a static pair
-  // rather than anything per-material - the same shape as the terrain normal
-  // side table above.
-  // DX11_V591: Kenshi's water constants, same last-draw-wins transport as
-  // wetness. One water material exists in the game; its values are per-zone.
+  // Neighbouring biome sets for one boundary material, keyed by their own content so two tiles that meet
+  // the same biomes share one entry.
+  // The game's weather wetness and water level, published by whichever draw last declared them (global,
+  // so a static pair).
+  // Kenshi's water constants, same last-draw-wins transport; values are per zone.
   struct KenshiWaterParams {
     float tileScaleX = 0.0f;
     float tileScaleY = 0.0f;
@@ -261,29 +241,20 @@ public:
     float invOpacity = 0.0f;
     float glow = 0.0f;
   };
-  // DX11_V636_KENSHI_INTERIOR_CLIP: the building-interior mask shell that is
-  // active right now, published by the two InteriorMask compositor draws that
-  // SubmitDraw rejects. Same last-draw-wins static transport as the water
-  // params below, because it is global by nature - at most a handful of shells
-  // are active and only while a character is inside.
-  //
-  // The shell's OBJECT-space bounds and the raw worldViewProjMatrix Kenshi fed
-  // its vertex shader are carried separately: the D3D11 layer must not run
-  // ExtractTransforms on these draws (they would claim the same-frame OGRE
-  // camera and force the whole interior to raster - chapter 03), so the world
-  // placement is reconstructed later, in RtxContext, where a resolved camera
-  // exists to divide the view-projection back out.
+  // The building-interior mask shell active right now, published by the two InteriorMask compositor
+  // draws SubmitDraw rejects. Global by nature (a handful of shells, only while a character is inside),
+  // so a static transport like the water params. The D3D11 layer must not run ExtractTransforms on these
+  // draws (they would claim the same-frame OGRE camera and force the interior to raster), so the shell's
+  // object-space bounds and raw worldViewProjMatrix are carried and the placement resolved separately.
   struct KenshiInteriorVolume {
     float objMin[3] = { 0.0f, 0.0f, 0.0f };
     float objMax[3] = { 0.0f, 0.0f, 0.0f };
-    // V642: the RESOLVED placement, not the raw WVP. The D3D11 layer now divides
-    // out Kenshi's own view-projection from the same frame, so what arrives here
-    // is already a world transform and depends on no camera at all. Buildings are
-    // static, so once resolved this matrix is correct indefinitely - which is
-    // what stops the cull volume drifting when the camera moves.
+    // The resolved placement, not the raw WVP: the D3D11 layer divides out Kenshi's own same-frame
+    // view-projection, so this is a world transform that depends on no camera. Buildings are static, so it
+    // stays correct and the cull volume does not drift.
     Matrix4 objectToWorld;
-    // V650: the shell's own triangles, binned. This IS the cull volume; the box
-    // below is only a broad-phase reject.
+    // The shell's own triangles, binned. This is the cull volume; the box below is only a broad-phase
+    // reject.
     std::shared_ptr<const std::vector<uint32_t>> blob;
     // Kept only as part of the instance identity, never used to place anything.
     Matrix4 worldViewProj;
@@ -291,20 +262,18 @@ public:
     uint32_t vertexCount = 0u;
     bool valid = false;
   };
-  // V638: a LIST, not one. Kenshi renders an interior for every building that
-  // has a character inside it, and V637 measured two shells alternating frame to
-  // frame in one town. Entries accumulate for a frame and the set is replaced
-  // whenever a draw arrives stamped with a newer frame.
+  // A list: Kenshi renders an interior for every building with a character inside, and several can be
+  // active in one town. Entries accumulate for a frame; the set is replaced when a draw arrives stamped
+  // with a newer frame.
   static void registerKenshiInteriorVolume(const KenshiInteriorVolume& volume);
   static std::vector<KenshiInteriorVolume> getKenshiInteriorVolumes();
-  // Explicit deactivation, so a building stops being culled the frame its shell
-  // stops being drawn. V641 relied on frame-staleness for this, which forced a
-  // slack window that in turn let a stale camera place the box.
+  // Explicit deactivation, so a building stops being culled on the frame its shell stops being drawn (a
+  // staleness window would let a stale camera place the box).
   static void clearKenshiInteriorVolumes();
 
-  // V650: assemble the active shells into the buffer the hit shader reads, and
-  // report how many were accepted. Never returns null - the shader declares the
-  // binding unconditionally and a null descriptor faults the driver on submit.
+  // Assemble the active shells into the buffer the hit shader reads and report how many were accepted.
+  // Never returns null: the shader declares the binding unconditionally and a null descriptor faults the
+  // driver on submit.
   Rc<DxvkBuffer> getKenshiInteriorBuffer(Rc<DxvkContext> ctx);
   void buildKenshiInteriorBuffer(Rc<DxvkContext> ctx);
   uint32_t getKenshiInteriorVolumeCount() const { return m_kenshiInteriorVolumeCount; }
@@ -319,28 +288,16 @@ public:
   static void registerKenshiWaterInvOpacity(float invOpacity);
   static void registerKenshiWaterGlow(float glow);
 
-  // DX11_V618_KENSHI_WATER_BIOMES. Replaces V603's rect table.
-  //
-  // Kenshi's water is not divided by rectangles - that was a reconstruction of
-  // something the game publishes directly. `WaterFPBlend` samples a whole-map
-  // 4-channel BLEND MAP at the colour map's own UV and multiplies its alpha by
-  // one channel of it, chosen by the material's `blendChannel` constant
-  // (disassembly of FS_d77f3f48: `dp4 r0.z, blendSample, icb[blendChannel]`,
-  // with `1 - dot(blendSample, 1)` for the unblended base material). So biome
-  // coverage is a continuous function of world position and there are at most
-  // five biomes, addressed by a small integer.
-  //
-  // Keying on that integer instead of on a rect removes, in one change: the
-  // drift of rects stored in the game's moving render frame, the duplicate
-  // entries a drift produced, the first-match-wins staleness, the 64-slot
-  // budget, and the contamination that survived a save load.
+  // Water biomes. `WaterFPBlend` samples a whole-map 4-channel blend map at the colour map's UV and
+  // multiplies its alpha by one channel, chosen by the material's `blendChannel` constant (FS_d77f3f48:
+  // `dp4 r0.z, blendSample, icb[blendChannel]`, with `1 - dot(blendSample, 1)` for the unblended base
+  // material). Coverage is a continuous function of world position and there are at most five biomes,
+  // addressed by that small integer.
   static constexpr uint32_t kKenshiWaterBiomeCount = 5u;
 
-  // DX11_V619: the textures that belong to THIS biome, not to whichever water
-  // draw happened to be submitted last. Scum, rain and turbulence exist only on
-  // the near shaders, and the traced surface is the distant one, so they have to
-  // be harvested per biome and carried in the record - the same shape terrain
-  // uses for its per-layer maps.
+  // The textures that belong to this biome, not to whichever water draw was submitted last. Scum, rain
+  // and turbulence exist only on the near shaders while the traced surface is the distant one, so they
+  // are harvested per biome and carried in the record, as terrain does for its per-layer maps.
   struct KenshiWaterBiomeTextures {
     TextureRef scum = {};
     TextureRef scumNormal = {};
@@ -352,9 +309,8 @@ public:
                                        const KenshiWaterParams& params,
                                        const KenshiWaterBiomeTextures& textures);
 
-  // DX11_V623: the three WHOLE-MAP water textures. They ride the biome buffer's
-  // otherwise-unused header words rather than material slots, so the translucent
-  // water material needs no texture fields of its own.
+  // The three whole-map water textures. They ride the biome buffer's otherwise unused header words
+  // rather than material slots, so the translucent water material needs no texture fields of its own.
   static void registerKenshiWaterGlobalTextures(const TextureRef& colour,
                                                 const TextureRef& flow,
                                                 const TextureRef& blend);
@@ -366,9 +322,8 @@ public:
 
   static void registerKenshiWetness(float wetness, float waterHeight);
   static void getKenshiWetness(float& wetness, float& waterHeight);
-  // DX11_V557/V573: Kenshi's biome dust - colour plus the complete dustAmount
-  // vector. The shader family selects either .x or .y as strength; .z is the
-  // slope bias. Global, same transport as wetness.
+  // Kenshi's biome dust: colour plus the complete dustAmount vector. The shader family selects .x or .y
+  // as strength; .z is the slope bias. Global, same transport as wetness.
   static void registerKenshiDust(const Vector3& colour, float amountX, float amountY, float amountZ);
   static void getKenshiDust(Vector3& colour, float& amountX, float& amountY, float& amountZ);
   static void registerKenshiTerrainBiomeSets(
@@ -381,10 +336,8 @@ public:
   const std::vector<KenshiTerrainArgs>& getKenshiTerrainArgs() const {
     return m_kenshiTerrainArgs;
   }
-  // DX11_V530: packed and uploaded ONCE per frame from prepareSceneData. The
-  // getter is a pure accessor for the twelve per-pass binds - see the V527 rule
-  // that anything reached from bindCommonRayTracingResources must not mutate
-  // per-frame state.
+  // Packed and uploaded once per frame from prepareSceneData. The getter is a pure accessor for the
+  // per-pass binds: anything reached from bindCommonRayTracingResources must not mutate per-frame state.
   void buildKenshiTerrainBuffer(Rc<DxvkContext> ctx);
   void ensureKenshiTerrainBuffer(size_t recordCount);
   // Always a valid buffer with at least one entry, so the binding is never
@@ -519,15 +472,13 @@ private:
   // Updates ref counts for new buffers
   void updateBufferCache(RaytraceGeometry& newGeoData);
 
-  // DX11_V655_BINDLESS_SURFACE_AUDIT. Reports, and optionally repairs, surfaces
-  // whose bindless buffer indices were reserved in an earlier frame. Must be
-  // called during prepareSceneData BEFORE the bindless descriptor table is
-  // published, because the repair reserves new indices.
+  // Reports, and optionally repairs, surfaces whose bindless buffer indices were reserved in an earlier
+  // frame. Must be called during prepareSceneData before the bindless descriptor table is published,
+  // because the repair reserves new indices.
   void auditAndRepairInstanceBufferIndices();
 
-  // DX11_V656_BUFFER_TABLE_AUDIT. Validates the bindless buffer table's ENTRIES
-  // (are the buffers they name still alive?) rather than the indices into it.
-  // Call immediately before the table is published.
+  // Validates the bindless buffer table's entries (are the buffers they name still alive?) rather than
+  // the indices into it. Call immediately before the table is published.
   void auditBufferTableEntries();
 
   // Called whenever a new BLAS scene object is added to the cache

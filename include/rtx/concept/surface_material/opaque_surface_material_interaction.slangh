@@ -543,9 +543,7 @@ void overrideMaterialInteractionForEye(
 
 // Opaque Surface Material Interaction Functions
 
-// DX11_V397_KENSHI_TERRAIN_LAYERS: helpers for Kenshi's ground blend. The
-// composite itself lives in opaqueSurfaceMaterialInteractionCreate below; see
-// analysis/notes/kenshi-terrain-material.md for the decode these follow.
+// Helpers for Kenshi's ground blend; the composite is in opaqueSurfaceMaterialInteractionCreate.
 
 // The game's slope weighting: a smoothstep band, on either side.
 float kenshiTerrainSlopeBand(float slope, float minSlope, float maxSlope, float blend)
@@ -881,15 +879,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     thinFilmThickness = opaqueSurfaceMaterial.thinFilmThicknessConstant;
   }
 
-  // DX11_V396_KENSHI_TERRAIN: the ground's colour map carries only the zone's
-  // low-frequency tint - the grain comes from a detail layer tiled tens of
-  // times per chunk, which Kenshi multiplies the tint by. Sample that layer at
-  // the detail coordinate and apply the same multiply.
-  //
-  // The detail coordinate is affine in the overlay coordinate the surface
-  // already interpolates, so no extra per-vertex data is needed. Sampling with
-  // an explicit coordinate keeps the ray-cone LOD of the surface, which for a
-  // texture tiled this much would otherwise alias badly at distance.
+  // Kenshi terrain: the colour map holds only a low-frequency tint; the grain comes from a detail
+  // layer tiled many times per chunk, which the game multiplies in. The detail coordinate is affine
+  // in the overlay coordinate, and sampling with an explicit coordinate keeps the ray-cone LOD.
   vec3 kenshiTerrainAlbedo = vec3(0.0f, 0.0f, 0.0f);
   vec3 kenshiTerrainEncodedNormal = vec3(0.5f, 0.5f, 1.0f);
   bool kenshiTerrainBlended = false;

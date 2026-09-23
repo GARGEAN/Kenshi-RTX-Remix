@@ -1140,8 +1140,8 @@ namespace dxvk {
 
     const bool valueHasChanged = !isEqual(optionValue.data, value);
     if (valueHasChanged) {
-      // V703: only published resolved changes affect cached draw products.
-      // Dirty writes and scratch resolutions (UI/layer queries) are not changes.
+      // Only published resolved changes affect cached draw products. Dirty writes and scratch resolutions
+      // (UI/layer queries) are not changes.
       if (&value == &m_resolvedValue && excludeLayer == nullptr
        && prepared_terrain::optionAffectsPreparation(getFullName()))
         prepared_terrain::invalidate(prepared_terrain::Invalidation::Option);

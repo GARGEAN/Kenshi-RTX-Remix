@@ -33,12 +33,9 @@ namespace dxvk {
     // is uploaded, so it may still mutate args.
     void updateAtmosphereConstants(RtxContext& ctx, RaytraceArgs& args);
 
-    // Injects / updates / drops the sun (and moon, in Numos) distant lights.
-    //
-    // DX11_V463: called from RtxContext::updateRaytraceArgsConstantBuffer, the
-    // LIVE atmosphere path. updateAtmosphereConstants above is vestigial - it
-    // has no call site anywhere in the tree, so anything that depends on it
-    // never runs, which is exactly how V462's sun came out dark.
+    // Injects / updates / drops the sun (and moon, in Numos) distant lights. Called from
+    // RtxContext::updateRaytraceArgsConstantBuffer, the live atmosphere path; updateAtmosphereConstants
+    // above has no call site.
     void syncAtmosphereDistantLights(RtxContext& ctx, const AtmosphereArgs& args);
 
     // Binds the atmosphere and cloud resources to their common-binding slots.

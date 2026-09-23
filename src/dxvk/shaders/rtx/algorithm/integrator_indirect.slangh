@@ -478,22 +478,15 @@ void integratePathVertex(
       // Skybox rasterization mode
       skyRadiance = cb.skyBrightness * decodeSkyProbe(SkyProbe.SampleLevel(pathState.direction, 0), cb.skyProbeDecodeGamma, cb.skyProbeBlackPoint, cb.skyProbeLightBrightness);
 
-      // DX11_V482: night floor. Kenshi's raster ambient never falls below 20% of
-      // its daytime level (a static cube scaled by
-      // clamp(sunDirection.y*5 + 0.2, 0.1, 1.0), with sunDirection horizon-
-      // clamped), while a path-traced near-black night sky falls to nothing. Floor
-      // it here, AFTER both gains, so the value is in final radiance units and a
-      // daylit sky - already far above the floor - is untouched.
-      //
-      // This is the LIGHTING sample site only: the other two decodeSkyProbe call
-      // sites in geometry_resolver.slangh pass lightGain 1.0f and feed the visible
-      // sky, which must keep matching the game's raster output.
+      // Night floor: Kenshi's raster ambient never falls below 20% of its daytime level, while a path-traced
+      // near-black night sky falls to nothing. Applied after both gains (final radiance units), so a daylit
+      // sky is untouched. Lighting sample only: the other decodeSkyProbe call sites feed the visible sky,
+      // which must keep matching raster.
       skyRadiance = max(skyRadiance, float3(cb.skyProbeLightFloor));
 
-      // DX11_V483: Kenshi's per-region ambient tint (ambientmap.png rgb),
-      // mirroring the game's own `envLight.diffuse *= ambientMult.rgb`. Applied
-      // AFTER the floor so the night floor is tinted too, which is what raster
-      // does - its night ambient is the same cube through the same tint.
+      // Kenshi's per-region ambient tint (ambientmap.png rgb), mirroring the game's
+      // `envLight.diffuse *= ambientMult.rgb`. After the floor, so the night floor is tinted too, as in
+      // raster.
       skyRadiance *= float3(cb.kenshiAmbientTintR, cb.kenshiAmbientTintG, cb.kenshiAmbientTintB);
     }
     
@@ -604,9 +597,7 @@ void integratePathVertex(
       lightSelectionPDF = cell.searchCandidate(surfaceIndex, primitiveIndex);
       if (lightSelectionPDF > 0.0 && shouldSampleObject)
       {
-        // DX11_V658: getSurfacePrimitiveCount now returns 0 for an out-of-range
-        // surfaceIndex instead of reading past the prefix-sum buffer, so guard
-        // the division rather than producing inf.
+        // getSurfacePrimitiveCount returns 0 for an out-of-range surfaceIndex, so guard the division.
         const int surfacePrimitiveCount =
           NEECacheUtils.getSurfacePrimitiveCount(surfaceIndex, PrimitiveIDPrefixSum);
         if (surfacePrimitiveCount > 0)
@@ -1529,26 +1520,11 @@ void integrateIndirectPath(
     // Trace the secondary ray and integrate the secondary vertex
 
     // If we're inside a solid translucent object, we can't use backface culling
-    // (otherwise we don't hit the other side of the object)
-    //
-    // DX11_V481: this is a SECONDARY ray - the variable is literally named
-    // secondaryRay - so it now honours cb.enableCullingSecondaryRays exactly as
-    // traceVisibilityRay does (visibility.slangh ~320). Previously it culled
-    // backfaces unconditionally, which made an option documented as "Only
-    // applies in secondary rays ... Generally helps with light bleeding from
-    // objects that aren't watertight" govern only half of them.
-    //
-    // The practical effect, with the option at its default of False: bounce
-    // light stops leaking out through one-sided geometry. Kenshi needs this
-    // because DX11_V478 stopped forcing every captured draw two-sided, and a
-    // census of a real interior measured 22 of 33 (shader, cull mode) pairs
-    // becoming one-sided - every one of those was invisible to bounce rays
-    // arriving from behind, so indirect light escaped through tables, floors,
-    // lampshades and wall panels instead of filling the room.
-    //
-    // Primary rays are deliberately NOT changed (geometry_resolver.slangh
-    // ~3002/3063 still cull): that is what keeps the game's one-sided interior
-    // shells see-through from outside, which is the whole point of V478.
+    // (otherwise we don't hit the other side of the object).
+    // This is a secondary ray, so it honours cb.enableCullingSecondaryRays like traceVisibilityRay does.
+    // With the option at its default (False), bounce light does not leak out through one-sided geometry
+    // (tables, floors, wall panels). Primary rays still cull, which keeps the game's one-sided interior
+    // shells see-through from outside.
     uint flags = (pathState.insideMedium || !cb.enableCullingSecondaryRays)
       ? 0 : RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
     flags |= RAY_FLAG_FORCE_OPAQUE;

@@ -91,31 +91,13 @@ namespace terrain_dependencies {
     k.add(s.om.sampleMask); k.add(s.om.stencilRef);
     return true;
   }
-  // DX11_V752_KENSHI_WETNESS_LATCH: publish the shared weather wetness at most
-  // once per frame.
-  //
-  // `wetness` and `waterHeightRel` are Ogre SHARED params (common.program,
-  // block SharedWaterParams) - one value for the whole frame. Ogre materialises
-  // shared params into EACH program's own constant buffer, and the bridge reads
-  // them back off b0 of whatever pixel shader the current draw happens to bind.
-  // That read happens from two sites: FillMaterialData on a material cache MISS,
-  // and globals() here on the cache HIT path, i.e. nearly every draw. Both
-  // simply stored the value, so this was last-writer-wins across every
-  // qualifying draw and the value the shader saw depended on draw order.
-  //
-  // The shader gates the entire wetness term on `cb.kenshiWetness > 0.0f`
-  // (opaque_surface_material_interaction.slangh), a branch Kenshi itself does
-  // not have - every deferred shader there calls makeWet unconditionally. So a
-  // frame whose last writer published a different value - 0 in particular, which
-  // the `>= 0 && <= 1` guard accepts from a b0 that never received the param -
-  // stepped every surface's albedo by up to 20%. Measured as a uniform 0.818x
-  // two-level flicker on all path-traced surfaces, on every light including
-  // local ones, absent from the rasterised sky matte, immune to the denoiser,
-  // exposure, RTXDI and ReSTIR GI, and gone entirely with the option off.
-  //
-  // First qualifying read of a frame wins; later reads are ignored. That removes
-  // the draw-order dependence without inventing a value. The temporary V753
-  // first-300-frame disagreement experiment has been retired.
+  // Publish the shared weather wetness at most once per frame. `wetness` and `waterHeightRel` are Ogre
+  // shared params (common.program, SharedWaterParams): one value per frame, materialised into each
+  // program's own constant buffer and read back from whichever pixel shader the draw binds, from two
+  // sites (FillMaterialData on a cache miss, globals() here on nearly every draw). Last-writer-wins made
+  // the value depend on draw order, and since the shader gates the whole wetness term on
+  // `cb.kenshiWetness > 0`, a frame whose last writer read 0 stepped every surface's albedo by up to
+  // 20% (a two-level flicker). The first qualifying read of a frame wins.
   static uint32_t wetnessFrame = 0xffffffffu;
   static void publishWetness(float wetness, float height, uint32_t frameId) {
     if (frameId != wetnessFrame) {

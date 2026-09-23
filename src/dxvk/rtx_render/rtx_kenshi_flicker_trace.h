@@ -7,7 +7,7 @@ namespace dxvk {
   struct DrawCallState;
   class RtInstance;
 
-  // V653: CS-thread-only census. No changes to renderer object layouts.
+  // CS-thread-only census. No changes to renderer object layouts.
   namespace KenshiFlickerTrace {
     void add(const char* stage, std::string row);
     void beginDraw(uint32_t sourceFrame, uint32_t entry, const DrawCallState& draw);

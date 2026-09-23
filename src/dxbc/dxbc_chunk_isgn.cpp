@@ -25,9 +25,8 @@ namespace dxvk {
       entry.registerId      = reader.readu32();
       const uint32_t maskWord = reader.readu32();
       entry.componentMask   = bit::extract(maskWord, 0, 3);
-      // DX11_V546: bits 8..11 of the same dword are the ReadWriteMask. On an
-      // input signature that is the "Used" column - the components the shader
-      // really reads - which was being discarded here.
+      // Bits 8..11 of the same dword are the ReadWriteMask; on an input signature that is the "Used" column
+      // (the components the shader really reads).
       entry.usedMask        = bit::extract(maskWord, 8, 11);
 
       if (hasPrecision)

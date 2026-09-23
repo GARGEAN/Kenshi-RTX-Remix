@@ -20,9 +20,8 @@ namespace dxvk {
       default:                                          prefix = "";
     }
 
-    // V684: this identifier is requested repeatedly by draw classification.
-    // Concatenation preserves every byte without constructing a string stream
-    // and its locale machinery. Custom shader debug names remain unaffected.
+    // Requested repeatedly by draw classification. Concatenation preserves every byte without a string
+    // stream and its locale machinery. Custom shader debug names are unaffected.
     return std::string(prefix) + m_sha1.toString();
   }
 

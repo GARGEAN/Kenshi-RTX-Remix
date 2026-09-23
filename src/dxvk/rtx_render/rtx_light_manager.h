@@ -146,8 +146,8 @@ private:
 
   void garbageCollectionInternal();
 
-  // DX11_V765_KENSHI_LIGHT_GC. Removes Kenshi local lights the game has switched
-  // off, and maintains the census that validates the test. See the .cpp.
+  // Removes Kenshi local lights the game has switched off, and maintains the census that validates the
+  // test (see the .cpp).
   void kenshiLightSweep(RtCamera& camera);
 
   // Similarity check.

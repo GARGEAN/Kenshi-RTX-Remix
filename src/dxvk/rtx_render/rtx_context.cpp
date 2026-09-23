@@ -56,7 +56,7 @@
 #include "rtx_restir_gi_rayquery.h"
 #include "rtx_composite.h"
 #include "rtx_debug_view.h"
-// DX11_V759: Kenshi heat-haze depth re-encode.
+// Kenshi heat-haze depth re-encode and sign overlay passes.
 #include <rtx_shaders/kenshi_heat_haze_depth.h>
 #include <rtx_shaders/kenshi_sign_overlay.h>
 #include "rtx/pass/kenshi_sign_overlay.h"
@@ -72,8 +72,7 @@
 
 #include "../d3d11/d3d11_state.h"
 #include "../d3d11/d3d11_spec_constants.h"
-// DX11_V446: computeConstantBufferBinding, to rebind a patched b0 for the
-// per-cube-face sky probe draws.
+// computeConstantBufferBinding, to rebind a patched b0 for the per-cube-face sky probe draws.
 #include "../../dxbc/dxbc_util.h"
 
 #include "../util/log/metrics.h"
@@ -101,8 +100,8 @@
 
 namespace dxvk {
 
-  // V792: owned by the context, allocated only while native highlights are
-  // submitted. These images never enter the scene/material/denoiser caches.
+  // Owned by the context, allocated only while native highlights are submitted. These images never
+  // enter the scene/material/denoiser caches.
   struct KenshiSignOverlay {
     Resources::Resource color;
     Resources::Resource depth;
@@ -116,8 +115,8 @@ namespace dxvk {
   bool g_allowSrgbConversionForOutput = true;
   bool g_forceKeepObjectPickingImage = false;
 
-  // DX11_V759. Defined within an unnamed namespace to ensure unique definition
-  // across the binary, matching the other pass-local shader declarations.
+  // Defined within an unnamed namespace to ensure unique definition across the binary, matching the
+  // other pass-local shader declarations.
   namespace {
     class KenshiSignOverlayShader : public ManagedShader {
       SHADER_SOURCE(KenshiSignOverlayShader, VK_SHADER_STAGE_COMPUTE_BIT, kenshi_sign_overlay)
@@ -183,12 +182,8 @@ namespace dxvk {
     }
 
     auto& exporter = getCommonObjects()->metaExporter();
-    // DX11_V330: the timestamp only has one-second resolution, so two captures
-    // taken in the same second overwrote each other - five hotkey presses
-    // produced two surviving sets. The frame id disambiguates them and groups
-    // better than the time does: every image of one capture is dumped from the
-    // same frame, while the time is re-sampled per dump op (see the note above)
-    // and can straddle a second boundary mid-set.
+    // The frame id disambiguates captures taken within the same second (the timestamp has one-second
+    // resolution) and groups every image of one capture.
     exporter.dumpImageToFile(this, path, str::format(imageName, "_", tm.tm_mday, tm.tm_mon, tm.tm_year, "-", tm.tm_hour, tm.tm_min, tm.tm_sec, "-f", m_device->getCurrentFrameId(), ".dds"), image);
   }
 
@@ -233,27 +228,16 @@ namespace dxvk {
     ctx->blitImage(dstImage, swizzle, srcImage, swizzle, blitInfo, filter);
   }
 
-  // DX11_V759. Kenshi's heat-haze post process (data/materials/post/heathaze.hlsl)
-  // scales its distortion by global_gbuffer target 2, an R32_FLOAT full-resolution
-  // target the deferred pixel shaders fill with length(worldPos - cameraPos)/farClip:
-  //
+  // Kenshi's heat-haze post process (data/materials/post/heathaze.hlsl) scales its distortion by
+  // global_gbuffer target 2, an R32_FLOAT target the deferred pixel shaders fill with
+  // length(worldPos - cameraPos)/farClip:
   //   sample  r1, v1.xy, t2, s2          // depthMap.r
   //   eq      r0.z, r1.x, l(0.0)
   //   mul_sat r0.w, r1.x, l(6.0)
   //   movc    r0.z, r0.z, l(1.0), r0.w   // depth == 0 -> FULL amplitude
-  //
-  // Under path tracing the draws that fill it never reach the raster pipeline
-  // (DX11_V577_KENSHI_SINGLE_WORLD_PATH), so it keeps the compositor's clear
-  // value of 0 and every pixel takes the `depth == 0` branch. The effect then
-  // runs at maximum amplitude everywhere - correct for sky, wrong for the other
-  // 100% of the screen, and exactly the reported symptom of a heat haze with no
-  // distance falloff.
-  //
-  // Remix already has the quantity the game wants: m_primaryHitDistance is the
-  // radial distance along the primary ray in world units, which is what
-  // length(worldPos - cameraPos) measures. Only the encoding differs - world
-  // units vs farClip-normalised, render extent vs output extent, and -1 vs 0
-  // for a ray that hit nothing - so this re-encodes rather than recomputes.
+  // Under path tracing the draws that fill it never reach raster, so every pixel takes the depth == 0
+  // branch. m_primaryHitDistance is the same radial distance in world units, so this only re-encodes it:
+  // farClip-normalised, output extent, and 0 instead of -1 for a miss.
   void RtxContext::kenshiWriteHeatHazeDepth(const Rc<DxvkImage>& gameDepthImage) {
     if (!KenshiOptions::kenshiHeatHazeDepth() || gameDepthImage == nullptr) {
       return;
@@ -1166,8 +1150,8 @@ namespace dxvk {
         dispatchPostFx(rtOutput);
 
         // Tone mapping
-        // DX11_V791: after RR/upscaling, dust, bloom and postfx, immediately
-        // before exposure/tone mapping. Surface-lobe captures are pre-RR.
+        // Lighting capture here: after RR/upscaling, dust, bloom and postfx, immediately before exposure/tone
+        // mapping. Surface-lobe captures are pre-RR.
         if (captureScreenImage && captureDebugImage) {
           takeScreenshot("lightingPreTonemap", rtOutput.m_finalOutput.resource(Resources::AccessType::Read).image);
           KENSHI_DIAGNOSTIC_INFO(str::format("[LightingCapture V791] frame=", m_device->getCurrentFrameId(),
@@ -1185,9 +1169,8 @@ namespace dxvk {
         // conversion for 16bit float formats
         const bool performSRGBConversion = !captureScreenImage && g_allowSrgbConversionForOutput;
         dispatchToneMapping(rtOutput, performSRGBConversion);
-        // V793: this is a readability overlay. Applying the scene's exposure,
-        // bloom and tone curve to its blend can wash out yellow and text.
-        // Blend the authored display colour/opacity over the finished image.
+        // A readability overlay: applying the scene's exposure, bloom and tone curve to its blend can wash out
+        // yellow and text. Blend the authored display colour/opacity over the finished image.
         compositeKenshiSignOverlay(rtOutput, performSRGBConversion);
         if (materialProbeTicket) {
           takeScreenshot(str::format("materialProbe-", materialProbeTicket, "-display"),
@@ -1208,22 +1191,11 @@ namespace dxvk {
           }
         }
 
-        // DX11_V336_GBUFFER_BURST: dump primary linear Z for a RUN of
-        // consecutive frames. Every per-frame counter from draw through TLAS
-        // measures stable while buildings visibly flicker, and single-frame
-        // hotkey captures always fire at the same point in the frame - so they
-        // may be sampling one side of an alternation rather than showing there
-        // is none. A run settles it: if a building is present in frame N and
-        // absent in N+1, the flicker is at or before the G-buffer; if every
-        // frame is identical, it is after it, and no amount of scene-side
-        // instrumentation will ever find it.
-        //
-        // linearZ ONLY, deliberately: it is the cleanest hit/miss signal
-        // (saturated far value on a miss), one image per frame keeps a long run
-        // small on disk, and coverage per frame reduces to a single number so
-        // reading a 60-frame run costs a table rather than 60 images.
-        // Exactly one of this block and the debug-view burst below consumes a
-        // frame of the budget, so a run is N frames either way.
+        // Dump primary linear Z for a run of consecutive frames: if a building is present in frame N and absent
+        // in N+1, the flicker is at or before the G-buffer; if every frame is identical, it is after it.
+        // linearZ only: the cleanest hit/miss signal, one small image per frame, and coverage per frame reduces
+        // to one number. Exactly one of this block and the debug-view burst below consumes a frame of the
+        // budget.
         if (kenshi_telemetry::enabled() && s_gbufferBurstFramesRemaining.load(std::memory_order_relaxed) > 0u
          && m_common->metaDebugView().debugViewIdx() == DEBUG_VIEW_DISABLED) {
           s_gbufferBurstFramesRemaining.fetch_sub(1u, std::memory_order_relaxed);
@@ -1236,14 +1208,9 @@ namespace dxvk {
         // Debug view
         dispatchDebugView(srcImage, rtOutput, captureScreenImage);
 
-        // DX11_V340_HASH_BURST: when a debug view is active, dump the debug
-        // image for the burst instead of linearZ. NVIDIA's own stability test
-        // for a mesh is the Geometry Hash view (277): a surface whose colour is
-        // constant frame to frame has a stable geometry hash, one whose colour
-        // changes does not. Judging that by eye across a flickering scene is
-        // exactly the kind of single-run visual call that has misled this
-        // project repeatedly, so capture the run and let the mean per-pixel
-        // colour delta between consecutive frames answer it numerically.
+        // When a debug view is active, dump it for the burst instead of linearZ. With the Geometry Hash view
+        // (277), a surface whose colour is constant frame to frame has a stable geometry hash; the mean
+        // per-pixel colour delta between consecutive frames measures that numerically.
         if (kenshi_telemetry::enabled() && s_gbufferBurstFramesRemaining.load(std::memory_order_relaxed) > 0u
          && m_common->metaDebugView().debugViewIdx() != DEBUG_VIEW_DISABLED) {
           s_gbufferBurstFramesRemaining.fetch_sub(1u, std::memory_order_relaxed);
@@ -1452,19 +1419,18 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
     pointer(m_state.gp.shaders.vs); pointer(m_state.gp.shaders.tcs);
     pointer(m_state.gp.shaders.tes); pointer(m_state.gp.shaders.gs);
     pointer(m_state.gp.shaders.fs); pointer(m_state.cp.shaders.cs);
-    // Do not byte-copy the enclosing pointer-owning state. Packed state starts
-    // zeroed, but individual attribute constructors leave reserved bits unset.
-    // V692: setInputLayout stores a zero stride placeholder; a graphics draw
-    // materializes it from vi.vertexStrides. Compare the effective pipeline state
-    // on a COPY, so an eager restore's cache invalidation is not a false mismatch.
+    // Do not byte-copy the enclosing pointer-owning state. Packed state starts zeroed, but individual
+    // attribute constructors leave reserved bits unset. setInputLayout stores a zero stride placeholder
+    // that a graphics draw materializes from vi.vertexStrides, so compare the effective pipeline state on a
+    // copy; an eager restore's cache invalidation is then not a false mismatch.
     auto graphicsState = m_state.gp.state;
     for (uint32_t i = 0; i < graphicsState.il.bindingCount(); ++i) {
       const uint32_t binding = graphicsState.ilBindings[i].binding();
       graphicsState.ilBindings[i].setStride(m_state.vi.vertexStrides[binding]);
     }
-    // V693: compare vertex attribute semantics, excluding only reserved bits.
-    // DxvkIlAttribute's constructor does not initialize its four reserved bits;
-    // reapplying an identical input layout may therefore change raw cache bytes.
+    // Compare vertex attribute semantics, excluding only reserved bits: DxvkIlAttribute's constructor does
+    // not initialize its four reserved bits, so reapplying an identical input layout may change raw cache
+    // bytes.
     std::array<VkVertexInputAttributeDescription, DxvkLimits::MaxNumVertexAttributes> attributes;
     for (size_t i = 0; i < attributes.size(); ++i)
       attributes[i] = graphicsState.ilAttributes[i].description();
@@ -1544,19 +1510,9 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
         ? &cameraManager.getCamera(cameraManager.getLastSetCameraType())
         : nullptr;
 
-    // DX11_V449_SKY_GATE_TRACE: name every term of the path a sky draw has to
-    // survive to reach the probe, in one place.
-    //
-    // V448 established that the draw arrives here correctly flagged
-    // (categories bit 0x4) and that [RTX Sky][probe-entry] still never fires,
-    // so it dies somewhere in this chain - but there are three candidate gates
-    // and guessing between them has already cost two builds this session.
-    // The rule earned repeatedly in this project: when a gate has several
-    // terms, log every term AT the gate rather than reasoning about which one
-    // fires.
-    //
-    // Note finalizePendingFutures is hoisted into a variable so its result can
-    // be reported; it is still called exactly once, in the same place.
+    // Log every term of the path a sky draw has to survive to reach the probe, at the gate itself.
+    // finalizePendingFutures is hoisted into a variable so its result can be reported; it is still called
+    // exactly once, in the same place.
     const bool skyGateDraw = drawCallState.testCategoryFlags(InstanceCategories::Sky);
     static uint32_t s_skyGateLogCount = 0;
     const bool skyGateLog = skyGateDraw && s_skyGateLogCount < 32u;
@@ -1944,18 +1900,9 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
       constants.gpuPrintThreadIndex = u16vec2 { kInvalidThreadIndex, kInvalidThreadIndex };
       constants.gpuPrintElementIndex = frameIdx % kMaxFramesInFlight;
 
-      // DX11_V388_PROBE_WINDOW: the diagnostics hotkey opens the probe too.
-      //
-      // Requiring CTRL to be held meant the probe and the on-demand trace window
-      // had to be lined up by hand across separate keypresses, which is not
-      // something a person can do reliably - the one attempt landed 9 frames
-      // apart and the join was impossible. Ctrl+Alt+O now also calls
-      // triggerGpuPrintWindow(), so for the duration of the trace the probe
-      // samples wherever the cursor already sits and both records cover the same
-      // frames by construction.
-      //
-      // Consumed one frame at a time here, next to the read of the flag it
-      // guards, so the window cannot outlive the trace it was armed with.
+      // Ctrl+Alt+O also opens the probe window (triggerGpuPrintWindow), so the probe samples wherever the
+      // cursor sits and covers the same frames as the trace. Consumed one frame at a time next to the read of
+      // the flag it guards, so the window cannot outlive the trace.
       bool probeWindowActive = false;
       if (s_gpuPrintWindowFramesRemaining.load(std::memory_order_relaxed) > 0u) {
         s_gpuPrintWindowFramesRemaining.fetch_sub(1u, std::memory_order_relaxed);
@@ -2002,42 +1949,26 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
     constants.volumeArgs = globalVolumetrics.getVolumeArgs(cameraManager, getSceneManager().getFogState(), enablePortalVolumes);
     constants.startInMediumMaterialIndex = getSceneManager().getStartInMediumMaterialIndex();
     OpaqueMaterialOptions::fillShaderParams(constants.opaqueMaterialArgs);
-    // DX11_V536: pad0 is the terrain secondary-shading mode again. V534 put the
-    // legacy default roughness in its upper half so the object path could blend
-    // against something sane; with a gain instead of a blend the object path
-    // overrides roughness outright and no longer needs it.
+    // pad0 carries the terrain secondary-shading mode.
     constants.opaqueMaterialArgs.pad0 = KenshiTerrainOptions::secondaryShadingMode();
 
-    // DX11_V540: fold the strength in here so the shader has one value to read
-    // and a strength of zero costs it nothing at all.
+    // Fold the strength in here, so the shader has one value to read and a strength of zero costs nothing.
     {
       float kenshiWetness = 0.0f;
       float kenshiWaterHeight = 0.0f;
       SceneManager::getKenshiWetness(kenshiWetness, kenshiWaterHeight);
-      // DX11_V545: a GAIN, capped at 4 rather than 1, for the same reason the
-      // object gloss control became one in V536 - the game's own values do not
-      // reach the part of its own curve where anything happens.
-      //
-      // Measured over a multi-hour rainy run (d3d11.3452.log): Kenshi's wetness
-      // climbs 0 -> 0.644 in 13 seconds and then holds there. That is the
-      // ceiling, and the game's response is `2*(w - 0.15a)^(4a+1)`, which at
-      // w=0.644 lifts a rough surface's gloss by 0.03 - invisible. The curve
-      // only bites near w=1: the same surface goes to gloss 0.444 there.
-      // So faithful (1.0) is honest but nearly a no-op, and ~1.55 is what turns
-      // the measured 0.644 into the saturated look.
-      //
-      // The product is clamped, not the gain, so raising this can never push w
-      // past the game's own maximum of 1.
+      // A gain, capped at 4 rather than 1: the game's own wetness tops out around 0.64 in rain, where its
+      // response `2*(w - 0.15a)^(4a+1)` barely changes gloss; the curve only bites near w=1. The product is
+      // clamped, not the gain, so w never exceeds the game's maximum of 1.
       const float wetnessRaw = KenshiOptions::kenshiWetness();
       const float wetnessStrength =
         wetnessRaw < 0.0f ? 0.0f : (wetnessRaw > 4.0f ? 4.0f : wetnessRaw);
       constants.kenshiWetness = std::min(kenshiWetness * wetnessStrength, 1.0f);
       constants.kenshiWaterHeight = kenshiWaterHeight;
-      // DX11_V556: characters' own gloss gain. Zero leaves roughness untouched.
+      // Characters' own gloss gain. Zero leaves roughness untouched.
       constants.kenshiCharacterGloss = KenshiOptions::kenshiCharacterGloss();
 
-      // DX11_V557: Kenshi's biome dust. The strength folds in here so a value of
-      // zero costs the shader nothing at all, the same shape as wetness.
+      // Kenshi's biome dust. The strength folds in here, so zero costs the shader nothing (as with wetness).
       Vector3 kenshiDustColour(0.0f, 0.0f, 0.0f);
       float kenshiDustAmountX = 0.0f;
       float kenshiDustAmountY = 0.0f;
@@ -2046,26 +1977,9 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
         kenshiDustColour, kenshiDustAmountX, kenshiDustAmountY, kenshiDustAmountZ);
       const float dustRaw = KenshiOptions::kenshiDust();
       const float dustStrength = dustRaw < 0.0f ? 0.0f : (dustRaw > 4.0f ? 4.0f : dustRaw);
-      // DX11_V559: the dust colour is passed through in the game's own DISPLAY
-      // space, and the SHADER converts around the blend instead.
-      //
-      // V558 converted it to linear here, which fixed the hue and broke the
-      // lightness: `lerp(linearAlbedo, linearDust, t)` is not the same as the
-      // game's `lerp(displayAlbedo, displayDust, t)`, and for a light film over
-      // a darker surface the linear-space blend is much darker - dust stopped
-      // being visible at all. Neither conversion point is a matter of taste:
-      // the blend has to happen in the space the game blends in.
-      // DX11_V563: fix the SATURATION without touching the BRIGHTNESS.
-      //
-      // The washed-out look came from using an sRGB constant as if it were
-      // linear: that both brightens and desaturates. Converting it outright
-      // (V558) fixed the hue and destroyed the visibility, because the linear
-      // value is a third of the brightness the blend needs.
-      //
-      // So: convert to linear to get the channel RATIOS right, then rescale so
-      // the peak channel matches the original. Hue and saturation become
-      // correct; overall intensity stays exactly where it was when dust was
-      // last visibly right on screen.
+      // Global dust colour: convert to linear for the channel ratios (hue and saturation), then rescale so
+      // the peak channel keeps its original value. Using the sRGB constant as linear brightens and
+      // desaturates it; a plain conversion darkens it to a third of what the display-space blend needs.
       auto srgbToLinear = [](float c) -> float {
         c = c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c);
         return c <= 0.04045f ? c / 12.92f
@@ -2088,8 +2002,8 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
       constants.kenshiDustAmountZ = kenshiDustAmountZ;
       constants.kenshiDustStrength = dustStrength;
 
-      // DX11_V591_KENSHI_WATER_RIPPLES: the water constants read off the game's
-      // own water draw. Inert until one has been seen (zero tile scale).
+      // The water constants read off the game's own water draw; inert until one has been seen (zero tile
+      // scale).
       {
         SceneManager::KenshiWaterParams water;
         SceneManager::getKenshiWater(water);
@@ -2105,43 +2019,14 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
         constants.kenshiWaterSpeedY = water.speedY;
         constants.kenshiWaterDistortion = water.distortion;
         constants.kenshiWaterInvStrength = water.invStrength;
-        // DX11_V616_KENSHI_WATER_CLOCK. Accumulate the water clock here instead
-        // of publishing the game's raw `gameTime` and letting the shader guess.
-        //
-        // Measured 2026-09-03 over three runs, 40 samples each: `gameTime` reads
-        // a genuine 0.000000 for the first ~5-6 seconds after every load (the
-        // read itself never fails - haveGameTime was 1 in every sample), then
-        // starts and runs at ~0.008/s, which against distortion 120 is the ~1 Hz
-        // ripple cross-fade the surface is supposed to have.
-        //
-        // The shader used to pick its clock with `kenshiWaterTime != 0 ?
-        // kenshiWaterTime : timeSinceStartSeconds`. But zero is a LEGAL value
-        // here, not a "missing" marker, so for those first seconds the fallback
-        // ran at `1.0/s * 120` = 120 cycles per second - a 120x error that then
-        // snapped back mid-session. At 60 fps that samples the cross-fade twice
-        // per cycle, so the whole water normal field was uncorrelated frame to
-        // frame: the reported "ripples not updating properly", worst right after
-        // a load, which is exactly when it was reported.
-        //
-        // A monotonic accumulator has no sentinel to get wrong.
-        //
-        // DX11_V617 CORRECTION. V616's accumulator fell back to a wall clock on
-        // ANY zero delta, which broke pause: Kenshi has a game pause and three
-        // game speeds, and all of them are already expressed in how fast
-        // gameTime moves. A paused game and a game whose clock has not started
-        // both show delta == 0, and V616 could not tell them apart, so it kept
-        // the water moving through a pause the raster surface freezes.
-        //
-        // The distinguishing state is whether the game clock has EVER advanced
-        // since the last load:
-        //
+        // Accumulate the water clock here instead of publishing the game's raw gameTime. gameTime is a genuine
+        // 0 for the first ~5-6 s after every load and then runs at ~0.008/s (a ~1 Hz ripple cross-fade at
+        // distortion 120), so zero cannot mean "missing". Kenshi's pause and three game speeds are all
+        // expressed in how fast gameTime moves:
         //   delta  > 0                    -> running at any speed: consume it
         //   delta == 0, never ran         -> load-in window:       wall fallback
         //   delta == 0, has run           -> PAUSED:               hold
         //   delta  < 0 / gameTime reset   -> new save:             re-arm fallback
-        //
-        // Consuming the game's own delta is what makes all three speeds work
-        // without knowing anything about them.
         {
           // The live rate measured above, expressed as ripple cross-fade cycles
           // per second. Divided by distortion because the shader multiplies by
@@ -2184,23 +2069,16 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
           if (waterClockReset) {
             s_waterGameRunning = false;
           } else if (waterGameDelta > 0.0f) {
-            // DX11_V617. The game's OWN delta, which is the whole point: Kenshi
-            // has a pause and three game speeds, and every one of them is
-            // already expressed in how fast gameTime moves. Consuming the delta
-            // reproduces all four states for free.
+            // The game's own delta: pause and all game speeds come for free.
             s_waterClock += waterGameDelta;
             s_waterGameRunning = true;
           } else if (!s_waterGameRunning) {
-            // Never ticked since the last load. gameTime is a genuine 0 for the
-            // first ~5 s of every save load, so this is the window that used to
-            // take the 120x-too-fast `timeSinceStartSeconds` path.
+            // Never ticked since the last load (gameTime is 0 for the first ~5 s of a load): use the wall-clock
+            // fallback.
             s_waterClock += waterWallDelta * (kWaterFallbackRippleHz / waterDistortion);
           }
-          // else: the clock has run and has now stopped - the game is PAUSED.
-          // Hold the accumulator exactly where it is. V616 got this wrong by
-          // treating a zero delta as "no clock available" and ticking the
-          // fallback, which kept the water moving through a pause that the
-          // raster surface correctly freezes.
+          // else: the clock has run and has now stopped - the game is paused. Hold the accumulator, as raster
+          // freezes the surface.
 
           s_waterPrevGameTime = water.time;
           s_waterPrevWall = waterNowWall;
@@ -2212,63 +2090,33 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
         constants.kenshiWaterScumScaleX = water.scumScaleX;
         constants.kenshiWaterScumScaleY = water.scumScaleY;
         constants.kenshiWaterScumDistortion = water.scumDistortion;
-        // DX11_V612_KENSHI_WATER_RAIN_TOGGLE. Pack the rain enable bit into
-        // the sign of Pad1, whose live shader transport is already proven by
-        // the reflection-clearance control. Pad2 did not affect the shader in
-        // V611 despite the option itself loading correctly.
+        // Pack the rain enable bit into the sign of Pad1, whose shader transport is proven by the
+        // reflection-clearance control.
         const uint32_t waterNormalTelemetryMode =
           (kenshi_telemetry::enabled() ? std::min(KenshiOptions::kenshiWaterNormalTelemetry(), 7u) : 0u);
-        // DX11_V627: the sign carries the simulated-depth toggle without growing
-        // the shared C++/shader constant-buffer layout. The translucent material
-        // reads the option directly on the CPU; only the opaque shader consumes
-        // the negative form. Zero remains bit-identical to fully opaque water.
+        // The sign carries the simulated-depth toggle without growing the shared C++/shader constant-buffer
+        // layout. The translucent material reads the option directly on the CPU; only the opaque shader
+        // consumes the negative form. Zero remains bit-identical to fully opaque water.
         const float waterTransparency =
           std::max(KenshiOptions::kenshiWaterTransparency(), 0.0f);
         constants.kenshiWaterTransparency =
           KenshiOptions::kenshiWaterSimulatedDepth() && waterTransparency > 0.0f
             ? -waterTransparency
             : waterTransparency;
-        // The game's own value, harvested from the near shaders.
-        //
-        // DX11_V756. This used to say "only one value has ever been observed, and
-        // the biome record is full", justifying a single global. Both halves were
-        // wrong. It is FCS's **"water visibility"** field - the label the exe
-        // pairs with this uniform's name - pushed per WATER BODY as
-        // `invOpacity = 1 / visibility`, and the shipped data holds 79 zones with
-        // twelve distinct values from 0.4 to 120, sixty of them 10. The same
-        // pixel shader was measured reporting 0.033333 in one session and
-        // 0.010000 in another, so it was never a property of the shader; the
-        // `material:` log line fires once per shader NAME and only ever caught
-        // whichever water body drew first.
-        //
-        // This is now the FALLBACK only - for water outside every biome. The
-        // zone's own value travels in the biome record, which V756 grew by one
-        // vec4 to carry it.
+        // The game's own value, harvested from the near shaders. It is per water body (FCS "water visibility",
+        // `invOpacity = 1 / visibility`), so this global is only the fallback for water outside every biome;
+        // the zone's own value travels in the biome record.
         constants.kenshiWaterInvOpacity = water.invOpacity;
-        // DX11_V631_KENSHI_WATER_GLOW_BOOST. Kenshi's own glow is a single
-        // constant declared once, as 0.0, in WaterFP's default_params
-        // (data/materials/forward/water.material:27); no water material
-        // overrides it, and the runtime confirms gameGlow=0 on every water
-        // shader. So the raster term at water.hlsl:210 is inert in the shipped
-        // game and the shader block V627 wrote for it has never had a value to
-        // work with.
-        //
-        // Additive, not an override: invOpacity IS overridden at runtime (the
-        // material declares 0.01, the game reports 0.0333), so glow can be too,
-        // and a water body that ever sets one should keep its own variation with
-        // the user amount riding on top rather than being flattened by it.
-        //
-        // Per-biome colour survives a single global amount, because the colour
-        // is waterColour - the world-wide colour map sampled at the water's own
-        // map UV - and only the SCALAR is global. That is also exactly how the
-        // raster shader is built.
+        // Kenshi's own glow is a single constant, 0.0, declared in WaterFP's default_params
+        // (data/materials/forward/water.material) and never overridden, so the raster term is inert in the
+        // shipped game. Additive rather than an override, so a water body that does set one keeps its
+        // variation. Per-biome colour survives a single global amount: the colour is waterColour (the
+        // world-wide colour map at the water's own UV) and only the scalar is global, as in the raster shader.
         constants.kenshiWaterGlow =
           water.glow + std::max(KenshiOptions::kenshiWaterGlowBoost(), 0.0f);
-        // DX11_V632_KENSHI_WATER_COLOUR_GAIN. Reproduces the non-physical gain
-        // Kenshi applies to its water diffuse - PI on the sun term where a
-        // normalised BRDF divides by it, and 4x on the irradiance probe - which
-        // is the whole reason raster water carries more biome colour than a
-        // correctly lit path-traced one. Clamped at 0; 1 is the physical value.
+        // Reproduces the non-physical gain Kenshi applies to its water diffuse (PI on the sun term where a
+        // normalised BRDF divides by it, 4x on the irradiance probe), which is why raster water carries more
+        // biome colour. Clamped at 0; 1 is physical.
         constants.kenshiWaterColourGain =
           std::max(KenshiOptions::kenshiWaterColourGain(), 0.0f);
         constants.kenshiWaterPad0 = static_cast<float>(waterNormalTelemetryMode);
@@ -2277,15 +2125,8 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
         const bool waterRainRipples = KenshiOptions::kenshiWaterRainRipples();
         constants.kenshiWaterPad1 = waterRainRipples
           ? waterReflectionClearance : -waterReflectionClearance;
-        // DX11_V614_KENSHI_WATER_RAIN_DISTANCE. Pad2 carries the rain reach in
-        // world units; 0 keeps V612's unbounded behaviour, so a shader that
-        // never sees this value behaves exactly as before.
-        //
-        // V611 concluded Pad2 "did not affect the shader". That reading is
-        // suspect: V611 was a shader-only build, and this tree's FIRST ninja
-        // pass after a .slangh edit always links stale SPIR-V (measured at
-        // V613). Pad2's transport is therefore retested here, with a two-pass
-        // build, against a value whose visual effect is unambiguous.
+        // Pad2 carries the rain reach in world units; 0 keeps the unbounded behaviour, so a shader that never
+        // sees this value behaves as before.
         constants.kenshiWaterPad2 =
           std::max(KenshiOptions::kenshiWaterRainDistance(), 0.0f);
 
@@ -2302,12 +2143,9 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
         }
       }
 
-      // DX11_V542: the submerged term is `saturate((waterHeightRel - worldY + 2)
-      // * 0.5)`, and at waterHeightRel=100 everything below world Y 98 reads as
-      // fully UNDERWATER - which force-zeroes the wet highlight and adds a flat
-      // 0.2 of darkening. Whether that is right depends entirely on where
-      // Kenshi's ground actually sits in world Y, which nothing has measured.
-      // Report the camera height against it, once and on every meaningful move.
+      // The submerged term is `saturate((waterHeightRel - worldY + 2) * 0.5)`: at waterHeightRel=100
+      // everything below world Y 98 reads as underwater (no wet highlight, flat 0.2 darkening). Report the
+      // camera height against it, once and on every meaningful move.
       if (terrain_profile::diagnosticsEnabled()) {
         static float sLastLoggedCameraY = -1.0e30f;
         const float cameraY = getSceneManager().getCamera().getPosition().y;
@@ -2323,12 +2161,9 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
         }
       }
     }
-    // DX11_V531/V533: pad1 carries BOTH gloss strengths, as two unorm16s - low
-    // half terrain, high half objects. Packed rather than given a field each so
-    // the constant-buffer layout does not change; the precision is irrelevant
-    // for a 0..1 knob. Keeping them in a constant rather than in the material is
-    // what makes the sliders live - nothing has to be re-registered to see a
-    // change.
+    // pad1 carries both gloss strengths as two unorm16s (low half terrain, high half objects), so the
+    // constant-buffer layout does not change. Kept in a constant rather than the material so the sliders
+    // are live.
     auto packStrength = [](float value) -> uint32_t {
       const float clamped = value < 0.0f ? 0.0f : (value > 1.0f ? 1.0f : value);
       return uint32_t(clamped * 65535.0f + 0.5f);
@@ -2364,10 +2199,10 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
     constants.skyProbeDecodeGamma = RtxOptions::skyProbeDecodeGamma();
     constants.skyProbeBlackPoint = RtxOptions::skyProbeBlackPoint();
     constants.skyProbeLightBrightness = RtxOptions::skyProbeLightBrightness();
-    // DX11_V482: night floor for the sky's LIGHTING contribution only.
+    // Night floor for the sky's lighting contribution only.
     constants.skyProbeLightFloor = std::max(KenshiOptions::skyLightFloor(), 0.0f);
-    // DX11_V483: per-region ambient tint from Kenshi's own ambient map. The
-    // harvest writes it on the derived option layer every frame.
+    // Per-region ambient tint from Kenshi's ambient map; the harvest writes it on the derived option layer
+    // every frame.
     {
       const Vector3 ambientTint = KenshiOptions::kenshiAmbientTint();
       constants.kenshiAmbientTintR = std::max(ambientTint.x, 0.0f);
@@ -2390,26 +2225,12 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
     // this runtime; it is reported once so the override is not silent.
     SkyMode currentSkyMode = RtxOptions::skyMode();
 
-    // Detect the condition structurally rather than waiting for the first sky
-    // draw to trip the flag: both state constant buffers are null exactly when
-    // hasVertexStateCB would be false in rasterizeToSkyProbe (for either shader
-    // type), and setConstantBuffers has no caller in this fork, so this is
-    // already true on frame 0. Waiting for the flag would leave one frame
-    // rendering the broken mode.
-    //
-    // DX11_V447: the structural term must no longer fire on its own. V446 added
-    // a second way to reproject - patching the first matrix of the sky shader's
-    // b0 (see rasterizeToSkyProbe) - which needs neither of these buffers, so
-    // "both state CBs are null" stopped meaning "the probe cannot work".
-    //
-    // Left unchanged, this pre-empted V446 completely: skyMode was forced to
-    // PhysicalAtmosphere on frame 0, the game's sky draws were suppressed, and
-    // rasterizeToSkyProbe was never reached, so the new path was dead code and
-    // the build was indistinguishable from its predecessor.
-    //
-    // With the patch path enabled the promotion is left to
-    // m_skyProbeReprojectionUnavailable, which rasterizeToSkyProbe now sets
-    // only when the patch could not arm either (e.g. a device-local b0).
+    // Detect the condition structurally rather than waiting for the first sky draw to trip the flag: both
+    // state constant buffers are null exactly when hasVertexStateCB would be false in rasterizeToSkyProbe,
+    // and setConstantBuffers has no caller in this fork, so this is already true on frame 0.
+    // With the b0 patch path enabled (reprojection by patching the first matrix of the sky shader's b0),
+    // null state buffers no longer mean the probe cannot work; promotion is then left to
+    // m_skyProbeReprojectionUnavailable, set only when the patch could not arm either.
     const bool skyProbePatchPathAvailable = RtxOptions::skyProbePatchFirstMatrix();
     const bool skyProbeUnusable = m_skyProbeReprojectionUnavailable
       || (!skyProbePatchPathAvailable
@@ -2467,17 +2288,10 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
       constants.atmosphereArgs = m_atmosphere->getAtmosphereArgs();
     }
 
-    // DX11_V463: inject / update / drop the sun distant light, from the LIVE
-    // atmosphere path.
-    //
-    // Called unconditionally: the helper gates internally, injecting the
-    // atmosphere's sun in Numos and the GAME-DRIVEN sun (V462) in
-    // skybox-rasterization mode, and dropping both when neither applies. On the
-    // game-driven path it does not read atmosphereArgs, which are only written
-    // inside the branch above.
-    //
-    // V462 put this logic in fork_hooks::updateAtmosphereConstants, which has no
-    // call site anywhere in the tree - so it never ran and the sun stayed dark.
+    // Inject / update / drop the sun distant light from the live atmosphere path. Called unconditionally:
+    // the helper injects the atmosphere's sun in Numos mode and the game-driven sun in
+    // skybox-rasterization mode, and drops both when neither applies. The game-driven path does not read
+    // atmosphereArgs (only written inside the branch above).
     fork_hooks::syncAtmosphereDistantLights(*this, constants.atmosphereArgs);
 
     constants.isLastCompositeOutputValid = restirGI.isActive() && restirGI.getLastCompositeOutput().matchesWriteFrameIdx(frameIdx - 1);
@@ -2512,22 +2326,8 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
     constants.kenshiRainEmissionScale = KenshiOptions::kenshiRainBrightness() * std::clamp(
       KenshiOptions::kenshiFogSunDir().y * 5.0f + 0.2f, 0.1f, 1.0f);
 
-    // DX11_V638_KENSHI_INTERIOR_CLIP. Rebuild the world placement of each active
-    // interior mask shell and publish it as an oriented box.
-    //
-    // Kenshi's mask vertex program is handed only a combined worldViewProjMatrix
-    // (basic.hlsl:33), so a shell's world transform has to be recovered as
-    // `WVP * inverse(VP)` from the camera the same frame was drawn with. Two
-    // things about that are not knowable by reasoning and are resolved by
-    // measurement instead: HLSL packs constant-buffer matrices column-major by
-    // default, so the 16 floats read out of the buffer may be the transpose of
-    // what is wanted (this file's skinning path carries an empirical transpose
-    // flag for exactly that reason), and Remix's own convention has to agree.
-    //
-    // Rather than guess, both candidates are built and the one whose box centre
-    // lands nearest the camera wins. A character is standing INSIDE a shell
-    // whenever it is drawn at all, so the true centre is metres away and the
-    // wrong candidate is not close - a wide test, not a coin flip.
+    // Publish each active interior mask shell as an oriented box. The world placement arrives already
+    // resolved (see below).
     constants.kenshiInteriorClipCount = 0u;
     constants.kenshiInteriorClipDebugAll =
       (KenshiOptions::kenshiInteriorClip() && KenshiOptions::kenshiInteriorClipDebugAll()) ? 1u : 0u;
@@ -2601,11 +2401,9 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
         if (!volume.valid)
           continue;
 
-        // V642: the placement arrived already resolved, computed on the D3D11
-        // side against Kenshi's own same-frame view-projection. No camera is
-        // consulted here and no staleness window is applied - a static
-        // building's world transform does not expire, and the set is cleared
-        // explicitly when its shell stops being drawn.
+        // The placement arrives resolved on the D3D11 side against Kenshi's own same-frame view-projection. No
+        // camera is consulted here and no staleness window applies: a static building's transform does not
+        // expire, and the set is cleared when its shell stops being drawn.
         const Vector3 objCentre(
           0.5f * (volume.objMin[0] + volume.objMax[0]),
           0.5f * (volume.objMin[1] + volume.objMax[1]),
@@ -2741,7 +2539,7 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
     DebugView& debugView = getCommonObjects()->metaDebugView();
 
     bindAccelerationStructure(BINDING_ACCELERATION_STRUCTURE, getResourceManager().getTLAS(Tlas::Opaque).accelStructure);
-    // V663: a surviving TLAS handle does not retain the BLAS of a cleared scene.
+    // A surviving TLAS handle does not retain the BLAS of a cleared scene.
     const auto& opaqueTlas = getResourceManager().getTLAS(Tlas::Opaque);
     const bool usePreviousScene = RtxOptions::enablePreviousTLAS() && getSceneManager().isPreviousFrameSceneAvailable();
     bindAccelerationStructure(BINDING_ACCELERATION_STRUCTURE_PREVIOUS,
@@ -2753,20 +2551,19 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
     bindResourceBuffer(BINDING_SURFACE_MAPPING_BUFFER, DxvkBufferSlice(surfaceMappingBuffer, 0, surfaceMappingBuffer.ptr() ? surfaceMappingBuffer->info().size : 0));
     bindResourceBuffer(BINDING_SURFACE_MATERIAL_DATA_BUFFER, DxvkBufferSlice(surfaceMaterialBuffer, 0, surfaceMaterialBuffer->info().size));
 
-    // DX11_V399_KENSHI_TERRAIN_BUFFER
+    // Kenshi terrain parameter sets.
     {
       Rc<DxvkBuffer> kenshiTerrainBuffer = getSceneManager().getKenshiTerrainBuffer(this);
         bindResourceBuffer(BINDING_KENSHI_TERRAIN_BUFFER,
         DxvkBufferSlice(kenshiTerrainBuffer, 0, kenshiTerrainBuffer->info().size));
 
-      // DX11_V525. Same never-null contract as the terrain buffer above: the hit
-      // shader declares kenshiTerrainBloodBuffer unconditionally.
+      // Same never-null contract as the terrain buffer above: the hit shader declares
+      // kenshiTerrainBloodBuffer unconditionally.
       Rc<DxvkBuffer> kenshiTerrainBloodBuffer = getSceneManager().getKenshiTerrainBloodBuffer(this);
       bindResourceBuffer(BINDING_KENSHI_TERRAIN_BLOOD_BUFFER,
         DxvkBufferSlice(kenshiTerrainBloodBuffer, 0, kenshiTerrainBloodBuffer->info().size));
 
-      // DX11_V603: same never-null contract - the water branch reads the zone
-      // list unconditionally and an empty header reads as zero zones.
+      // Same never-null contract; an empty header reads as zero volumes.
       Rc<DxvkBuffer> kenshiInteriorBuffer = getSceneManager().getKenshiInteriorBuffer(this);
       bindResourceBuffer(BINDING_KENSHI_INTERIOR_BUFFER,
         DxvkBufferSlice(kenshiInteriorBuffer, 0, kenshiInteriorBuffer->info().size));
@@ -2935,12 +2732,9 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
       m_common->metaPathtracerIntegrateIndirect().dispatch(this, rtOutput);
     }
 
-    // Integrate indirect - NEE Cache pass
-    // DX11_V657: this dispatch has no enable gate upstream, so it runs every
-    // frame even when rtx.neeCache.enable is False and NeeCachePass::dispatch
-    // has already early-returned - the cache is never updated while the
-    // integration that consumes it keeps running. Aftermath named this pass as
-    // the one in flight at the DMA page fault.
+    // Integrate indirect - NEE Cache pass. This dispatch has no enable gate upstream, so it would run
+    // every frame even with rtx.neeCache.enable off (NeeCachePass::dispatch having returned early),
+    // integrating a cache that is never updated.
     if (!KenshiOptions::kenshiGateNeeIntegration() || NeeCachePass::enable()) {
       m_common->metaPathtracerIntegrateIndirect().dispatchNEE(this, rtOutput);
     }
@@ -3837,8 +3631,8 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
 
     m_skyProbeImage = skyProbeImage;
 
-    // V789: a newly allocated cube needs all six faces cleared on its first
-    // capture, even if no game clear preceded allocation/recreation.
+    // A newly allocated cube needs all six faces cleared on its first capture, even if no game clear
+    // preceded allocation/recreation.
     if (useKenshiBlackSkyClear()) {
       m_skyClearValue = {};
       m_skyClearDirty = true;
@@ -3863,17 +3657,12 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
   void RtxContext::rasterizeToSkyProbe(const DrawParameters& params, const DrawCallState& drawCallState) {
     ScopedGpuProfileZone(this, "rasterizeToSkyProbe");
 
-    // DX11_V447: bounded entry trace. Whether the game's sky draws are
-    // CLASSIFIED as sky - and so reach this function at all - is the one
-    // assumption in the probe work that cannot be checked offline, and its
-    // absence is indistinguishable from the patch failing unless the entry
-    // itself is logged. Reports the draw's size so the skydome (tens of
-    // thousands of indices) can be told from the small horizon-cloud banks.
+    // Bounded entry trace: whether the game's sky draws are classified as sky and reach this function at
+    // all. Reports the draw's size, so the skydome (tens of thousands of indices) can be told from the
+    // small horizon-cloud banks.
     if (terrain_profile::diagnosticsEnabled()) {
-      // DX11_V454: periodic, not first-N. The probe must be refilled EVERY
-      // frame or the sky freezes at whatever it last contained, and a first-N
-      // budget cannot tell a healthy stream from one that stopped after two
-      // fills - which is exactly the ambiguity that hid the static sky.
+      // Periodic, not first-N: the probe must be refilled every frame, and a first-N budget cannot tell a
+      // healthy stream from one that stopped.
       static uint32_t sSkyProbeEntryLogCount = 0;
       ++sSkyProbeEntryLogCount;
       if (sSkyProbeEntryLogCount <= 4u || (sSkyProbeEntryLogCount % 240u) == 0u) {
@@ -3909,22 +3698,13 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
       ? m_rtState.vertexCaptureCB != nullptr
       : m_rtState.vsFixedFunctionCB != nullptr;
 
-    // DX11_V446_SKY_PROBE_B0_PATCH: the reprojection does not actually have to
-    // happen "inside the game's own compiled vertex shader" as the V307 note
-    // below concluded - it only has to happen in that shader's INPUT. Engines
-    // whose sky vertex shader takes its world-view-projection as the first
-    // constant of b0 (OGRE/SkyX does; every Kenshi sky draw was measured with
-    // `uWorldViewProj`/`worldViewProjMatrix` at offset 0) can be reprojected by
-    // binding a patched COPY of b0 per cube face and re-issuing the game's own
-    // unmodified draw. No shader authoring and no vertex-capture buffer.
-    //
-    // The world transform is baked into that matrix on the pure skydome
-    // variant (it has no separate uWorld), so it is recovered as
+    // Reproject by patching the sky shader's input rather than the shader: engines whose sky vertex shader
+    // takes its world-view-projection as the first constant of b0 (OGRE/SkyX: `uWorldViewProj` /
+    // `worldViewProjMatrix` at offset 0) can be re-rendered per cube face by binding a patched copy of b0
+    // and re-issuing the game's own draw - no shader authoring, no vertex capture. The world transform is
+    // baked into that matrix on the skydome, so it is recovered as
     //   world = inverse(viewToProj * worldToView) * originalWVP
-    // and the per-face matrix rebuilt as cubeProj * cubeView * world. That is
-    // the same decomposition that reproduced the deferred light volumes' world
-    // positions to within 0.6 units, so it is known to hold for this engine's
-    // matrix conventions.
+    // and the per-face matrix rebuilt as cubeProj * cubeView * world.
     uint32_t patchVsCbSlot = 0u;
     const void* patchOriginalCb = nullptr;
     VkDeviceSize patchOriginalCbSize = 0u;
@@ -4011,31 +3791,11 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
     // Figure out camera position
     const Vector3 camPos = inverse(worldToView).data[3].xyz();
 
-    // DX11_V452: the b0 patch path must NOT decompose with this draw's own
-    // transforms.
-    //
-    // A skydome vertex shader that exposes only uWorldViewProj gives the bridge
-    // nothing to factor, so `worldToView` comes back IDENTITY and `viewToProj`
-    // is a fallback - the V451 run logged exactly that for these draws
-    // (`identityView=1 objToWorldT=[0,0,0] worldToViewT=[0,0,0]`). Two errors
-    // followed from using them:
-    //
-    //   world = inverse(viewToProj * worldToView) * originalWvp
-    //         = inverse(P) * (P*V*W) = V*W   when worldToView is identity
-    //
-    // so the game's view was applied TWICE in the rebuilt matrix, and `camPos`
-    // resolved to [0,0,0], centring all six cube views on the world origin
-    // instead of the camera. The dome still rendered, but degenerately: each
-    // face collapsed to near-constant output - a solid green sky with the
-    // starfield stretched into repeating rectangular bands, unchanging with
-    // time of day because the degenerate transform swamped everything the
-    // shader's own constants did.
-    //
-    // Kenshi draws its sky with the same camera as the world, and the main
-    // camera's matrices ARE resolved (the rest of the scene depends on them),
-    // so use those for the decomposition and for the cube centre. Falls back to
-    // the draw's transforms if the main camera is not yet valid this frame,
-    // which is the pre-V452 behaviour.
+    // Decompose with the main camera's matrices, not this draw's: a skydome VS exposing only
+    // uWorldViewProj leaves the bridge nothing to factor, so the draw's own worldToView is identity and
+    // viewToProj a fallback - which would apply the game's view twice and centre the cube at the origin.
+    // Kenshi draws its sky with the world camera. Falls back to the draw's transforms if the main camera is
+    // not valid yet this frame.
     Matrix4 patchWorldToView = worldToView;
     Matrix4 patchViewToProj = viewToProj;
     Vector3 patchCamPos = camPos;
@@ -4141,10 +3901,9 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
           newState.Projection[2][3] = 1.f;
         }
       } else if (patchFirstMatrix) {
-        // DX11_V446: rebuild the game's own world-view-projection for this cube
-        // face and bind a patched copy of b0. Everything else in the block -
-        // sun direction, Rayleigh/Mie constants, cloud and starfield params -
-        // is copied through untouched, so the face renders the game's real sky.
+        // Rebuild the game's world-view-projection for this cube face and bind a patched copy of b0.
+        // Everything else in the block (sun direction, Rayleigh/Mie constants, cloud and starfield params) is
+        // copied through, so the face renders the game's real sky.
         Matrix4 cubeProj = patchViewToProj;
         cubeProj[0][0] = 1.f;
         cubeProj[1][1] = 1.f;
@@ -4157,11 +3916,8 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
         const Matrix4 faceWvp =
           cubeProj * makeViewMatrixForCubePlane(plane, patchCamPos) * world;
 
-        // DX11_V452: report the rebuilt transform once per family so a wrong
-        // one is readable in the log instead of only guessable from the image.
-        // A sane `world` for a camera-centred skydome is close to a pure
-        // scale/translate; a rebuilt matrix full of huge or near-zero terms
-        // means the decomposition is still wrong.
+        // Report the rebuilt transform once per family. A sane `world` for a camera-centred skydome is close to
+        // a pure scale/translate.
         if (plane == 0u) {
           static uint32_t s_skyPatchMatrixLogCount = 0;
           if (s_skyPatchMatrixLogCount < 4u) {
@@ -4214,8 +3970,7 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
         allocAndMapFixedFunctionVSConstantBuffer() = prevCB.fixedFunction;
       }
     }
-    // DX11_V446: hand b0 back to the game's own buffer. Leaving the patched
-    // copy bound would give every following draw this frame the last cube
+    // Hand b0 back to the game's own buffer; otherwise every following draw this frame gets the last cube
     // face's matrix.
     if (patchFirstMatrix) {
       bindResourceBuffer(patchVsCbSlot, patchPrevSlice);
@@ -4297,8 +4052,7 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
   }
 
   void RtxContext::rasterizeSky(const DrawParameters& params, const DrawCallState& drawCallState) {
-    // DX11_V449_SKY_GATE_TRACE: reaching here at all is a distinct outcome from
-    // reaching the probe, since this early-out sits between them.
+    // Reaching here is distinct from reaching the probe, since this early-out sits between them.
     {
       static uint32_t s_rasterizeSkyLogCount = 0;
       if (s_rasterizeSkyLogCount < 16u) {
@@ -4364,10 +4118,9 @@ void RtxContext::endFrame(std::uint64_t cachedReflexFrameId, Rc<DxvkImage> targe
     const uint32_t curViewportCount = m_state.gp.state.rs.viewportCount();
     const DxvkViewportState curVp = m_state.vp;
 
-    // V789: Kenshi's G-buffer clears to (0, 0.5, 0), an encoded deferred
-    // background, not sky radiance. The generic clear interception captures
-    // that unrelated target's colour. Use black for our sky targets only so
-    // uncovered dome regions cannot illuminate the scene green.
+    // Kenshi's G-buffer clears to (0, 0.5, 0), an encoded deferred background, not sky radiance, and the
+    // generic clear interception would capture that colour. Use black for our sky targets only, so
+    // uncovered dome regions cannot light the scene green.
     if (useKenshiBlackSkyClear()) {
       m_skyClearValue = {};
       ONCE(KENSHI_DIAGNOSTIC_INFO("[RTX Sky V789] Capture background is black for sky matte and all six probe faces; game clears unchanged."));

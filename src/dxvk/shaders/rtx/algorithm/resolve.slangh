@@ -381,22 +381,12 @@ void resolveVertex<T: IBasePayloadState>(
   surfaceInteraction = surfaceInteractionCreate<SurfaceGenerateTangents>(surface, rayInteraction, ray);
 
 #ifndef RAY_TRACING_PRIMARY_RAY
-  // DX11_V630_KENSHI_WATER_ONE_WAY. The same rule visibility.slangh applies to
-  // shadow rays, applied to bounce rays: simulated-depth water exists only for
-  // rays entering it from above, so a secondary ray travelling UPWARD passes
-  // straight through. That is what lets a submerged surface see the sky and
-  // collect bounce light instead of seeing the underside of the sheet.
-  //
-  // Not gated on the instance's opaque bit: both resolve paths trace with
-  // RAY_FLAG_FORCE_OPAQUE, so this hit function runs on every committed hit
-  // regardless of how the instance is flagged. Only visibility rays needed the
-  // FORCE_NO_OPAQUE hook in rtx_instance_manager.cpp.
-  //
-  // RAY_TRACING_PRIMARY_RAY covers the whole gbuffer pass including PSR, so the
-  // camera still sees the surface and a reflection of water in something else
-  // still shows water. Guarded on continueResolving for the same reason the clip
-  // plane below is: with the interaction budget spent, stopping on the water is
-  // correct and punching a hole through to nothing is not.
+  // Simulated-depth water exists only for rays entering it from above (the rule visibility.slangh
+  // applies to shadow rays), so an upward bounce ray passes through and a submerged surface can see the
+  // sky and collect bounce light. Not gated on the instance's opaque bit: both resolve paths trace with
+  // RAY_FLAG_FORCE_OPAQUE, so this runs on every committed hit. Primary rays (including PSR) still see
+  // the surface. Guarded on continueResolving like the clip plane below: with the interaction budget
+  // spent, stopping on the water is correct.
   if (surface.isAnimatedWater
    && cb.kenshiWaterTransparency < 0.0f
    && ray.direction.y > 0.0f
@@ -412,29 +402,13 @@ void resolveVertex<T: IBasePayloadState>(
 
   if (isSurfaceClipped(surface, surfaceInteraction) && resolveVertexState.continueResolving)
   {
-    // DX11_V644_KENSHI_CLIP_CONTINUE. Resume the SAME ray past the clipped
-    // surface, instead of stepping sideways off it.
-    //
-    // resolveVertexFinalContinue offsets the origin along the negated triangle
-    // normal. That is right for punching THROUGH a surface, but wrong for
-    // RESUMING a ray. When the clipped surface is seen at a grazing angle - and
-    // Kenshi's terrain meets an interior floor at a few degrees - that offset is
-    // very nearly perpendicular to the ray, so what continues is a parallel ray
-    // displaced sideways rather than the original ray carried on. Everything
-    // behind the clipped surface is then sampled at the wrong point: the floor
-    // and the furniture standing on it appear shifted and slightly raised, and
-    // the discontinuity along the intersection shows as a hairline crack that
-    // one can see through.
-    //
-    // It is optically a slab refraction, and the sideways error is amplified by
-    // 1/sin(angle) - so an offset far too small to see head-on becomes
-    // centimetres at a few degrees, which is why the artefact appears only where
-    // terrain grazes the floor and disappears when viewed along the terrain's
-    // own angle.
-    //
-    // Advancing ALONG the ray to the same perpendicular clearance keeps the
-    // origin on the ray's own line, so nothing behind it moves. It also keeps
-    // the accumulated hit distance honest, which the sideways offset did not.
+    // Resume the same ray past the clipped surface instead of stepping sideways off it.
+    // resolveVertexFinalContinue offsets the origin along the negated triangle normal, which is right for
+    // punching through a surface but not for resuming a ray: at grazing angles (terrain meeting an interior
+    // floor) that offset is nearly perpendicular to the ray, so a displaced parallel ray continues and
+    // everything behind is sampled at the wrong point (a see-through hairline crack; the error grows as
+    // 1/sin(angle)). Advancing along the ray keeps the origin on the ray's own line and the hit distance
+    // honest.
     if (!teleport)
     {
       const float3 clipNormal = surfaceInteraction.geometryNormal;
@@ -442,29 +416,15 @@ void resolveVertex<T: IBasePayloadState>(
       const float clipClearance =
         length(calculateRayOffset(surfaceInteraction.positionError, clipNormal));
 
-      // DX11_V645. A ray crosses a plane EXACTLY ONCE, so resuming along the ray
-      // needs only enough to escape floating-point self-intersection at the hit
-      // point. It does not need the perpendicular clearance divided by
-      // cos(angle) - that quantity belongs to the normal-offset scheme this
-      // replaced, and V644 carried it over by mistake. At grazing incidence it
-      // diverges, hits the clamp, and moves the resumed origin up to 1.6 units
-      // (about 8 cm here) beyond the hit, straight over the floor that was
-      // supposed to be found next. That was the second cause of the same crack:
-      // V643's sideways displacement became V644's forward overshoot.
-      //
-      // The two errors are not symmetric, and the cap below reflects that.
-      // Overshooting past a surface is unrecoverable - the geometry is simply
-      // gone and the pixel sees through. Under-advancing merely lands on the
-      // rejected surface again, which is rejected again and costs one
-      // interaction from the resolve budget. So the amplification is capped at
-      // 10x rather than 10000x, deliberately erring toward a re-hit.
+      // A ray crosses a plane exactly once, so resuming only needs to escape floating-point
+      // self-intersection; the perpendicular clearance divided by cos(angle) diverges at grazing incidence
+      // and overshoots past the next surface. Overshooting is unrecoverable (the pixel sees through), while
+      // under-advancing only re-hits the rejected surface and costs one interaction, so the amplification is
+      // capped at 10x.
       const float clipAdvance = clipClearance / max(clipCosine, 0.1f);
 
-      // DX11_V646. surfaceInteraction.position is interpolated from UNORM16
-      // barycentrics, so it can lie off the traced ray on large triangles.
-      // Advancing from that point preserves the lateral error regardless of
-      // clipAdvance. Resume from the hardware ray parameter instead; keep the
-      // V645 clearance unchanged to isolate the reconstructed-position error.
+      // surfaceInteraction.position is interpolated from UNORM16 barycentrics and can lie off the traced ray
+      // on large triangles; resume from the hardware ray parameter instead.
       resolveVertexState.origin = ray.origin + ray.direction * (rayHitInfo.hitDistance + clipAdvance);
       return;
     }

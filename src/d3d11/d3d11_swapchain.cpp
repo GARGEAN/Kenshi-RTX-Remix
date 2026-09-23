@@ -1046,9 +1046,8 @@ namespace dxvk {
     const bool wantDlfg = isPrimary && m_context->isDLFGEnabled();
     if (wantDlfg != (m_dlfgPresenter != nullptr)) {
       CreatePresenter(wantDlfg);
-      // V796: match D3D9's CreatePresenter -> RecreateSwapChain sequence.
-      // The base constructor cannot dispatch to the DLFG override, which
-      // establishes the application backbuffers and sizes the real WSI chain.
+      // Match D3D9's CreatePresenter -> RecreateSwapChain sequence. The base constructor cannot dispatch to
+      // the DLFG override, which establishes the application backbuffers and sizes the real WSI chain.
       // m_dirty was consumed before entering PresentImage, so do this now.
       RecreateSwapChain(wantDlfg ? FALSE : m_vsync);
     }
@@ -1070,7 +1069,7 @@ namespace dxvk {
     // contains the ray-traced composite when the blitter copies it to the
     // Vulkan swap chain image.
     if (isPrimary) {
-      // V744: restore the general capture on the foreground primary swapchain.
+      // Ctrl+Alt+O: the general capture on the foreground primary swapchain.
       static bool s_ctrlAltOPrevDown = false;
       DWORD captureForegroundPid = 0;
       GetWindowThreadProcessId(GetForegroundWindow(), &captureForegroundPid);
@@ -1082,7 +1081,7 @@ namespace dxvk {
       if (captureRising && kenshi_telemetry::fileOutputEnabled() && kenshi_telemetry::enabled()) {
         immediateContext->m_rtx.ArmOnDemandDiagnostics();
         immediateContext->m_rtx.RequestKenshiDebugScreenshot();
-        // V782: terrain metadata belongs to the established capture action.
+        // Terrain metadata belongs to the same capture action.
         terrain_audit::requested.store(true, std::memory_order_relaxed);
         KENSHI_DIAGNOSTIC_INFO("[D3D11SwapChain][capture-v744] Ctrl+Alt+O: main capture armed; terrain trace included; keep cursor on target; join by frame+draw ID");
       }

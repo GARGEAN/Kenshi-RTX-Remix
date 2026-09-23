@@ -54,10 +54,9 @@ namespace dxvk::prepared_terrain {
     return remaining != 0;
   }
 
-  // V704: cached products retain resources, not registry entries. Retire only at
-  // actual native/capture-buffer destruction. Occupancy follows live resources,
-  // rather than all buffer addresses encountered since launch. Unique tokens
-  // also prevent a recycled address from matching an old resource's version.
+  // Cached products retain resources, not registry entries. Retire only at actual native/capture-buffer
+  // destruction. Occupancy follows live resources rather than every buffer address seen since launch;
+  // unique tokens also stop a recycled address from matching an old resource's version.
   struct RevisionStats {
     uint64_t live = 0, peak = 0, registered = 0, retired = 0;
   };

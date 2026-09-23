@@ -56,33 +56,20 @@ namespace dxvk {
   // Make this static and not a member of AccelManager to make it safe updating the count from ~PooledBlas()
   static int g_blasCount = 0;
 
-  // DX11_V334_TLAS_STATS. Plain counters, never Vulkan objects, so they are
-  // safe as translation-unit statics.
+  // TLAS stats. Plain counters, never Vulkan objects, so they are safe as TU statics.
   static std::atomic<uint32_t> s_tlasHidden { 0u };
   static std::atomic<uint32_t> s_tlasGc { 0u };
   static std::atomic<uint32_t> s_tlasZeroMask { 0u };
   static std::atomic<uint32_t> s_tlasInTlas { 0u };
-  // DX11_V344_TLAS_CONTENTS: entries present in the TLAS but inert.
+  // Entries present in the TLAS but inert.
   static std::atomic<uint32_t> s_tlasNullBlas { 0u };
   static std::atomic<uint32_t> s_tlasZeroXform { 0u };
 
-  // DX11_V375_BLAS_ROUTE: account for every non-rejected instance by which BLAS
-  // route it took, and whether that route actually produced a GPU build.
-  //
-  // Kenshi's wall segments are 1743 indices = 581 primitives, below
-  // minPrimsInDynamicBLAS (1000), so they are force-merged; the geometry that
-  // does render (10575/25710-index meshes) is above it and gets a dynamic BLAS
-  // with its own TLAS entry. That is the one structural difference between
-  // "renders" and "does not render" that survived every other test, so the
-  // merged pipeline needs to be accountable end to end.
-  //
-  // Note what these counters exist to prevent: `instances` (889) versus
-  // `inTlas` (334) looks like a huge loss but is NOT one - a merged bucket
-  // collapses many instances into a single TLAS entry by design, and an
-  // instance on that route legitimately carries
-  // accelerationStructureReference == 0 in its own template. Both readings
-  // were mistaken for defects. These counters make the split explicit so the
-  // comparison stops being misleading.
+  // Account for every non-rejected instance by the BLAS route it took, and whether that route produced a
+  // GPU build. Instances below minPrimsInDynamicBLAS (1000 primitives, e.g. Kenshi's wall segments) are
+  // force-merged. `instances` versus `inTlas` is not a loss: a merged bucket collapses many instances
+  // into one TLAS entry, and an instance on that route legitimately has
+  // accelerationStructureReference == 0 in its own template.
   static std::atomic<uint32_t> s_mergedBuckets { 0u };
   static std::atomic<uint32_t> s_mergedBucketInstances { 0u };
   static std::atomic<uint32_t> s_mergedBucketsBuilt { 0u };
@@ -94,19 +81,16 @@ namespace dxvk {
   // carries none of it.
   static std::atomic<uint32_t> s_bucketDetailBudget { 0u };
 
-  // DX11_V380_CACHE_ACCOUNTING: the cached-bucket RESTORE path, which was dark.
-  // `skipped` is instances that took the bucket-cache `continue`; the rest describe
-  // what the restore actually put back. One TLAS entry is emitted per bucket, so
-  // entries << skipped is normal - the question these answer is whether every
-  // skipped instance belongs to a bucket that was restored at all.
+  // The cached-bucket restore path. `skipped` counts instances that took the bucket-cache `continue`; the
+  // rest describe what the restore put back. One TLAS entry per bucket, so entries << skipped is normal;
+  // the question is whether every skipped instance belongs to a restored bucket.
   static std::atomic<uint32_t> s_bucketCacheSkippedInstances { 0u };
   static std::atomic<uint32_t> s_cachedBucketsRestored { 0u };
   static std::atomic<uint32_t> s_cachedBucketMemberInstances { 0u };
   static std::atomic<uint32_t> s_cachedBucketTlasEntries { 0u };
   static std::atomic<uint32_t> s_cachedBucketNoBlas { 0u };
   static std::atomic<uint32_t> s_restoreDetailBudget { 0u };
-  // DX11_V382: its own budget, so the dynamic log cannot be starved by the merged
-  // and cached-bucket logs sharing one pool.
+  // Its own budget, so the dynamic log cannot be starved by the merged and cached-bucket logs.
   static std::atomic<uint32_t> s_dynamicDetailBudget { 0u };
 
   void AccelManager::requestBucketDetailDump(uint32_t lines) {
@@ -772,30 +756,11 @@ namespace dxvk {
     }
 
     // --- Per-bucket dirty detection ---
-    // Build a validity set of current instances for removal detection, then scan
-    // each cached bucket.  A bucket is dirty if any of its instances was removed,
-    // had a transform / material / geometry change, or if the BlasEntry was updated
-    // this frame.  Otherwise the bucket is clean and can be fully restored from cache.
-    // DX11_V341_NO_BUCKET_CACHE (diagnostic): the incremental path skips every
-    // instance sitting in a "clean" cached bucket and restores its surfaces and
-    // TLAS entries from cache afterwards. The geometry-hash debug view shows an
-    // inversion that points straight at it: objects whose hash churns every
-    // frame (windmill engine, some signs and doors) always take the FULL path
-    // and render reliably, while objects with stable hashes (the buildings)
-    // qualify for the cache and are the ones that flicker. Within a fixed
-    // camera angle their captured vertices, their hash and their BLAS are all
-    // constant - constant input, alternating output - which is the signature of
-    // a reuse/restore path rather than anything that produces geometry.
-    //
-    // Rebuild every bucket every frame and see whether the flicker stops. Pure
-    // cost, no correctness risk: this is the path the churning objects already
-    // take successfully every frame.
-    // REVERTED: disabling the cache did not change the flicker and actively
-    // regressed the runtime - dynamic objects (character weapons) stopped
-    // moving smoothly and began teleporting between fixed points, and both runs
-    // ended in a freeze after vertex-explosion events. The cache is load-bearing
-    // for per-frame instance updates in this fork, so it is not a free
-    // diagnostic to switch off.
+    // Build a validity set of current instances for removal detection, then scan each cached bucket. A
+    // bucket is dirty if any of its instances was removed, had a transform / material / geometry change,
+    // or if the BlasEntry was updated this frame; otherwise it is restored from cache.
+    // The bucket cache is load-bearing for per-frame instance updates: disabling it makes dynamic objects
+    // teleport between fixed points.
     static constexpr bool kUseBucketCache = true;
     const bool hasValidBucketCache = kUseBucketCache && !m_cachedBuckets.empty();
     std::vector<bool> bucketDirty;
@@ -976,11 +941,8 @@ namespace dxvk {
         if (bucketIdxIt != m_instanceBucketIndex.end() &&
             bucketIdxIt->second < bucketDirty.size() &&
             !bucketDirty[bucketIdxIt->second]) {
-          // This instance is in a clean cached bucket — skip all per-instance work
-          // DX11_V380_CACHE_ACCOUNTING: count it. This `continue` is the busiest
-          // exit in the whole pipeline (29 census windows showed the routing loop
-          // processing ZERO instances, i.e. every one skipped here) and nothing has
-          // ever measured whether the restore below actually re-emits them.
+          // This instance is in a clean cached bucket; skip all per-instance work. Counted, since the restore
+          // below must re-emit it.
           kenshi_telemetry::add(s_bucketCacheSkippedInstances);
           instance->clearBlasDirty();
           continue;
@@ -1185,33 +1147,12 @@ namespace dxvk {
         forceRebuild |= previousResource != ommBinding.resource.ptr();
       }
 
-      // DX11_V378_STALE_BLAS_TRANSFORM: a dynamic BLAS must be built with NO
-      // pre-transform. Its per-instance placement is carried by the TLAS instance
-      // transform, so `transformData` has to be NULL here.
-      //
-      // It is not necessarily NULL on arrival. `transformData.deviceAddress` is
-      // written in exactly ONE place - the merged-bucket path below - and is never
-      // cleared. The only thing that would zero it is fillGeometryInfoFromBlasEntry,
-      // which rebuilds buildGeometries from scratch, and that call is SKIPPED
-      // whenever the geometry has not changed (always true for a static mesh).
-      //
-      // So a BlasEntry that ever passed through the merged path carries a non-NULL
-      // transformData into every later dynamic build, pointing at a slot in that
-      // frame's transform buffer which has since been recycled for some other
-      // instance. The AS build then pre-transforms the vertices by an unrelated
-      // matrix while the TLAS instance applies the real one on top.
-      //
-      // This bites geometry that OSCILLATES between the two paths. Routing is
-      // decided by `blasPrims > maxPrimsForMergedBLAS` and
-      // `getLinkedInstances().size() > 1`, so a small mesh with a varying instance
-      // count goes merged in some frames and dynamic in others. Kenshi's wall
-      // segments are exactly that: 581 primitives (below minPrimsInDynamicBLAS) with
-      // a linked-instance count measured at 384, 56 and 14 across runs.
-      //
-      // Per the Vulkan spec this is also a hard UPDATE-mode requirement: if
-      // transformData was NULL for the source build "then it must be NULL", and if
-      // it was non-NULL "then it must not be NULL". validateUpdateMode did not test
-      // it (see the check added there).
+      // A dynamic BLAS must be built with no pre-transform: its placement is the TLAS instance transform.
+      // transformData.deviceAddress is written only by the merged-bucket path and never cleared
+      // (fillGeometryInfoFromBlasEntry, the only reset, is skipped when the geometry is unchanged), so a
+      // BlasEntry that oscillates between the merged and dynamic paths - small meshes with a varying
+      // instance count - would pre-transform its vertices by a recycled, unrelated matrix. Vulkan also
+      // requires transformData's NULL-ness to match the source build in UPDATE mode.
       for (auto& dynamicGeometry : blasEntry->buildGeometries) {
         if (dynamicGeometry.geometryType == VK_GEOMETRY_TYPE_TRIANGLES_KHR)
           dynamicGeometry.geometry.triangles.transformData.deviceAddress = 0ull;
@@ -1238,13 +1179,10 @@ namespace dxvk {
 
       // Validate that the selected blas is compatible with the current build info for update purposes
       bool update = blasEntry->frameLastUpdated == currentFrame;
-      // DX11_V378_STALE_BLAS_TRANSFORM: primitiveCount must also match the source
-      // build (VUID-vkCmdBuildAccelerationStructuresKHR-primitiveCount-03769), and
-      // validateUpdateMode structurally cannot check it - primitiveCount lives in
-      // VkAccelerationStructureBuildRangeInfoKHR, not in the geometry info it is
-      // given. The merged path compensates with its own
-      // `selectedBlas->primitiveCounts == bucket->primitiveCounts` comparison; this
-      // path had no equivalent, so bring it to parity.
+      // primitiveCount must also match the source build
+      // (VUID-vkCmdBuildAccelerationStructuresKHR-primitiveCount-03769), which validateUpdateMode cannot
+      // check (it lives in VkAccelerationStructureBuildRangeInfoKHR). The merged path compares
+      // primitiveCounts itself; this brings the dynamic path to parity.
       const std::vector<uint32_t> currentPrimitiveCounts {
         blasEntry->buildRanges[0].primitiveCount };
       if (update && !build
@@ -1294,43 +1232,18 @@ namespace dxvk {
         blasToBuild.push_back(buildInfo);
         blasRangesToBuild.push_back(&blasEntry->buildRanges[0]);
 
-        // DX11_V382_DYNAMIC_BLAS_LOG: the dynamic path had NO per-entry logging, and
-        // it is the only population that can hold Kenshi's 1743-vertex wall segment.
-        //
-        // Both bucket logs are structurally blind to it: `[blas-route]` only sees
-        // dirty/new MERGED buckets, and `[blas-restore]` only sees clean cached ones.
-        // Reasoning from the wall's absence in those two logs produced one wrong
-        // conclusion in each direction ("it must be merged", then "it must be
-        // dynamic"). This is the measurement that settles it, and it also carries the
-        // fields needed to explain blasRef=0 on half the wall instances: dynamic
-        // instances get their acceleration-structure reference from addBlas(), so a
-        // null reference here means either this loop never ran for them or the
-        // reference was zero when it did.
         copyAccelerationStructureBuildGeometryInfo(buildInfo, selectedBlas->buildInfo);
-        // DX11_V378_STALE_BLAS_TRANSFORM: record what this BLAS was actually built
-        // with, so the primitiveCount comparison above has something true to test
-        // against next frame. PooledBlas::primitiveCounts was previously written
-        // only by the merged path, and pooled BLASes are recycled between the two
-        // paths - so on this path it was either empty or left over from a previous
-        // MERGED use of the same pooled structure.
+        // Record what this BLAS was built with, so next frame's primitiveCount comparison tests something
+        // true. Pooled BLASes are recycled between the merged and dynamic paths, so the value could otherwise
+        // be stale.
         selectedBlas->primitiveCounts = currentPrimitiveCounts;
       }
 
-      // DX11_V382_DYNAMIC_BLAS_LOG: the dynamic path had NO per-entry logging, and it
-      // is the only population that can hold Kenshi's 1743-vertex wall segment.
-      //
-      // Both bucket logs are structurally blind to it: `[blas-route]` only sees
-      // dirty/new MERGED buckets, and `[blas-restore]` only sees clean cached ones.
-      // Reasoning from the wall's absence in those two logs produced one wrong
-      // conclusion in each direction ("it must be merged", then "it must be
-      // dynamic"). This is the measurement that settles it.
-      //
-      // Placed OUTSIDE the `if (update || build)` block on purpose, so a dynamic BLAS
-      // that is reused without any rebuild - the case most likely to be at fault -
-      // still reports. It also carries what is needed to explain blasRef=0 on half
-      // the wall instances: dynamic instances take their acceleration-structure
-      // reference from addBlas() just below, so a null reference here means the
-      // reference was already zero when this loop ran.
+      // Per-entry dynamic BLAS log (hotkey-armed): neither bucket log can see this population
+      // ([blas-route] only covers dirty/new merged buckets, [blas-restore] only clean cached ones). Placed
+      // outside the `if (update || build)` block so a BLAS reused without a rebuild still reports. Dynamic
+      // instances take their acceleration-structure reference from addBlas() just below, so a null reference
+      // here means it was already zero when this loop ran.
       {
         uint32_t dynamicDetailBudget = s_dynamicDetailBudget.load(std::memory_order_relaxed);
         if (kenshi_telemetry::enabled() && dynamicDetailBudget > 0u) {
@@ -1433,20 +1346,9 @@ namespace dxvk {
           }
         }
 
-        // DX11_V380_CACHE_ACCOUNTING: this restore path was completely dark.
-        //
-        // The `[blas-route]` bucket log added earlier lives inside
-        // createBlasBuffersAndInstances, which only ever sees DIRTY/NEW buckets - a
-        // clean cached bucket structurally cannot appear in it. That blind spot is
-        // what made Kenshi's wall segments look like they were absent from the
-        // merged path and therefore "must be dynamic", an inference that was wrong.
-        // The wall spends most frames in exactly this population.
-        //
-        // One entry is emitted here per BUCKET, covering all of its member
-        // instances through the merged BLAS - so `restored` counting far below
-        // `skipped` is expected and not a loss by itself. What would be a loss is
-        // skipped instances belonging to NO restored bucket; the counters exist to
-        // make that difference arithmetic instead of argument.
+        // Cached-bucket restore accounting. One entry is emitted per bucket, covering all its member instances
+        // through the merged BLAS, so `restored` far below `skipped` is expected; a loss would be skipped
+        // instances belonging to no restored bucket.
         kenshi_telemetry::add(s_cachedBucketsRestored);
         kenshi_telemetry::add(s_cachedBucketMemberInstances, uint32_t(cached.instances.size()));
         kenshi_telemetry::add(s_cachedBucketTlasEntries);
@@ -1457,8 +1359,7 @@ namespace dxvk {
         uint32_t restoreDetailBudget = s_restoreDetailBudget.load(std::memory_order_relaxed);
         if (kenshi_telemetry::enabled() && restoreDetailBudget > 0u) {
           s_restoreDetailBudget.store(restoreDetailBudget - 1u, std::memory_order_relaxed);
-          // Member vertex counts identify WHICH meshes this bucket carries - the
-          // wall segment is 1743, so its presence or absence here is the answer.
+          // Member vertex counts identify which meshes this bucket carries.
           std::string members;
           uint32_t listed = 0;
           for (const RtInstance* memberInst : cached.instances) {
@@ -1793,11 +1694,9 @@ namespace dxvk {
         kenshi_telemetry::add(s_mergedBucketsSkipped, 1u);
       }
 
-      // DX11_V375_BLAS_ROUTE: per-bucket detail, hotkey-armed and bounded. This is
-      // the line that says whether the bucket holding Kenshi's wall segments got a
-      // real GPU build, how much geometry it carries, and where its first instance
-      // sits - which is what distinguishes "referenced but never built" from
-      // "built and still not hit".
+      // Per-bucket detail (hotkey-armed, bounded): whether the bucket got a real GPU build, how much geometry
+      // it carries and where its first instance sits - separating "referenced but never built" from "built
+      // and not hit".
       kenshi_telemetry::add(s_mergedBuckets, 1u);
       if (selectedBlas->accelerationStructureReference == 0ull)
         kenshi_telemetry::add(s_mergedBucketNoBlas, 1u);
@@ -2120,16 +2019,10 @@ namespace dxvk {
   }
 
   Rc<DxvkBuffer> AccelManager::getKenshiBloodBuffer(Rc<DxvkContext> ctx) {
-    // DX11_V519. The RT shaders declare kenshiBloodArgsBuffer unconditionally at
-    // BINDING_KENSHI_BLOOD_BUFFER, so this binding must NEVER be null: a null
-    // descriptor faults inside the driver on submit (observed as an AV READ at
-    // 0x0 in nvoglv64.dll on the DXVK queue thread, which then loses the device
-    // and takes the game's GUI down with it).
-    //
-    // uploadSurfaceData creates the buffer, but it returns early while
-    // m_reorderedSurfaces is empty - which is every startup and loading frame,
-    // i.e. exactly the frames the game boots through. So the buffer has to be
-    // guaranteed here, the same way getKenshiTerrainBuffer guarantees its own.
+    // The RT shaders declare kenshiBloodArgsBuffer unconditionally, so this binding must never be null: a
+    // null descriptor faults inside the driver on submit and loses the device. uploadSurfaceData creates
+    // the buffer but returns early while m_reorderedSurfaces is empty (every startup and loading frame), so
+    // it is guaranteed here, as getKenshiTerrainBuffer does for its own.
     static constexpr VkDeviceSize kBloodRecordSize = 8u * sizeof(uint32_t);
 
     if (m_kenshiBloodBuffer == nullptr) {
@@ -2296,8 +2189,8 @@ namespace dxvk {
     }
   }
 
-  // V713: scoped to one immutable build list, never retained across frames.
-  // Preserve the first match from EACH pool, including both when handles overlap.
+  // Scoped to one immutable build list, never retained across frames. Preserve the first match from each
+  // pool, including both when handles overlap.
   using BlasDestinationOwners = std::array<Rc<DxvkAccelStructure>, 2>;
   static std::vector<BlasDestinationOwners> resolveBlasDestinationOwners(
       const std::vector<Rc<PooledBlas>>& pooled,
@@ -2326,10 +2219,9 @@ namespace dxvk {
     return result;
   }
 
-  // V714: the FULL original post-flush input set, local to one buildBlases call.
-  // These consecutive input registrations contain no intervening GPU commands.
-  // accessBuffer/recordCommands emits global memory barriers here, so their
-  // stage/access union preserves coverage without one barrier per geometry.
+  // The full original post-flush input set, local to one buildBlases call. These consecutive input
+  // registrations contain no intervening GPU commands. accessBuffer/recordCommands emits global memory
+  // barriers here, so their stage/access union preserves coverage without one barrier per geometry.
   struct BlasBuildInputs {
     std::vector<Rc<DxvkBuffer>> buffers;
     std::unordered_set<const DxvkBuffer*> seen;
@@ -2365,8 +2257,8 @@ namespace dxvk {
     }
   };
 
-  // V717: lookup lives only through this immutable build list. Never weaken the
-  // final command list's full ray-tracing ownership or the original barrier union.
+  // Lookup lives only through this immutable build list. Never weaken the final command list's full
+  // ray-tracing ownership or the original barrier union.
   struct BlasBatchLookup {
     struct View { const BlasEntry* entry=nullptr;
       const std::vector<VkAccelerationStructureGeometryKHR>* geometries=nullptr;
@@ -2756,28 +2648,14 @@ namespace dxvk {
 
     ScopedGpuProfileZone(ctx, "buildTLAS");
 
-    // DX11_V334_TLAS_STATS: what actually reaches the TLAS this frame, across
-    // all three types. If this alternates while the instance count is flat, the
-    // flicker lives here rather than anywhere upstream.
+    // What actually reaches the TLAS this frame, across all three types.
     {
       size_t merged = 0;
-      // DX11_V344_TLAS_CONTENTS: inspect what traversal will actually consume,
-      // not how many entries there are. Every producer-side stage measures
-      // clean, so the remaining possibility is that an entry is present but
-      // inert. Two ways that happens:
-      //
-      //  nullBlas - accelerationStructureReference == 0. The cached-bucket
-      //    restore builds its template with `cached.tlasInstance = {}` and only
-      //    fills the reference `if (cached.assignedBlas.ptr())`, so a bucket
-      //    that failed to get a pooled BLAS yields an instance pointing at
-      //    nothing. Rays pass straight through it while it still counts as
-      //    present, unhidden, non-GC'd and non-zero-mask - which is precisely
-      //    the combination every counter so far has reported.
-      //
+      // Inspect what traversal will consume, not just how many entries there are. An entry can be present
+      // but inert:
+      //  nullBlas  - accelerationStructureReference == 0 (the cached-bucket restore only fills the
+      //              reference if the bucket got a pooled BLAS); rays pass through it.
       //  zeroXform - an all-zero 3x4, which collapses the instance to a point.
-      //
-      // Either would be invisible to `inTlas`, and both are consumed by the
-      // tracer rather than produced by the bridge.
       uint32_t nullBlas = 0, zeroXform = 0;
       for (size_t n = 0; n < Tlas::Count; ++n) {
         merged += m_mergedInstances[n].size();
@@ -2964,17 +2842,9 @@ namespace dxvk {
             oldTriangles.vertexStride != newTriangles.vertexStride) {
           return false;
         }
-        // DX11_V378_STALE_BLAS_TRANSFORM: the spec requires transformData's
-        // NULL-ness to match the source build - "if it was NULL then it must be
-        // NULL", "if it was not NULL then it must not be NULL". This check was
-        // absent, so an update could be issued across a NULL/non-NULL change,
-        // which is undefined behaviour and on NVIDIA typically yields an
-        // acceleration structure that traverses to nothing: present in the TLAS,
-        // referenced, and hit by no rays.
-        //
-        // That combination is exactly the measured symptom for Kenshi's walls,
-        // tents and near ground, and it is reachable here because the merged path
-        // sets transformData and nothing ever cleared it.
+        // Vulkan requires transformData's NULL-ness to match the source build in UPDATE mode ("if it was NULL
+        // then it must be NULL" and vice versa). An update across a NULL/non-NULL change is undefined and on
+        // NVIDIA typically yields an acceleration structure that traverses to nothing.
         if ((oldTriangles.transformData.deviceAddress == 0ull) !=
             (newTriangles.transformData.deviceAddress == 0ull)) {
           return false;

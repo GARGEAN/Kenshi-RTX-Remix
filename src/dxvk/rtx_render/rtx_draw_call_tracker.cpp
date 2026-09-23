@@ -40,8 +40,8 @@
 
 namespace dxvk {
 
-  // Native ground vertices carry tile placement. Keep V737 source ownership
-  // discrimination, while V739 lets a native origin reset preserve that owner.
+  // Native ground vertices carry tile placement. Keep source-ownership discrimination, while letting a
+  // native origin reset preserve the owner.
   static XXH64_hash_t groundTrackingBucket(XXH64_hash_t topology,
       XXH64_hash_t vertices, const Matrix4& transform, XXH64_hash_t shader,
       uint32_t bones) {
@@ -58,24 +58,23 @@ namespace dxvk {
     identity.topology = topology;
     identity.vertices = vertices;
     identity.transform = transform;
-    // V739: native translation is an origin, not part of ground ownership.
-    // Tracking positions are shifted by the authoritative native reset event.
+    // Native translation is an origin, not part of ground ownership; tracking positions are shifted by the
+    // authoritative native reset event.
     identity.transform[3].xyz() = Vector3(0.f);
     return XXH3_64bits_withSeed(&identity, sizeof(identity), 0x4b656e7368694772ull);
   }
 
-  // A skeletal pose changes the palette, not the source bind-pose vertices.
-  // Material + proximity cannot identify a part: the V731 capture shows one
-  // instance changing from 17109 upper-body vertices to 2136 lower-body vertices.
-  // Within a topology bucket, require the same source vertices as well.
+  // A skeletal pose changes the palette, not the source bind-pose vertices, and material plus proximity
+  // cannot identify a part (one instance was seen switching from 17109 upper-body to 2136 lower-body
+  // vertices). Within a topology bucket, require the same source vertices as well.
   static bool sameSkinnedSourceVertices(const ReplacementInstance* candidate,
                                        const ReplacementInstance::LookupKey& key) {
     return !candidate->isSkinned || (key.vertexPositionHash != kEmptyHash &&
       candidate->vertexPositionHash == key.vertexPositionHash);
   }
 
-  // V729: Kenshi's skinned object transform is identity; placement lives in
-  // the palette. Equal transforms must not shortcut spatial character tracking.
+  // Kenshi's skinned object transform is identity (placement lives in the palette), so equal transforms
+  // must not shortcut spatial character tracking.
   static bool sameTrackingPosition(const ReplacementInstance* candidate,
                                   const ReplacementInstance::LookupKey& key) {
     return !candidate->isSkinned ||
@@ -84,10 +83,9 @@ namespace dxvk {
        candidate->centroid.z == key.worldPos.z);
   }
 
-  // V730: the global search radius also serves camera travel and can span many
-  // copies of a small rigid mesh. Proximity alone at that scale is not ownership.
-  // Limit rigid fallback travel to the mesh's world-space bounding diameter;
-  // exact identities and skeletal tracking retain their existing behavior.
+  // The global search radius also serves camera travel and can span many copies of a small rigid mesh,
+  // where proximity alone is not ownership. Limit rigid fallback travel to the mesh's world-space
+  // bounding diameter; exact identities and skeletal tracking are unchanged.
   static bool withinRigidTrackingExtent(const ReplacementInstance* candidate,
                                        const ReplacementInstance::LookupKey& key) {
     if (candidate->isSkinned || !candidate->geometryBoundingBox.isValid())
@@ -236,16 +234,8 @@ namespace dxvk {
   }
 
   namespace {
-    // DX11_V652_IDENTITY_PROBE. Diagnostic only: nothing here changes which
-    // ReplacementInstance a draw resolves to.
-    //
-    // This is the layer that actually decides object identity across frames. The
-    // V651 probe measured the layer below it - DrawCallCache - and found ~144
-    // "steals" every single frame, but a BlasEntry is one GEOMETRY and N copies
-    // of a mesh sharing one BLAS is exactly what instancing is for, so that
-    // number was normal and uncorrelated with the flicker. A ReplacementInstance
-    // is one OBJECT, so two of them trading places is a real defect.
-    //
+    // Identity probe, diagnostic only. This is the layer that decides object identity across frames (a
+    // ReplacementInstance is one object; DrawCallCache below shares one BLAS across copies by design).
     // Levels, in the order findOrCreateReplacementInstance tries them:
     //   L1  exact identity hash   - geometry + material + transform all unchanged
     //   L2x exact transform       - same place, vertex positions match
@@ -253,10 +243,8 @@ namespace dxvk {
     //                               rtx.uniqueObjectDistance wins
     //   L25 cross-topology        - as L2s, across topology buckets
     //   L3  new instance
-    //
-    // L2s and L25 are where two identical objects can swap: the winner is
-    // whichever is nearest, and that can change as the scene reorders. Static
-    // geometry should be resolving on L1 every frame and never reaching them.
+    // L2s and L25 are where two identical objects can swap. Static geometry should resolve on L1 every
+    // frame.
     enum class IdentityLevel : uint32_t { L1 = 0u, L2Exact, L2Spatial, L25Cross, L3New, Count };
 
     std::atomic<uint32_t> g_identityCounts[uint32_t(IdentityLevel::Count)] = {};
@@ -400,11 +388,9 @@ namespace dxvk {
           return true;
         });
 
-      // V733: filtering claimed owners before the nearest search changes
-      // "nearest owner" into "nearest unused owner". The V732 capture contains
-      // chains where a draw lands within 0.01 units of an already-consumed
-      // owner's old position, then inherits a different owner's distant history.
-      // Preserve the old claim through the frame; ambiguity gets fresh history.
+      // Filtering claimed owners before the nearest search would turn "nearest owner" into "nearest unused
+      // owner": a draw landing next to an already-consumed owner's old position would inherit a different
+      // owner's distant history. Preserve the old claim through the frame; ambiguity gets fresh history.
       if (nearestMatch != nullptr && nearestMatch->isSkinned) {
         auto claims = m_skinnedTrackingClaims.find(key.spatialMapHash);
         if (claims != m_skinnedTrackingClaims.end()) {
@@ -526,11 +512,10 @@ namespace dxvk {
       objectToWorld
     };
 
-    // V732: a material bucket is not a character-part identity. Multiple parts
-    // share the same material and bone anchor, so L2.5 can steal a torso for a
-    // leg draw even without camera/character travel. Changed topology already
-    // requires fresh geometry in DrawCallCache; give it a fresh instance too.
-    // The separate light/external callers retain their explicit matching policy.
+    // A material bucket is not a character-part identity: several parts share the same material and bone
+    // anchor, so cross-topology matching could give a leg draw the torso's identity. Changed topology
+    // already requires fresh geometry in DrawCallCache; give it a fresh instance too. The light/external
+    // callers keep their explicit matching policy.
     const bool allowCrossTopology = false;
     ReplacementInstance* result = findOrCreateReplacementInstance(key, allowCrossTopology);
     if (kenshi_origin::state.owner == m_device && kenshi_origin::finite(kenshi_origin::state.snapshot)

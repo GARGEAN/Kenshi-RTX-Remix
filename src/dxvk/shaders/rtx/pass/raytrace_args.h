@@ -61,37 +61,16 @@ struct TerrainArgs {
   uint pad0;
 };
 
-// DX11_V396_KENSHI_TERRAIN: Kenshi blends its ground from a stack of detail
-// layers keyed by a splat map, then multiplies the result by a low-frequency
-// colour map. Only that colour map can reach an ordinary Remix material, which
-// is why terrain renders correctly tinted but with no grain.
-//
-// The parameters live here rather than in a per-material buffer because the
-// game uses ONE terrain material set per zone: every terrain draw measured in a
-// frame resolved the same colour map image and the same constants, and the
-// per-chunk variation is carried entirely by the interpolated texture
-// coordinate. `set` is 0 when no terrain draw has been seen, which is what the
-// material flag is checked against.
-//
-// The detail coordinate is derived from the overlay coordinate the surface
-// already interpolates, because both are affine in the same object-space
-// position:
-//
+// Kenshi terrain parameter set. The game blends its ground from detail layers keyed by a splat
+// map and multiplies the result by a low-frequency colour map; only that colour map reaches an
+// ordinary Remix material. Sets are content-addressed and stable across frames, and a terrain
+// material stores its index in secondaryTextureIndex. Several sets are live at once (ground,
+// terrain-blended rocks, neighbouring biomes), hence BINDING_KENSHI_TERRAIN_BUFFER.
+// The detail coordinate is derived from the interpolated overlay coordinate, since both are
+// affine in the same object-space position:
 //   objectPos.xz  = uv * rectSize + rectMin
 //   detailUv      = objectPos.xz * 0.0002 * layerScale
 //                 = uv * detailScale + detailOffset
-// DX11_V398_KENSHI_TERRAIN_PER_MATERIAL: Kenshi draws terrain with more than
-// one parameter set at a time - the ground and the terrain-blended rock
-// formations are separate families with their own rects, and neighbouring
-// biomes bring their own sets again. A single global set made whichever drew
-// last win, which showed up as the ground swapping texture sets with view
-// angle and as the rocks sampling their detail through the ground's rect.
-//
-// Sets are content-addressed and stable across frames, so a surface material
-// can store its index once (in secondaryTextureIndex, which terrain does not
-// otherwise use) and keep it while it is cached. They live in their own
-// structured buffer because the count is unbounded - see
-// BINDING_KENSHI_TERRAIN_BUFFER.
 
 struct KenshiTerrainArgs {
   // uv -> objectPos.xz * 0.0002, the base every layer scales from.
@@ -130,10 +109,9 @@ struct KenshiTerrainArgs {
   // objectPos.y = worldPos.y - objectHeightOffset, for the cliff projection.
   float objectHeightOffset;
   uint pad0;
-  // DX11_V528_KENSHI_TERRAIN_BIOME_BLEND: active blendMap channels, bits 0..3
-  // for x..w. Zero on every record that is not a biome-boundary primary, which
-  // is what keeps the selector inert for ordinary terrain and for every
-  // non-terrain material that lands in this buffer by index aliasing.
+  // Active blendMap channels, bits 0..3 for x..w. Zero on every record that is not a biome-boundary
+  // primary, which keeps the selector inert for ordinary terrain and for non-terrain materials aliased
+  // into this buffer.
   uint blendMask;
 
   // detailBase -> blendMap UV, the affine raster builds from `biomeData`.
@@ -497,101 +475,61 @@ struct RaytraceArgs {
   float wboitDepthWeightTuning;
   uint wboitEnabled;
 
-  // DX11_V458: transfer-function exponent applied to the rasterized sky probe
-  // before it is used as radiance. 1.0 = unchanged.
-  //
-  // MUST stay at the END of the struct and MUST stay identical to the copy in
-  // src/dxvk/rtx/pass/raytrace_args.h. These are two separate files: the C++
-  // side compiles the latter, the shaders compile this one. V456 changed only
-  // the C++ copy and inserted mid-struct, so the CPU wrote a shifted layout
-  // while the GPU kept reading the old one - which corrupted every field after
-  // the insertion point, including alphaBlendSurfacePackMult and the wboit*
-  // group just above, and turned working alpha transparencies milky.
+  // Transfer-function exponent applied to the rasterized sky probe before it is used as radiance.
+  // 1.0 = unchanged.
+  // Must stay at the END of the struct and identical to src/dxvk/rtx/pass/raytrace_args.h: the C++ side
+  // compiles that copy and the shaders this one, and inserting mid-struct in only one of them shifts the
+  // layout of every following field.
   float skyProbeDecodeGamma;
 
-  // DX11_V459: constant subtracted from every sky-probe channel before use,
-  // clamped at zero. This is the operator that actually matches the defect.
-  //
-  // The probe is UNBOUNDED HDR (VK_FORMAT_B10G11R11_UFLOAT_PACK32), so
-  // skyProbeDecodeGamma above only crushes values BELOW 1.0 - above it, an
-  // exponent EXPANDS: pow(5,2.2)=37, pow(10,2.2)=158. Applied to a sky
-  // containing a sun disc that detonated the highlights, which read as violent
-  // auto-exposure, environment-sampling fireflies and heavy glancing-angle
-  // noise. A black point removes the lifted floor (the star texture's dark
-  // background, which glows where raster is black) while leaving bright stars
-  // essentially untouched, and cannot amplify anything.
+  // Constant subtracted from every sky-probe channel before use, clamped at zero. The probe is unbounded
+  // HDR (B10G11R11_UFLOAT), so a decode gamma only crushes values below 1.0 and expands those above it
+  // (pow(10, 2.2) = 158), blowing up the sun disc. A black point removes the lifted floor (the star
+  // texture's dark background) without amplifying anything.
   float skyProbeBlackPoint;
 
-  // DX11_V460: independent gain on the sky probe's LIGHTING contribution.
-  //
-  // rtx.skyBrightness scales the visible sky (the screen-space matte, sampled
-  // in composite.comp.slang) AND the probe (the cubemap that lights the scene)
-  // together, so appearance and illumination could not be balanced against each
-  // other. This multiplies the probe only: the sky can be left matching raster
-  // while the light it casts is tuned separately.
+  // Independent gain on the sky probe's lighting contribution. rtx.skyBrightness scales both the visible
+  // sky (the screen-space matte in composite.comp.slang) and the probe that lights the scene; this scales
+  // the probe only, so appearance and illumination can be balanced separately.
   float skyProbeLightBrightness;
 
-  // DX11_V482: floor under the sky probe's LIGHTING contribution, so night never
-  // goes darker than a set level. Appearance is untouched.
-  //
-  // Kenshi's raster ambient does not come from the sky at all: it is the STATIC
-  // mp_irradiance/mp_specularity cubes scaled by
+  // Floor under the sky probe's lighting contribution, so night never goes darker than a set level;
+  // appearance is untouched. Kenshi's raster ambient comes from static irradiance/specularity cubes
+  // scaled by
   //   envColour.w *= clamp(sunDirection.y * 5 + 0.2, 0.1, 1.0)
-  // and sunDirection is horizon-clamped to y >= 0, so that scalar is 1.0 at
-  // midday and lands on exactly 0.2 at sunset and all night. Raster night ambient
-  // is a FLAT 20% of daytime ambient that never reaches zero. This bridge derives
-  // night ambient from a near-black sky probe instead, so the SHAPE is wrong, not
-  // the scale - which is why no single gain suits both day and night.
-  //
-  // A SCALAR deliberately: HLSL constant-buffer packing will not let a vector
-  // straddle a 16-byte boundary, so a float3 can re-pad differently between this
-  // file and its C++ twin. That is exactly how V456 corrupted every field after
-  // its insertion point. A float cannot straddle, so this is immune.
-  //
-  // Applied as max() AFTER skyBrightness and skyProbeLightBrightness, so it is
-  // expressed in the same final radiance units as the value it floors, and a
-  // daylit sky (already above it) is completely unaffected.
+  // with sunDirection horizon-clamped, so raster night ambient is a flat 20% of daytime; deriving it
+  // from a near-black sky probe gets the shape wrong, not just the scale.
+  // A scalar deliberately: a vector can re-pad differently between this file and its C++ twin. Applied
+  // as max() after skyBrightness and skyProbeLightBrightness, in final radiance units, so a daylit sky
+  // is unaffected.
   float skyProbeLightFloor;
 
-  // DX11_V483: Kenshi's per-region ambient tint, from ambientmap.png's rgb.
-  // Multiplies the sky probe's LIGHTING contribution only, mirroring the game's
-  // own `envLight.diffuse *= ambientMult.rgb`.
-  //
-  // THREE SCALARS, not a float3, for the same reason skyProbeLightFloor is a
-  // scalar: HLSL will not let a vector straddle a 16-byte boundary while C++
-  // packs it flat, so a float3 can re-pad differently between this file and its
-  // twin EVEN IF both declarations are identical. Scalars cannot straddle.
+  // Kenshi's per-region ambient tint (ambientmap.png rgb). Multiplies the sky probe's lighting
+  // contribution only, mirroring the game's `envLight.diffuse *= ambientMult.rgb`. Three scalars, not a
+  // float3: a vector can re-pad differently between this file and its twin even if both declarations
+  // are identical.
   float kenshiAmbientTintR;
   float kenshiAmbientTintG;
   float kenshiAmbientTintB;
 
-  // DX11_V510: brightness multiplier for Kenshi's billboard particles, applied
-  // where the opacity-lighting approximation reads the volumetric radiance cache.
-  //
-  // AT THE END, and verified to be at the end of the LIVE copies rather than
-  // trusted to be. The first attempt anchored on `wboitEnabled`, which is the
-  // last field of include/rtx/pass/raytrace_args.h but is followed by seven sky
-  // fields in the two copies that are actually compiled - so it landed
-  // mid-struct, which is exactly the V456/V457 corruption. Compare the stripped
-  // declaration lists of all three copies before believing any anchor here.
+  // Brightness multiplier for Kenshi's billboard particles, applied where the opacity-lighting
+  // approximation reads the volumetric radiance cache.
+  // Append-only. The two compiled copies of this struct end with extra sky fields, so diff the
+  // declaration lists of all three copies before adding a field.
   float kenshiParticleLightIntensity;
 
-  // DX11_V540_KENSHI_WETNESS. Kenshi's own weather wetness, already scaled by
-  // rtx.dx11.kenshiWetness on the CPU so the shader needs no separate knob.
-  // Genuinely global state (rain), read by reflected name off whichever terrain
-  // or object draw last carried it.
+  // Kenshi's weather wetness, pre-scaled by rtx.dx11.kenshiWetness on the CPU. Global state (rain),
+  // read by name from whichever terrain or object draw last carried it.
   float kenshiWetness;
   // World-space water level, compared against the hit's world Y to give the
   // near-water term. Only meaningful when kenshiWetness is being applied.
   float kenshiWaterHeight;
-  // DX11_V556: gain on Kenshi's own character gloss, which lives in the diffuse
-  // alpha and has no `glossMult` to scale it. Appended after the true last
-  // field of BOTH live copies; include/ is the dead one and is left alone.
+  // Gain on Kenshi's character gloss, which lives in the diffuse alpha with no glossMult to scale it.
+  // Appended after the true last field of both live copies (include/ is not compiled).
   float kenshiCharacterGloss;
-  // DX11_V557_KENSHI_DUST: Kenshi's biome dust overlay. Global, like wetness -
-  // the colour and complete amount vector are properties of the region, published each
-  // frame from whichever draw last carried them. The noise texture itself is
-  // per-material and rides in the material's tangentTextureIndex.
+  // Kenshi's biome dust overlay. Global like wetness: colour and amount vector are region properties
+  // published each frame from whichever draw last carried them. The noise texture is per material
+  // (tangentTextureIndex).
   float kenshiDustColourR;
   float kenshiDustColourG;
   float kenshiDustColourB;
@@ -600,9 +538,8 @@ struct RaytraceArgs {
   float kenshiDustAmountZ;
   float kenshiDustStrength;
 
-  // DX11_V591_KENSHI_WATER_RIPPLES. Kenshi's water parameters, published the
-  // same last-draw-wins way wetness and dust are: one water material exists in
-  // the whole game and its constants are per-zone globals.
+  // Kenshi's water parameters, published last-draw-wins like wetness and dust (one water material in
+  // the game, per-zone globals):
   //   tile* : world XZ -> the tiling ripple coordinate  (VS `scale`)
   //   map*  : world XZ -> the 0-1 map coordinate        (VS `mapBounds`)
   //   speed : `scale.xy * 5000`, the flow speed multiplier
@@ -622,53 +559,33 @@ struct RaytraceArgs {
   float kenshiWaterInvStrength;
   float kenshiWaterTime;
   float kenshiWaterRainAmount;
-  // DX11_V599_KENSHI_WATER_SCUM: the scum layer's own tiling coordinate
-  // (`scale.zw`, the FCS scum scale) and the amount the live ripple normal
-  // distorts it (`distortion.y`). Published only by draws that declare a scum
-  // map, i.e. the near-water families - the distant shader has no scum at all.
+  // The scum layer's own tiling (`scale.zw`) and the amount the live ripple normal distorts it
+  // (`distortion.y`). Published only by draws that declare a scum map (the near-water families).
   float kenshiWaterScumScaleX;
   float kenshiWaterScumScaleY;
   float kenshiWaterScumDistortion;
-  // DX11_V621/V627_KENSHI_WATER_TRANSPARENCY. A negative value selects
-  // simulated depth and its magnitude scales the game's own depth falloff.
-  // Positive values belong to the proper translucent-water material route.
+  // A negative value selects simulated depth and its magnitude scales the game's own depth falloff;
+  // positive values select the translucent-water material route.
   float kenshiWaterTransparency;
   float kenshiWaterInvOpacity;
   float kenshiWaterPad0;
   float kenshiWaterPad1;
   float kenshiWaterPad2;
   float kenshiWaterGlow;
-  // DX11_V632_KENSHI_WATER_COLOUR_GAIN. Kenshi's water diffuse is boosted far
-  // above physical and that boost IS the biome colour: lightingFunctions.hlsl
-  // multiplies the sun diffuse by PI where a normalised BRDF divides by it, and
-  // scales the irradiance probe by 4 (`irradianceCube.rgb * .a * 4.0f`). Since
-  // waterColour only enters through `(sunLight.diffuse + envLight.diffuse) *
-  // albedo`, a path-traced water surface lit correctly is about an order of
-  // magnitude less saturated than the raster one. This reproduces that gain.
+  // Kenshi's water diffuse is boosted far above physical, and that boost is the biome colour:
+  // lightingFunctions.hlsl multiplies the sun diffuse by PI where a normalised BRDF divides by it, and
+  // scales the irradiance probe by 4 (`irradianceCube.rgb * .a * 4.0f`). A correctly lit path-traced
+  // water surface is about an order of magnitude less saturated; this reproduces the gain.
   float kenshiWaterColourGain;
 
-  // DX11_V634_KENSHI_RAIN. Raster Basic_Coloured_Ambient_VP sun-height
-  // multiplier times the rain-only HDR-to-LDR calibration.
+  // Raster Basic_Coloured_Ambient_VP sun-height multiplier times the rain-only HDR-to-LDR calibration.
   float kenshiRainEmissionScale;
 
-  // DX11_V638_KENSHI_INTERIOR_CLIP. Kenshi's building-interior cull, generalised
-  // from raster's screen-space depth slab to a world-space volume test - see
-  // journal chapter 16. Each active mask shell is captured from the InteriorMask
-  // compositor draws and published as an oriented box, encoded as a world-to-unit
-  // -box transform: a hit is inside when all three components of the transformed
-  // position are within [-1, 1]. isSurfaceClipped() rejects such hits.
-  //
-  // FOUR slots, because Kenshi renders an interior for every building that has a
-  // character in it and a town can have several active at once - V637 measured
-  // two shells alternating frame to frame, which a single slot cannot express.
-  //
-  // SCALARS ONLY, never a mat4 or a float4 array, for the reason spelled out on
-  // skyProbeLightFloor and kenshiAmbientTint* above: HLSL constant-buffer packing
-  // will not let a vector straddle a 16-byte boundary while C++ packs flat, so a
-  // vector member can re-pad differently between this file and its twin EVEN IF
-  // both declarations are identical. That is how V456 corrupted every field after
-  // its insertion point. Scalars cannot straddle. These are generated into both
-  // copies by script and diffed, so they cannot drift by transcription either.
+  // Building-interior cull volumes, one oriented box per active mask shell (four slots: several
+  // buildings can be active at once), each encoded as a world-to-unit-box transform: a hit is inside
+  // when all three transformed components are within [-1, 1].
+  // Scalars only, never a mat4 or float4 array: a vector can re-pad differently between this file and
+  // its twin. These are generated into both copies by script and diffed.
   float kenshiInteriorB0R0X;
   float kenshiInteriorB0R0Y;
   float kenshiInteriorB0R0Z;
@@ -717,21 +634,16 @@ struct RaytraceArgs {
   float kenshiInteriorB3R2Y;
   float kenshiInteriorB3R2Z;
   float kenshiInteriorB3R2W;
-  // How many of the four slots are populated. 0 disables the test entirely, and
-  // is the state for every frame in which Kenshi drew no mask shell - the only
-  // reliable "an interior is active" signal, since the mask TEXTURE is full-size
-  // at all times (V635).
+  // How many of the four slots are populated. 0 disables the test, which is the state whenever Kenshi
+  // drew no mask shell (the only reliable "interior active" signal).
   uint kenshiInteriorClipCount;
 
-  // DX11_V639. Diagnostic. 1 = cull EVERY surface marked as interior-clip
-  // eligible, ignoring the volumes entirely. That separates the two halves of
-  // this feature: if terrain vanishes inside a building under this mode but not
-  // under the normal path, the flag and constants are reaching the shader
-  // correctly and the fault is the volume placement. If it does not vanish even
-  // here, the surface flag never arrived and the placement is irrelevant.
+  // Diagnostic: 1 = cull every interior-clip-eligible surface, ignoring the volumes. If terrain vanishes
+  // inside a building only in this mode, the flag and constants arrive correctly and the fault is volume
+  // placement; if not even here, the surface flag never arrived.
   uint kenshiInteriorClipDebugAll;
 
-  // V794: append-only scalar layout, shared by CPU and GPU.
+  // Append-only scalar layout, shared by CPU and GPU.
   uint shadowTerminatorEnableOffset;
   uint shadowTerminatorSoften;
   float shadowTerminatorMaxArea;

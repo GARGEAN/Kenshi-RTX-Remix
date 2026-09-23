@@ -456,12 +456,10 @@ namespace dxvk {
                "The DX11 fork has no vertex-capture constant buffer, so Remix's usual per-face reprojection (customWorldToProjection) cannot be injected and skybox-cubemap mode was disabled outright - the probe stayed at its clear value and the player sat inside a black box. This path needs no shader authoring: engines whose sky vertex shader takes its world-view-projection as the FIRST constant of b0 (OGRE/SkyX, and therefore Kenshi) are reprojected by rewriting that one matrix, copying the rest of the block through untouched.\n"
                "Requires a host-visible b0; falls back to the previous behaviour when the constant buffer cannot be read. Set to False to force the physical atmosphere instead.");
 
-    // ----- Game-driven sun (fork - DX11_V444) -----
-    // Reads the sun straight out of the game's own deferred lighting constants
-    // and pushes it into the physical atmosphere each frame, so time of day,
-    // sunset colour and the night fade all come from the game instead of from
-    // static settings. Matched by constant NAME, so it costs nothing on titles
-    // that do not expose those names.
+    // ----- Game-driven sun -----
+    // Reads the sun from the game's own deferred lighting constants and pushes it into the physical
+    // atmosphere each frame, so time of day, sunset colour and the night fade come from the game. Matched
+    // by constant name, so it costs nothing on titles that do not expose those names.
     RTX_OPTION("rtx.dx11", bool, kenshiSunDrive, true,
                "Drive the physical atmosphere's sun from the game's own lighting constants.\n"
                "Elevation and azimuth come from the unclamped sun vector on the sky draws (`sunDirectionReal`/`uLightDir`); colour and intensity come from the deferred sun composite's `sunColour`/`ambientParams`. The composite's own `sunDirection` is deliberately NOT used for elevation: it is horizon-clamped (measured y=0.0 at both sunset and midnight) and would pin the sun to the horizon all night.\n"

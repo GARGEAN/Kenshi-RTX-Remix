@@ -269,7 +269,7 @@ struct SkinningData {
   uint32_t numBonesPerVertex = 0;
   XXH64_hash_t boneHash = 0;
   uint32_t minBoneIndex = 0; // This is the smallest index of all bones actually used by vertex data
-  // V734: native OGRE weights are explicit; palette capacity is not pose identity.
+  // Native OGRE weights are explicit; palette capacity is not pose identity.
   bool explicitWeights = false;
   uint64_t usedBoneMask = 0; // Zero means CPU usage was unavailable: keep full hash.
   XXH64_hash_t paletteHash = 0; // Full palette, for capture comparison with boneHash.
@@ -364,19 +364,11 @@ struct RasterGeometry {
   bool postVsClipUsesWDepth = false;
   Matrix4 postVsClipToPosition = Matrix4();
 
-  // DX11_V329_UNVALIDATED_INDEX_RANGE: set when the submitter could not read
-  // this draw's index values and had to size the vertex range to the whole
-  // vertex buffer. The index VALUES are then unknown, and an index addressing
-  // past vertexCount would make the raytracing hit shaders fetch outside the
-  // interleaved vertex allocation - a DMA page fault and a lost device.
-  //
-  // Rather than scan the indices (impossible for a device-local D3D11 buffer
-  // this bridge never sees written), route the index cache through
-  // generateTriangleList, whose shader already rejects any triangle with an
-  // index above maxVertex and collapses it to a degenerate. See
-  // isTopologyRaytraceReady() below - that one predicate drives the cache
-  // buffer's size, its index format AND the branch that fills it, so gating it
-  // here keeps all three consistent by construction.
+  // Set when the submitter could not read this draw's index values and sized the vertex range to the
+  // whole vertex buffer, so an index past vertexCount could make the hit shaders fetch outside the
+  // interleaved allocation (a device loss). Route the index cache through generateTriangleList, which
+  // collapses any triangle indexing past maxVertex into a degenerate. isTopologyRaytraceReady() drives
+  // the cache buffer's size, index format and fill branch, so gating it keeps all three consistent.
   bool indexRangeUnvalidated = false;
 
   // Actual vertex/index count (when applicable) as calculated by geo-engine
@@ -402,8 +394,8 @@ struct RasterGeometry {
   RasterBuffer indexBuffer;
   RasterBuffer blendWeightBuffer;
   RasterBuffer blendIndicesBuffer;
-  // DX11_V631_KENSHI_PART_MASK. The body shader clips triangles selected by
-  // partData.y & hiddenMask. The RT index-normalization pass consumes these.
+  // The body shader clips triangles selected by partData.y & hiddenMask; the RT index-normalization pass
+  // consumes these.
   RasterBuffer kenshiPartMaskBuffer;
   uint32_t kenshiHiddenMask = 0;
   // Static bind-pose cylindrical projection used by Kenshi's dynamic blood
@@ -487,12 +479,9 @@ struct RasterGeometry {
     if (indexCount == 0)
       return false;
 
-    // DX11_V329_UNVALIDATED_INDEX_RANGE: the raytrace-ready path is a raw
-    // copyBuffer of the application's indices - it validates nothing. When the
-    // submitter could not establish the index range, take the generation path
-    // instead: identical output for in-range data (minVertex is 0, so the
-    // shader's rebase is a no-op), but out-of-range triangles become
-    // degenerates instead of out-of-bounds vertex fetches.
+    // The raytrace-ready path is a raw copyBuffer of the application's indices and validates nothing. With
+    // an unvalidated range take the generation path instead: identical output for in-range data (minVertex
+    // is 0), but out-of-range triangles become degenerates.
     if (indexRangeUnvalidated)
       return false;
 

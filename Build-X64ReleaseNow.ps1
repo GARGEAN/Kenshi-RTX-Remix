@@ -92,7 +92,7 @@ function Invoke-NativeTimeout {
   if ([IO.Path]::GetExtension($FilePath) -match '(?i)^\.(bat|cmd)$') {
     $psi.FileName = $env:ComSpec
     $inner = Get-NativeCommandLine -FilePath $FilePath -Arguments $Arguments
-    $psi.Arguments = '/d /s /c ' + (Quote-Arg $inner)
+    $psi.Arguments = '/d /s /c "' + $inner + '"'
   } else {
     $psi.FileName = $FilePath
     $psi.Arguments = (($Arguments | ForEach-Object { Quote-Arg ([string]$_) }) -join ' ')
@@ -105,12 +105,14 @@ function Invoke-NativeTimeout {
   $p.StartInfo = $psi
   Write-Host ('[build] cmd> {0}' -f (Get-NativeCommandLine -FilePath $FilePath -Arguments $Arguments)) -ForegroundColor DarkGray
   [void]$p.Start()
+  $outTask = $p.StandardOutput.ReadToEndAsync()
+  $errTask = $p.StandardError.ReadToEndAsync()
   if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
     try { $p.Kill() } catch {}
     throw "$FailureMessage timed out after $TimeoutSeconds seconds"
   }
-  $out = $p.StandardOutput.ReadToEnd()
-  $err = $p.StandardError.ReadToEnd()
+  $out = $outTask.GetAwaiter().GetResult()
+  $err = $errTask.GetAwaiter().GetResult()
   if ($out) { Write-Host $out }
   if ($err) { Write-Host $err -ForegroundColor DarkYellow }
   if ($p.ExitCode -ne 0) {
@@ -211,6 +213,22 @@ function Select-Tools([string]$VsPath) {
   $env:NINJA = $selectedNinja
   Add-PathFront (Split-Path -Parent $selectedNinja)
 
+  $script:MesonPrefix = @()
+  $pythonPackages = Join-Path $Root '.build_deps\python'
+  $python = Get-Command 'python.exe' -ErrorAction SilentlyContinue
+  if ($python -and (Test-Path -LiteralPath (Join-Path $pythonPackages 'mesonbuild\mesonmain.py'))) {
+    # Pip's copied meson.exe embeds the original machine's Python path.
+    # Run the bundled module with the Python installed on this machine instead.
+    $env:PYTHONPATH = if ($env:PYTHONPATH) { "$pythonPackages;$env:PYTHONPATH" } else { $pythonPackages }
+    & $python.Path -m mesonbuild.mesonmain --version | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      $script:MesonPrefix = @('-m', 'mesonbuild.mesonmain')
+      Write-Ok "Meson: $($python.Path) -m mesonbuild.mesonmain"
+      Write-Ok "Ninja: $selectedNinja"
+      return $python.Path
+    }
+  }
+
   $mesonCandidates = New-Object System.Collections.Generic.List[string]
   # The integrated build provisions a workspace-local Python/Meson runtime.
   # Prefer it so this standalone incremental builder works on the same clean
@@ -247,7 +265,7 @@ function Select-Tools([string]$VsPath) {
 
 function Repair-FutureTimestamps {
   $now = Get-Date
-  foreach ($rel in @('meson.build','meson_options.txt','build.bat','Build-X64ReleaseNow.ps1','src\usd-plugins\meson.build')) {
+  foreach ($rel in @('meson.build','meson_options.txt','Build-X64ReleaseNow.ps1','src\usd-plugins\meson.build')) {
     $p = Join-Path $Root $rel
     if (Test-Path -LiteralPath $p) {
       $item = Get-Item -LiteralPath $p
@@ -312,6 +330,7 @@ $meson = Select-Tools $vsPath
 
 Repair-FutureTimestamps
 Ensure-Deps -SkipFetch:$NoDepsFetch
+& (Join-Path $Root 'scripts-common\ensure-fg-runtime.ps1') -VerifyOnly:$NoDepsFetch
 
 if (-not $NoClean -and (Test-Path -LiteralPath $BuildDir)) {
   Write-Step "Removing stale build directory: $BuildDir"
@@ -319,7 +338,7 @@ if (-not $NoClean -and (Test-Path -LiteralPath $BuildDir)) {
 }
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
-$mesonArgs = @(
+$mesonArgs = $script:MesonPrefix + @(
   'setup',
   '--buildtype=release',
   '--backend=ninja',
@@ -348,7 +367,7 @@ if (-not $NoInstall) {
   Write-Step 'Installing output files'
   $installOk = $true
   try {
-    Invoke-NativeLive -FilePath $meson -Arguments @('install', '-C', $BuildDir, '--no-rebuild', '--tags', 'output') -WorkingDirectory $Root -FailureMessage 'Meson install failed' | Out-Null
+    Invoke-NativeLive -FilePath $meson -Arguments ($script:MesonPrefix + @('install', '-C', $BuildDir, '--no-rebuild', '--tags', 'output')) -WorkingDirectory $Root -FailureMessage 'Meson install failed' | Out-Null
   } catch {
     $installOk = $false
     Write-Warn $_.Exception.Message
@@ -364,13 +383,9 @@ if (-not $NoInstall) {
     }
     if ($dlls.Count -eq 0) { throw 'Compile finished but no d3d11.dll or dxgi.dll was found to copy.' }
   }
-}
-
-$ngxSource = Join-Path $Root 'nv-private\hdremix\bin\release'
-if (Test-Path -LiteralPath $ngxSource -PathType Container) {
-  Get-ChildItem -Path $ngxSource -Filter 'nvngx_*.dll' -File -ErrorAction SilentlyContinue | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $OutputDir -Force
-  }
+  # Include FG even when the fallback DLL copy was needed.
+  Copy-Item -LiteralPath (Join-Path $Root 'external\dlss_fg_runtime\nvngx_dlssg.dll') -Destination $OutputDir -Force
+  & (Join-Path $Root 'scripts-common\ensure-fg-runtime.ps1') -RuntimePath (Join-Path $OutputDir 'nvngx_dlssg.dll') -VerifyOnly
 }
 
 Write-Ok "DONE. Output folder: $OutputDir"

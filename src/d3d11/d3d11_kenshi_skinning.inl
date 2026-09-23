@@ -1,6 +1,5 @@
-// V734. Included inside namespace dxvk after native palette decoding.
-// Read already-maintained CPU shadows, never perform a GPU readback. The full
-// vertex span is deliberately conservative when a draw uses an index subset.
+// Included inside namespace dxvk after native palette decoding. Reads existing CPU shadows, never a
+// GPU readback. The full vertex span is deliberately conservative when a draw uses an index subset.
 struct KenshiBoneUsage {
   uint64_t mask = 0;
   XXH64_hash_t weightsHash = 0;
@@ -18,8 +17,7 @@ static KenshiBoneUsage scanKenshiBoneUsage(const uint8_t* weights,
       float weight;
       std::memcpy(&weight, weights + size_t(vertex) * weightStride + influence * 4u, 4u);
       if (!std::isfinite(weight)) return {};
-      // Hash only dependencies the explicit shader reads, including changed
-      // weight values (which the old position/palette-only hash missed).
+      // Hash only what the shader reads, including the weight values.
       result.weightsHash = XXH3_64bits_withSeed(&weight, sizeof(weight), result.weightsHash);
       if (weight == 0.f) continue;
       const uint8_t bone = indices[size_t(vertex) * indexStride + influence];

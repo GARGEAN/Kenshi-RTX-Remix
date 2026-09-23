@@ -6,7 +6,7 @@
 #include <unordered_map>
 
 namespace dxvk {
-  // V699: immutable b0 layout only. No mapped pointers, values or read results.
+  // Immutable b0 layout only. No mapped pointers, values or read results.
   class D3D11NamedConstantProfile {
   public:
     struct Location {

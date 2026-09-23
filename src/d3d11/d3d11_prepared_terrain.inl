@@ -1,7 +1,7 @@
 // Included inside namespace dxvk, immediately before SubmitDraw. No class layout changes.
 namespace prepared_terrain_detail {
   using prepared_terrain::Key;
-  // V701: first failing guard per draw; one descriptor sample per reason/window.
+  // First failing guard per draw; one descriptor sample per reason/window.
   enum Reason {
     Disabled, Candidate, RenderDoc, Emulator, SkinFuture, SmallDraw, Trace,
     Significance, SkyTags, FallbackCamera, RelativeCamera, ExactCamera, Offscreen,
@@ -202,10 +202,9 @@ namespace prepared_terrain_detail {
     k.add(m.kenshiTerrainBlend); k.add(m.kenshiRain); k.add(m.kenshiCharacterHead);
     k.add(m.kenshiDualTextureSet); k.add(m.kenshiColorMask); k.add(m.kenshiCharacterVest);
     k.add(m.kenshiBloodMode); k.add(m.kenshiNormalEncoding); k.add(m.kenshiGlossMult);
-    // DX11_V766: the green flip and the muscle blend. Both must be here as well
-    // as in the reuse key - this is what the V708 verifier compares, and a
-    // difference it cannot see becomes a reported MISMATCH, which sets
-    // `c.enabled = false` and disables material reuse for the whole process.
+    // Green flip and muscle blend. Must be in this key as well as the reuse key: the reuse verifier
+    // compares this, and a difference it cannot see reports a MISMATCH that disables material reuse for
+    // the whole process.
     k.add(m.kenshiNormalFlipGreen); k.add(m.kenshiMuscleBlend);
     textureKey(k, m.kenshiNormalTexture); textureKey(k, m.kenshiMetalTexture);
     textureKey(k, m.kenshiCharacterBlendNormalTexture);

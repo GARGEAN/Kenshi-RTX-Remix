@@ -453,7 +453,7 @@ namespace dxvk {
      *   be used very sparingly.
      */
     void freeUnusedChunks();
-    // V777: read-only occupancy census; caller rate-limits it. No allocator policy change.
+    // Read-only occupancy census; the caller rate-limits it. No allocator policy change.
     void logMemoryOwnership(uint32_t frame, const char* reason);
     // NV-DXVK end
 

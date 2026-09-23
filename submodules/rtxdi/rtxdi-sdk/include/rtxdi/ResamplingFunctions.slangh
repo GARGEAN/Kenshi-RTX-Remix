@@ -668,9 +668,8 @@ RTXDI_Reservoir RTXDI_SpatialResampling(
     for (int i = 0; i < sparams.numSamples; i++)
     {
       float2 neighborOffset = RTXDI_GetSpatialNeighborOffset(rng);
-      // DX11_V798: coherent offsets must not collapse adjacent pixels onto the
-      // same boundary reservoir. That copies raw lighting noise into streaks.
-      // Reject off-screen neighbours; validNeighborMask keeps MIS normalization
+      // Coherent offsets must not collapse adjacent pixels onto the same boundary reservoir, which copies raw
+      // lighting noise into streaks. Reject off-screen neighbours; validNeighborMask keeps MIS normalization
       // and RNG replay restricted to the candidates actually combined below.
       int2 neighborID = int2(neighborOffset * sparams.samplingRadius) + int2(pixelPosition);
       if (any(neighborID < 0) || any(neighborID >= sparams.screenResolution))

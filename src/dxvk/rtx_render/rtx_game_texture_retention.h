@@ -6,7 +6,7 @@
 
 namespace dxvk {
 
-// V776: metadata only. No image/view references and no GPU record changes.
+// Metadata only. No image/view references and no GPU record changes.
 class GameTextureRetention {
 public:
   static constexpr uint32_t unusedFrames = 600;
@@ -32,7 +32,7 @@ public:
   bool eligible(uint32_t index, uint64_t key, uint32_t frame) const {
     if (index >= slots.size()) return false;
     const auto& slot = slots[index];
-    // V780: the shared protection pass covers every material family, not only terrain.
+    // The shared protection pass covers every material family, not only terrain.
     return slot.key != 0 && slot.key == key && frame >= slot.lastUsed
       && frame - slot.lastUsed > unusedFrames;
   }

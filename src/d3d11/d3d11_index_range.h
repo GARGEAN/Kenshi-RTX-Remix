@@ -29,8 +29,8 @@ namespace dxvk::index_range {
     maximum = unsignedMax(maximum, values);
   }
 
-  // V686: exact maximum and range validation using SSE2, with no persistent cache.
-  // Caller proves that all count elements are readable before entering this scan.
+  // Exact maximum and range validation using SSE2, with no persistent cache. The caller proves that
+  // all count elements are readable.
   template<class T, bool Restart>
   inline Result scan(const T* indices, uint32_t count, uint32_t vertexLimit) {
     static_assert(sizeof(T) == 2 || sizeof(T) == 4);

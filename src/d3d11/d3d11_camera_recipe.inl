@@ -1,6 +1,5 @@
-// V715: a recipe never stores a camera or object transform. It only avoids
-// generic projection discovery when fresh draw matrices prove the already
-// established CURRENT-frame OGRE camera. Original OGRE decomposition still runs.
+// A recipe never stores a camera or object transform. It only skips generic projection discovery
+// when fresh draw matrices prove the current-frame OGRE camera; OGRE decomposition still runs.
 namespace camera_recipe {
   struct Key {
     // The current 5-stage schema is 1476 bytes. Keep exact serialized bytes,

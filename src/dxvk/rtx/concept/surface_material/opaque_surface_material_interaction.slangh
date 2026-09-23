@@ -543,9 +543,7 @@ void overrideMaterialInteractionForEye(
 
 // Opaque Surface Material Interaction Functions
 
-// DX11_V397_KENSHI_TERRAIN_LAYERS: helpers for Kenshi's ground blend. The
-// composite itself lives in opaqueSurfaceMaterialInteractionCreate below; see
-// analysis/notes/kenshi-terrain-material.md for the decode these follow.
+// Helpers for Kenshi's ground blend; the composite is in opaqueSurfaceMaterialInteractionCreate.
 
 // The game's slope weighting: a smoothstep band, on either side.
 float kenshiTerrainSlopeBand(float slope, float minSlope, float maxSlope, float blend)
@@ -881,15 +879,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     thinFilmThickness = opaqueSurfaceMaterial.thinFilmThicknessConstant;
   }
 
-  // DX11_V396_KENSHI_TERRAIN: the ground's colour map carries only the zone's
-  // low-frequency tint - the grain comes from a detail layer tiled tens of
-  // times per chunk, which Kenshi multiplies the tint by. Sample that layer at
-  // the detail coordinate and apply the same multiply.
-  //
-  // The detail coordinate is affine in the overlay coordinate the surface
-  // already interpolates, so no extra per-vertex data is needed. Sampling with
-  // an explicit coordinate keeps the ray-cone LOD of the surface, which for a
-  // texture tiled this much would otherwise alias badly at distance.
+  // Kenshi terrain: the colour map holds only a low-frequency tint; the grain comes from a detail
+  // layer tiled many times per chunk, which the game multiplies in. The detail coordinate is affine
+  // in the overlay coordinate, and sampling with an explicit coordinate keeps the ray-cone LOD.
   vec3 kenshiTerrainAlbedo = vec3(0.0f, 0.0f, 0.0f);
   vec3 kenshiTerrainEncodedNormal = vec3(0.5f, 0.5f, 1.0f);
   bool kenshiTerrainBlended = false;
@@ -960,17 +952,11 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
   {
     albedo = kenshiTerrainAlbedo;
 
-    // DX11_V525. Kenshi's ground blood. The raster pass re-renders the terrain
-    // mesh with `uv = (worldPos.xz - info.xy) * info.zw` and alpha-blends the
-    // result into the G-buffer albedo, so the projection is purely world-space
-    // and needs no per-vertex data at all.
-    //
-    // Decals are global rather than per-surface: a chunk can carry several, and
-    // associating each draw with its chunk was the part most likely to break.
-    // The rect test rejects almost every decal in a couple of instructions.
-    //
-    // Written into surfaceInteraction.kenshiBlood so the SAME downstream code
-    // that blends character blood into albedo and roughness applies here too.
+    // Kenshi's ground blood. The raster pass re-renders the terrain with
+    // `uv = (worldPos.xz - info.xy) * info.zw` and alpha-blends it into the G-buffer albedo, so the
+    // projection is purely world-space. Decals are global rather than per surface (a chunk can carry
+    // several); the rect test rejects most in a couple of instructions. Written into
+    // surfaceInteraction.kenshiBlood so the character-blood blend applies here too.
     const uint terrainDecalCount = min(kenshiTerrainBloodBuffer[0].x, 64u);
     if (terrainDecalCount != 0u)
     {
@@ -1289,10 +1275,8 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
   // Apply material modifiers
   roughness = saturate(roughness * cb.opaqueMaterialArgs.roughnessScale + cb.opaqueMaterialArgs.roughnessBias);
 
-  // DX11_V522. Kenshi's raster has no PBR, so blood would otherwise inherit skin
-  // roughness and disappear into it under path-traced lighting. Blended by the
-  // same influence that blends the blood colour, and applied AFTER the global
-  // scale/bias so the knob means what it says.
+  // Kenshi's raster has no PBR, so blood would otherwise inherit skin roughness. Blended by the same
+  // influence as the blood colour, after the global scale/bias so the option means what it says.
   if (surfaceInteraction.kenshiBlood.a > 0.0f)
     roughness = lerp(roughness, surface.kenshiBloodRoughness, surfaceInteraction.kenshiBlood.a);
 

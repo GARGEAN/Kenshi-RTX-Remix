@@ -146,9 +146,8 @@ namespace dxvk {
 dxvk::RtxContext::TryHandleSkyResult dxvk::RtxContext::tryHandleSky(const DrawParameters* originalParams,
                                                                     DrawCallState* originalDrawCallState) {
 
-  // DX11_V449_SKY_GATE_TRACE: report what tryHandleSky was actually handed, so
-  // "never called", "called with a non-Sky camera type" and "called correctly
-  // but suppressed" are distinguishable in the log.
+  // Report what tryHandleSky was handed, so "never called", "called with a non-Sky camera type" and
+  // "called but suppressed" are distinguishable.
   if (originalParams && originalDrawCallState) {
     static uint32_t s_tryHandleSkyLogCount = 0;
     if (originalDrawCallState->testCategoryFlags(InstanceCategories::Sky)
@@ -186,14 +185,9 @@ dxvk::RtxContext::TryHandleSkyResult dxvk::RtxContext::tryHandleSky(const DrawPa
         m_skyRtColorFormat);
       initSkyProbe();
 
-      // DX11_V456: the probe's colour space decides whether its contents are
-      // linear radiance or display-referred values, and that is exactly the
-      // ambiguity behind the flattened sky. Report both formats once: the
-      // render format is the game's own target, the sample format is what ray
-      // tracing reads through. If they differ only by _SRGB the hardware
-      // linearizes on read and no gamma decode is needed; if the render format
-      // is a float/HDR format there is no hardware decode at all and whatever
-      // the game wrote is taken as radiance verbatim.
+      // Report the probe's formats once: the render format is the game's own target, the sample format is
+      // what ray tracing reads. If they differ only by _SRGB the hardware linearizes on read; if the render
+      // format is float/HDR, whatever the game wrote is taken as radiance verbatim.
       ONCE(KENSHI_DIAGNOSTIC_INFO(str::format(
         "[RTX Sky] probe formats: gameRenderTarget=", uint32_t(m_skyRtColorFormat),
         " sampledAs=", uint32_t(m_skyColorFormat),

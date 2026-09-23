@@ -67,9 +67,8 @@ void skinning(const uint32_t idx,
               ConstBuffer(SkinningArgs) cb) {
   const uint32_t baseWeightsOffset = (cb.blendWeightOffset + idx * cb.blendWeightStride) / 4;
 
-  // V734: Kenshi's VS uses its explicit xyz weights and divides world position
-  // by their sum. Inventing a fourth influence from rounding residue moves
-  // vertices toward a bone the source shader never reads.
+  // Kenshi's VS uses its explicit xyz weights and divides world position by their sum. Inventing a fourth
+  // influence from rounding residue would move vertices toward a bone the source shader never reads.
   const bool explicitWeights = (cb.useIndices & 2u) != 0u;
   float lastWeight = 1.f;
   if (!explicitWeights) {

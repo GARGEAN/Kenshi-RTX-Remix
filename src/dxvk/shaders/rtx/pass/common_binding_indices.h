@@ -134,32 +134,19 @@
 // shadow-march taps). Sampled with the linear/REPEAT cloud noise sampler.
 #define BINDING_ATMOSPHERE_CLOUD_PLACEMENT_MAP 216
 
-// DX11_V399_KENSHI_TERRAIN_BUFFER: Kenshi's terrain parameter sets. The count is
-// unbounded in practice - the terrain-blended rock/exterior family carries a
-// material per object - so these cannot live in the constant buffer, where a
-// fixed array overflowed and made the excess share another set's tiling.
+// Kenshi terrain parameter sets. Unbounded in practice (terrain-blended rocks carry one per
+// object), so they live in a buffer rather than a fixed constant-buffer array.
 #define BINDING_KENSHI_TERRAIN_BUFFER 217
 #define BINDING_KENSHI_BLOOD_BUFFER   218
 #define BINDING_KENSHI_TERRAIN_BLOOD_BUFFER 219
-// DX11_V603_KENSHI_WATER_ZONES: Kenshi's water constants are PER ZONE - each
-// near-water draw is its own material with its own wave scale, speed, scum and
-// rain. Publishing them as frame globals made the camera choose which zone's
-// values the whole surface used, because the winner was whichever draw survived
-// frustum culling last. Carrying them as world rects instead makes the choice
-// spatial: the hit position selects the zone, so it cannot change with view.
+// Kenshi's water constants are per zone (each near-water draw is its own material with its own wave
+// scale, speed, scum and rain), so they are carried per zone and selected at the hit instead of being
+// published as frame globals, which made the result depend on the view.
 #define BINDING_KENSHI_WATER_ZONE_BUFFER 220
 
-// DX11_V650_KENSHI_INTERIOR_SHELL: the interior cull volumes as their own
-// AUTHORED TRIANGLES, not an approximation of them. Measured across the 32
-// readable mask shells: only 2 are convex, one carries 872 distinct planes (a
-// dome), and the median wall sits 3.6 degrees off vertical with only ~5% of wall
-// area actually vertical. Every sampled representation - occupancy voxels, a
-// height-span field, an SDF - therefore costs half a cell of error everywhere
-// and megabytes per shell, while the exact geometry is 5-25 KB and has no error
-// and no resolution parameter at all.
-//
-// Header, then one record per active volume, then that volume's 2D bin grid,
-// triangle references, vertices and triangles. See buildKenshiInteriorBuffer.
+// The interior cull volumes as their own authored triangles (exact, 5-25 KB each; a sampled field would
+// be large and inaccurate on mostly tilted walls). Header, then one record per active volume, then that
+// volume's 2D bin grid, triangle references, vertices and triangles. See buildKenshiInteriorBuffer.
 #define BINDING_KENSHI_INTERIOR_BUFFER 221
 
 // Fork atmosphere/cloud bindings occupy a contiguous range ABOVE COMMON_MAX_BINDING

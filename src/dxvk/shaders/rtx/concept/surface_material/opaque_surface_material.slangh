@@ -34,28 +34,17 @@ OpaqueSurfaceMaterial opaqueSurfaceMaterialCreate(MemoryPolymorphicSurfaceMateri
     opaqueSurfaceMaterial.metallicTextureIndex = BINDING_INDEX_INVALID;
     opaqueSurfaceMaterial.normalTextureIndex = BINDING_INDEX_INVALID;
     opaqueSurfaceMaterial.tangentTextureIndex = BINDING_INDEX_INVALID;
-    // DX11_V529: unconditionally, not just in the reduced secondary-shading
-    // modes. A visibility ray reads opacity, and for a subsurface material also
-    // the shading normal; the Kenshi terrain block writes neither - it writes
-    // albedo, while opacity still comes from the albedo/opacity texture that
-    // this path deliberately keeps. So the compositor's fourteen-odd texture
-    // reads, and V528's biome selector on top of them, could not change a
-    // single visibility result. Kenshi terrain carries no subsurface material,
-    // so the shading-normal branch is unreachable for it as well.
+    // Unconditionally, not just in the reduced secondary-shading modes: a visibility ray reads opacity
+    // (and, for subsurface materials, the shading normal), and the Kenshi terrain block writes neither, so
+    // the terrain compositor cannot change a visibility result. Kenshi terrain has no subsurface material.
     opaqueSurfaceMaterial.flags &= ~OPAQUE_SURFACE_MATERIAL_FLAG_KENSHI_TERRAIN_BLEND;
     opaqueSurfaceMaterial.roughnessConstant = 1.h;
     opaqueSurfaceMaterial.metallicConstant = 0.h;
     opaqueSurfaceMaterial.anisotropy = 0.h;
-    // DX11_V760/V761: emissiveColorConstant is deliberately NOT cleared here.
-    // An unfinished building's build progress, mesh height and scaffold tiling
-    // are aliased into it, and they decide the surface's OPACITY - which is
-    // precisely what a visibility ray reads. Zeroing it left the material with
-    // an invalid height range, disabled the cutout, and would have made a
-    // half-built wall cast the shadow of a finished one.
-    //
-    // Nothing is emitted by keeping it: emissive radiance is colour * intensity
-    // and the intensity below is still zeroed, which is what actually suppresses
-    // emission on this path.
+    // emissiveColorConstant is deliberately not cleared: an unfinished building's build progress, mesh
+    // height and scaffold tiling are aliased into it, and they decide the surface's opacity, which is what
+    // a visibility ray reads. Zeroing it would make a half-built wall cast the shadow of a finished one.
+    // Nothing is emitted: the intensity below is still zeroed.
     opaqueSurfaceMaterial.emissiveIntensity = 0.h;
     return opaqueSurfaceMaterial;
   }

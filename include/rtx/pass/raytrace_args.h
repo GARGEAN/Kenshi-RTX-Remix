@@ -61,37 +61,16 @@ struct TerrainArgs {
   uint pad0;
 };
 
-// DX11_V396_KENSHI_TERRAIN: Kenshi blends its ground from a stack of detail
-// layers keyed by a splat map, then multiplies the result by a low-frequency
-// colour map. Only that colour map can reach an ordinary Remix material, which
-// is why terrain renders correctly tinted but with no grain.
-//
-// The parameters live here rather than in a per-material buffer because the
-// game uses ONE terrain material set per zone: every terrain draw measured in a
-// frame resolved the same colour map image and the same constants, and the
-// per-chunk variation is carried entirely by the interpolated texture
-// coordinate. `set` is 0 when no terrain draw has been seen, which is what the
-// material flag is checked against.
-//
-// The detail coordinate is derived from the overlay coordinate the surface
-// already interpolates, because both are affine in the same object-space
-// position:
-//
+// Kenshi terrain parameter set. The game blends its ground from detail layers keyed by a splat
+// map and multiplies the result by a low-frequency colour map; only that colour map reaches an
+// ordinary Remix material. Sets are content-addressed and stable across frames, and a terrain
+// material stores its index in secondaryTextureIndex. Several sets are live at once (ground,
+// terrain-blended rocks, neighbouring biomes), hence BINDING_KENSHI_TERRAIN_BUFFER.
+// The detail coordinate is derived from the interpolated overlay coordinate, since both are
+// affine in the same object-space position:
 //   objectPos.xz  = uv * rectSize + rectMin
 //   detailUv      = objectPos.xz * 0.0002 * layerScale
 //                 = uv * detailScale + detailOffset
-// DX11_V398_KENSHI_TERRAIN_PER_MATERIAL: Kenshi draws terrain with more than
-// one parameter set at a time - the ground and the terrain-blended rock
-// formations are separate families with their own rects, and neighbouring
-// biomes bring their own sets again. A single global set made whichever drew
-// last win, which showed up as the ground swapping texture sets with view
-// angle and as the rocks sampling their detail through the ground's rect.
-//
-// Sets are content-addressed and stable across frames, so a surface material
-// can store its index once (in secondaryTextureIndex, which terrain does not
-// otherwise use) and keep it while it is cached. They live in their own
-// structured buffer because the count is unbounded - see
-// BINDING_KENSHI_TERRAIN_BUFFER.
 
 struct KenshiTerrainArgs {
   // uv -> objectPos.xz * 0.0002, the base every layer scales from.
@@ -480,27 +459,20 @@ struct RaytraceArgs {
   float wboitDepthWeightTuning;
   uint wboitEnabled;
 
-  // DX11_V510: brightness multiplier for Kenshi's billboard particles, applied
-  // where the opacity-lighting approximation reads the volumetric radiance cache.
-  //
-  // AT THE END, and verified to be at the end of the LIVE copies rather than
-  // trusted to be. The first attempt anchored on `wboitEnabled`, which is the
-  // last field of include/rtx/pass/raytrace_args.h but is followed by seven sky
-  // fields in the two copies that are actually compiled - so it landed
-  // mid-struct, which is exactly the V456/V457 corruption. Compare the stripped
-  // declaration lists of all three copies before believing any anchor here.
+  // Brightness multiplier for Kenshi's billboard particles, applied where the opacity-lighting
+  // approximation reads the volumetric radiance cache.
+  // Append-only. The two compiled copies of this struct end with extra sky fields, so diff the
+  // declaration lists of all three copies before adding a field.
   float kenshiParticleLightIntensity;
 
-  // DX11_V540_KENSHI_WETNESS. Kenshi's own weather wetness, already scaled by
-  // rtx.dx11.kenshiWetness on the CPU so the shader needs no separate knob.
-  // Genuinely global state (rain), read by reflected name off whichever terrain
-  // or object draw last carried it.
+  // Kenshi's weather wetness, pre-scaled by rtx.dx11.kenshiWetness on the CPU. Global state (rain),
+  // read by name from whichever terrain or object draw last carried it.
   float kenshiWetness;
   // World-space water level, compared against the hit's world Y to give the
   // near-water term. Only meaningful when kenshiWetness is being applied.
   float kenshiWaterHeight;
 
-  // V794: append-only scalar layout, shared by CPU and GPU.
+  // Append-only scalar layout, shared by CPU and GPU.
   uint shadowTerminatorEnableOffset;
   uint shadowTerminatorSoften;
   float shadowTerminatorMaxArea;

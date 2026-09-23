@@ -20,13 +20,10 @@ namespace dxvk {
     uint32_t          semanticIndex;
     uint32_t          registerId;
     DxbcRegMask       componentMask;
-    // DX11_V546: the ReadWriteMask, bits 8..11 of the same dword the component
-    // mask comes from. For an INPUT signature it is the set of components the
-    // shader actually reads - fxc /dumpbin prints it as the "Used" column - and
-    // it is routinely narrower than componentMask: a declared input is not a
-    // read input. Zero means the shader ignores this element entirely.
-    // (For an OUTPUT signature the same field means the opposite - components
-    // never written - so only read this on an isgn.)
+    // The ReadWriteMask, bits 8..11 of the same dword as the component mask. For an input signature it is
+    // the set of components the shader actually reads (fxc /dumpbin's "Used" column), often narrower than
+    // componentMask; zero means the shader ignores the element. For an output signature the field means
+    // the opposite (components never written), so only read it on an isgn.
     DxbcRegMask       usedMask;
     DxbcScalarType    componentType;
     DxbcSystemValue   systemValue;

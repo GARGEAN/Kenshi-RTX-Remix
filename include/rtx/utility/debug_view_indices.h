@@ -277,22 +277,13 @@
 
 #define DEBUG_VIEW_PREV_WORLD_POSITION_AND_TBN 860
 
-// DX11_V535: the two Kenshi material inputs, at the point they are read.
-// Remix's own roughness (25/89) and base reflectivity (94) views show the
-// RESULT; these show whether the game's values arrived at all, which is the
-// question those cannot answer.
-//
-// Gloss view channels:
-//   R = the raw diffuse-texture ALPHA
-//   G = gloss after glossMult, saturated - what drives roughness
+// Kenshi gloss input, at the point it is read (Remix's roughness views show only the result).
+//   R = raw diffuse-texture alpha
+//   G = gloss after glossMult, saturated (drives roughness)
 //   B = 1 where the material is flagged as carrying gloss in its alpha
-// So: black = not a gloss material; blue-only = flagged but the alpha is zero;
-// white-ish = flagged and glossy.
+// Black = not a gloss material; blue only = flagged but alpha is zero; white-ish = glossy.
 #define DEBUG_VIEW_KENSHI_GLOSS_INPUT 870
-// DX11_V560: r = the dust noise as sampled, g = the resulting dust factor,
-// b = 1 where the dust path ran at all. Distinguishes "the noise is constant"
-// from "the factor never crosses its threshold" from "the path never ran" -
-// three states that all look identical as "no dust on screen".
+// r = sampled dust noise, g = resulting dust factor, b = 1 where the dust path ran.
 #define DEBUG_VIEW_KENSHI_DUST 878
 #define DEBUG_VIEW_KENSHI_METALLIC 871
 

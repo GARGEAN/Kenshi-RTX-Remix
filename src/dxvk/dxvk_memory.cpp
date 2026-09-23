@@ -733,9 +733,9 @@ DxvkMemory::DxvkMemory() { }
     if (hints.test(DxvkMemoryFlag::Small))
       chunkSize = 16 << 20;
 
-    // V779: small mapped VRAM allocations otherwise pin 320 MiB chunks because
-    // host-visible allocation deliberately discards the Small hint. Keep other
-    // memory types unchanged; large requests still use dedicated allocations.
+    // Small mapped VRAM allocations would otherwise pin 320 MiB chunks, because host-visible allocation
+    // deliberately discards the Small hint. Other memory types are unchanged; large requests still use
+    // dedicated allocations.
     if (isDeviceLocal && (type.propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
       chunkSize = std::min(chunkSize, VkDeviceSize(32) << 20);
 

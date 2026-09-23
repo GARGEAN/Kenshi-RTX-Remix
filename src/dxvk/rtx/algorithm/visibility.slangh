@@ -64,28 +64,13 @@ vec3 handleVisibilityVertex<let VisibilityMode : uint>(Ray ray, RayHitInfo rayHi
 
   Surface surface = surfaces[uint(rayInteraction.surfaceIndex)]; 
 
-  // DX11_V630_KENSHI_WATER_ONE_WAY. Simulated-depth water exists only for rays
-  // entering it from above. A visibility ray travelling UPWARD is leaving from
-  // beneath the sheet - a submerged surface testing the sun, the sky or a lamp -
-  // so the sheet must not occlude it. Without this the only light that can ever
-  // reach a lake bed is light already underwater, which is exactly what V627-V629
-  // shipped.
-  //
-  // V629 put this same early-out inside the opaque branch below, where it was
-  // unreachable: traceVisibilityRay only calls this function for
-  // CANDIDATE_NON_OPAQUE_TRIANGLE, and water carried VK_GEOMETRY_OPAQUE_BIT_KHR,
-  // so the traversal hardware committed the hit and no shader ran. The instance
-  // is now tagged VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR to create the hook
-  // (rtx_instance_manager.cpp). Checked here rather than there so the surface
-  // interaction is never built for a surface we are about to ignore.
-  //
-  // Depth colouring is applied on the camera path, so no second attenuation is
-  // applied here - the light crosses the boundary unchanged.
-  //
-  // The upward test uses the ray direction rather than the front-face bit because
-  // the clipmap's winding is ours, not the game's (d3d11_rtx.cpp forces
-  // VK_CULL_MODE_NONE on it), while the sheet being horizontal is guaranteed by
-  // construction.
+  // Simulated-depth water exists only for rays entering it from above. An upward visibility ray leaves
+  // from beneath the sheet (a submerged surface testing the sun, sky or a lamp), so the sheet must not
+  // occlude it. traceVisibilityRay only calls this for CANDIDATE_NON_OPAQUE_TRIANGLE, so the water
+  // instance carries VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR (rtx_instance_manager.cpp) to get here;
+  // checked before the surface interaction is built. Depth colouring is applied on the camera path, so
+  // no second attenuation here. Uses the ray direction rather than the front-face bit because the
+  // clipmap's winding is ours (culling is disabled on it); the sheet is horizontal by construction.
   if (surface.isAnimatedWater
    && cb.kenshiWaterTransparency < 0.0f
    && ray.direction.y > 0.0f)

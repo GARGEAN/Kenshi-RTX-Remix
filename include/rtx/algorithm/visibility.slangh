@@ -100,14 +100,9 @@ vec3 handleVisibilityVertex<let VisibilityMode : uint>(Ray ray, RayHitInfo rayHi
 
   if (polymorphicType == surfaceMaterialTypeOpaque)
   {
-    // DX11_V629_KENSHI_WATER_LIGHT_TRANSMISSION. Simulated depth keeps the
-    // water sheet in the opaque material path so its primary surface receives
-    // the stable diffuse/specular lighting we want. Its camera-ray opacity is
-    // computed from the probed bottom depth, but visibility rays do not compile
-    // that primary-only calculation and previously saw the sheet as opacity 1.
-    // That blocked every light above the water from submerged geometry. Depth
-    // colouring is already applied on the camera path, so let shadow/NEE rays
-    // cross the boundary without applying a second attenuation here.
+    // Simulated-depth water stays in the opaque path for stable lighting, and its opacity is only
+    // computed for camera rays. Let visibility rays pass through it (depth colouring is already applied
+    // on the camera path); otherwise it blocks all light to submerged geometry.
     if (surface.isAnimatedWater && cb.kenshiWaterTransparency < 0.0f)
     {
       return vec3(1.0f);

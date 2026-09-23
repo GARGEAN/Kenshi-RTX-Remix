@@ -89,11 +89,8 @@ namespace interleaver {
   bool formatConversionUintSupported(uint32_t format) {
     switch (format) {
     case SupportedVkFormats::VK_FORMAT_B8G8R8A8_UNORM:
-    // DX11_V548_RGBA8_VERTEX_COLOR: RGBA8 vertex colours, decoded here rather
-    // than converted on the CPU. Kenshi declares COLOR0 this way on every
-    // object, in DEVICE-LOCAL buffers, so the CPU path could never map them and
-    // dropped the channel outright - the same failure V286 fixed for Skyrim
-    // SE's half-float positions, and for the same reason.
+    // RGBA8 vertex colours, decoded here rather than converted on the CPU: Kenshi declares COLOR0 this way
+    // on every object, in device-local buffers the CPU path cannot map.
     case SupportedVkFormats::VK_FORMAT_R8G8B8A8_UNORM:
       return true;
     default:
@@ -148,11 +145,9 @@ namespace interleaver {
     case SupportedVkFormats::VK_FORMAT_B8G8R8A8_UNORM:
       // Passthrough format we support in other places
       return uint3(input[index], 0, 0);
-    // DX11_V548_RGBA8_VERTEX_COLOR: same 32-bit word, R and B exchanged.
-    // In memory RGBA8 is [R,G,B,A] and BGRA8 is [B,G,R,A], so little-endian
-    // this is a swap of bits 0..7 with bits 16..23; G and A keep their places.
-    // The consumer (surface_interaction.slangh) unpacks BGRA unconditionally,
-    // so normalising here keeps that single decode correct for both formats.
+    // Same 32-bit word with R and B exchanged: in memory RGBA8 is [R,G,B,A] and BGRA8 is [B,G,R,A], so
+    // little-endian this swaps bits 0..7 with bits 16..23. The consumer (surface_interaction.slangh)
+    // unpacks BGRA unconditionally, so normalising here keeps that single decode correct.
     case SupportedVkFormats::VK_FORMAT_R8G8B8A8_UNORM:
     {
       const uint32_t data = input[index];

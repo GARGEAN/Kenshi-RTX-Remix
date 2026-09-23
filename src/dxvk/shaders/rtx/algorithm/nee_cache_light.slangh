@@ -48,14 +48,9 @@ struct NEECacheUtils
 
   static int getSurfacePrimitiveCount(int surfaceIndex, StructuredBuffer<uint> PrimitiveIDPrefixSumBuffer)
   {
-    // DX11_V658: bounds check. This was the only accessor here without one -
-    // convertIDToPrefixSumID rejects surfaceIndex >= cb.surfaceCount and
-    // convertPrefixSumIDToID checks surfaceCount, but this one indexed the
-    // buffer unchecked. integrator_indirect.slangh passes the SAME surfaceIndex
-    // to both, so an index the guarded call correctly rejected still reached an
-    // out-of-bounds read here. The buffer holds surfaceCount + 1 entries
-    // (rtx_accel_manager.cpp:1343), so surfaceIndex == surfaceCount - 1 is the
-    // last valid input and [surfaceIndex + 1] stays in range.
+    // Bounds check: the buffer holds surfaceCount + 1 entries (rtx_accel_manager.cpp), so
+    // surfaceIndex == surfaceCount - 1 is the last valid input. integrator_indirect.slangh passes the same
+    // surfaceIndex here and to the guarded accessors, so this one must reject it too.
     if (surfaceIndex < 0 || surfaceIndex >= cb.surfaceCount)
     {
       return 0;

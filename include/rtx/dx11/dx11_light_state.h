@@ -51,11 +51,8 @@ struct Dx11LightDesc {
   float Theta        = 0.0f;
   float Phi          = 0.0f;
 
-  // DX11_V765_KENSHI_LIGHT_GC. Kenshi's OWN light-volume radius (falloff.w),
-  // which is what the game culls the volume draw against. Deliberately not
-  // Range: the bridge folds sqrt(power) * sqrt(kenshiLightIntensityScale) into
-  // Range for brightness (V479), which runs it ~3.4-4x larger than the volume.
-  // Zero for any light that did not come from Kenshi's light_fs harvest.
+  // Kenshi's own light-volume radius (falloff.w), which the game culls against. Not Range: Range has
+  // sqrt(power * kenshiLightIntensityScale) folded in and runs ~3-4x larger. Zero for non-Kenshi lights.
   float KenshiCullRadius = 0.0f;
 
   bool Enabled       = true;

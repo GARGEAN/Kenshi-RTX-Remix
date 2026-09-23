@@ -1,5 +1,5 @@
 param(
-    [string]$SourceDir = "_output",
+    [string]$SourceDir = "_output\x64",
     [string]$StagingRoot = "_release",
     [string]$Version,
     [string]$PackageName,
@@ -23,11 +23,13 @@ function Copy-IfExists {
 }
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$resolvedSourceDir = Join-Path $repoRoot $SourceDir
+$resolvedSourceDir = [IO.Path]::GetFullPath((Join-Path $repoRoot $SourceDir))
 
 if (-not (Test-Path $resolvedSourceDir)) {
     throw "Source directory '$resolvedSourceDir' does not exist. Build the runtime so _output exists first."
 }
+
+& (Join-Path $repoRoot 'scripts-common\ensure-fg-runtime.ps1') -RuntimePath (Join-Path $resolvedSourceDir 'nvngx_dlssg.dll') -VerifyOnly
 
 if (-not $Version -or [string]::IsNullOrWhiteSpace($Version)) {
     $releaseFile = Join-Path $repoRoot "RELEASE"
@@ -47,20 +49,30 @@ if (-not $PackageName -or [string]::IsNullOrWhiteSpace($PackageName)) {
     $PackageName = "dxvk-remix-dx11-$Version"
 }
 
-$resolvedStagingRoot = Join-Path $repoRoot $StagingRoot
-$packageDir = Join-Path $resolvedStagingRoot $PackageName
+$resolvedStagingRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot $StagingRoot))
+if ([IO.Path]::GetFileName($PackageName) -ne $PackageName -or $PackageName -in @('.', '..')) {
+    throw 'PackageName must be a single folder name.'
+}
+$packageDir = [IO.Path]::GetFullPath((Join-Path $resolvedStagingRoot $PackageName))
+if (-not $packageDir.StartsWith($repoRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
+    $packageDir.StartsWith($resolvedSourceDir + '\', [StringComparison]::OrdinalIgnoreCase) -or
+    $resolvedSourceDir.StartsWith($packageDir + '\', [StringComparison]::OrdinalIgnoreCase) -or
+    $packageDir -eq $resolvedSourceDir) {
+    throw 'Package destination must be inside the repository and separate from the source directory.'
+}
 $zipPath = Join-Path $resolvedStagingRoot ($PackageName + ".zip")
 
 if (Test-Path $packageDir) {
-    Remove-Item -Path $packageDir -Recurse -Force
+    Remove-Item -LiteralPath $packageDir -Recurse -Force
 }
 
 if (Test-Path $zipPath) {
-    Remove-Item -Path $zipPath -Force
+    Remove-Item -LiteralPath $zipPath -Force
 }
 
 New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
 Copy-Item -Path (Join-Path $resolvedSourceDir "*") -Destination $packageDir -Recurse -Force
+& (Join-Path $repoRoot 'scripts-common\ensure-fg-runtime.ps1') -RuntimePath (Join-Path $packageDir 'nvngx_dlssg.dll') -VerifyOnly
 
 Copy-IfExists -Source (Join-Path $repoRoot "dxvk.conf") -Destination (Join-Path $packageDir "dxvk.conf")
 Copy-IfExists -Source (Join-Path $repoRoot "rtx.conf") -Destination (Join-Path $packageDir "rtx.conf")

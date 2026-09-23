@@ -1327,32 +1327,14 @@ namespace dxvk {
     return profile;
   }
 
-  // DX11_V758_KENSHI_TERRAIN_BLEND_MASK: which blendMap channels a multi-biome
-  // terrain pixel shader actually consumes, read off its own instruction stream.
-  //
-  // Kenshi compiles one terrain pixel shader per SUBSET of neighbouring biomes,
-  // and only the blendMap channels a tile uses survive that compilation. The
-  // numbered diffuseMapsN arrays consume the surviving channels from high to
-  // low (w,z,y,x) and the unnumbered base set takes `1 - sum(active)`.
-  //
-  // REFLECTION CANNOT TELL WHICH SURVIVED: the constant and resource names are
-  // identical whichever subset was kept. V528 therefore carried a hand-built
-  // table of 25 shader hashes, and a permutation missing from it returned 0 and
-  // kept a hard, unblended biome boundary. That is a snapshot of one shader
-  // cache, and it went stale - `FS_71378a88...` (channels 2|3) compiles in the
-  // shipped game and was never listed.
-  //
-  // The bytecode says it outright. After the blend map is sampled into a temp,
-  // the surviving channels are exactly the components of that temp the shader
-  // goes on to READ while they are still live; the compiler reuses the dead
-  // lanes for unrelated work, which is why liveness has to be tracked rather
-  // than simply collecting every component ever referenced. Verified offline
-  // against all 26 multi-biome terrain shaders in the cache: it reproduces all
-  // 25 table entries exactly and derives 0xc for the unlisted one.
-  //
-  // Returns 0 for any shader that is not a multi-biome terrain permutation, and
-  // for one whose shape this does not recognise - i.e. the pre-V758 behaviour
-  // for an unlisted shader, a hard boundary rather than a guessed blend.
+  // Which blendMap channels a multi-biome terrain pixel shader consumes, read off its instruction stream.
+  // Kenshi compiles one terrain pixel shader per subset of neighbouring biomes and only the channels a
+  // tile uses survive; the numbered diffuseMapsN arrays consume them from high to low (w,z,y,x) and the
+  // base set takes `1 - sum(active)`. Reflection cannot tell which survived. After the blend map is
+  // sampled into a temp, the surviving channels are exactly the components of that temp read while
+  // still live (the compiler reuses dead lanes, so liveness must be tracked). Verified against all 26
+  // multi-biome terrain shaders in the cache. Returns 0 for anything else or any shape it does not
+  // recognise: a hard boundary rather than a guessed blend.
   static uint32_t parseKenshiTerrainBlendChannelMask(
     const DxbcModule& module,
     const DxbcRdef*   reflection) {
@@ -1610,29 +1592,17 @@ namespace dxvk {
     return false;
   }
 
-  // Follow pixel-shader dataflow from texture sample coordinates back to the
-  // declared input register. Optimizing HLSL compilers routinely place the
-  // diffuse UV in TEXCOORD1/2 while TEXCOORD0 carries fog, lighting, or world
-  // data, so selecting the lowest VS output cannot be correct across engines.
-  // The analysis is deliberately conservative: a temporary carries the union
-  // of input registers that feed it, and the most frequently sampled matching
-  // float input wins for each texture resource slot.
-  // DX11_V392_WORLD_PROJECTED_UV. Recognises the world-projected map contract
-  // from REFLECTION rather than from dataflow, and corroborates it
-  // structurally. The affine itself (`uv = (worldPos.xz + worldOffset.xz -
-  // map.xy) * map.zw`) is the shader's, and recovering an arbitrary affine
-  // symbolically is not tractable here: its coefficients are PRODUCTS of
-  // constant-buffer values, so a linear-form tracker cannot represent them
-  // without an expression tree. Naming the contract is the honest, bounded
-  // alternative, and it was verified unambiguous: exactly one of the 254
-  // cached Kenshi shaders declares `$distantColour`, and its disassembly is
-  // this formula.
-  //
-  // The corroboration matters more than the name: the slot must be sampled
-  // with a coordinate the sampled-semantic parser could NOT resolve to an
-  // input register, which is precisely the "computed in the shader" case this
-  // exists for. A shader that samples the same-named texture directly from a
-  // TEXCOORD keeps its ordinary path.
+  // parseDxbcSampledTexcoords (below) follows pixel-shader dataflow from texture sample coordinates back
+  // to the declared input register: compilers routinely put the diffuse UV in TEXCOORD1/2 while
+  // TEXCOORD0 carries fog, lighting or world data. Conservative: a temporary carries the union of the
+  // input registers that feed it, and the most frequently sampled matching float input wins per slot.
+  // parseWorldProjectedUvProfile recognises the world-projected map contract
+  // (`uv = (worldPos.xz + worldOffset.xz - map.xy) * map.zw`) from reflection, corroborated structurally.
+  // The affine's coefficients are products of cbuffer values, which a linear-form tracker cannot
+  // represent, so the contract is named instead: exactly one of the 254 cached Kenshi shaders declares
+  // `$distantColour`, and its disassembly is this formula. The slot must be sampled with a coordinate
+  // the sampled-semantic parser could not resolve to an input register; a shader sampling the
+  // same-named texture from a TEXCOORD keeps its ordinary path.
   static D3D11WorldProjectedUvProfile parseWorldProjectedUvProfile(
       const DxbcRdef* reflection,
       const std::array<D3D11SampledTexcoordSemantic,
@@ -2000,9 +1970,8 @@ namespace dxvk {
 
     if (pShaderKey->type() == VK_SHADER_STAGE_FRAGMENT_BIT) {
       m_opacityCutoutProfile = parseDxbcOpacityCutoutProfile(module);
-      // DX11_V758_KENSHI_TERRAIN_BLEND_MASK: derived once here, per unique
-      // shader, and only for one that declares both a blend map and a numbered
-      // layer stack - every other pixel shader pays two reflection scans.
+      // Derived once per unique shader, and only for one that declares both a blend map and a numbered layer
+      // stack; every other pixel shader pays two reflection scans.
       m_kenshiTerrainBlendChannelMask = uint8_t(
         parseKenshiTerrainBlendChannelMask(module, m_reflection.ptr()));
       m_worldProjectedUv = parseWorldProjectedUvProfile(
@@ -2018,14 +1987,9 @@ namespace dxvk {
             : std::string("none")));
       }
 
-      // DX11_V546_COLOR0_TINT: record which COLOR0 components this pixel shader
-      // actually reads. The capture layer needs this because vertex-colour
-      // modulation was being decided by whether a COLOR0 BUFFER existed, not by
-      // whether the shader consumed it - in Kenshi only 40 of 180 pixel shaders
-      // do, so 140 shaders' draws could be tinted by a stream the game ignores.
-      //
-      // Same defect class as V543's readNamedConstant: a declared input is not a
-      // read input, and the mask that says so was already in the chunk.
+      // Record which COLOR0 components this pixel shader actually reads, so vertex-colour modulation follows
+      // real use rather than the mere presence of a COLOR0 buffer (only 40 of Kenshi's 180 pixel shaders
+      // read it). A declared input is not a read input.
       const Rc<DxbcIsgn> psInputSignature = module.isgn();
       const DxbcSgnEntry* color0Entry = psInputSignature != nullptr
         ? psInputSignature->find("COLOR", 0, 0)
@@ -2111,19 +2075,10 @@ namespace dxvk {
       m_shader->dump(dumpStream);
     }
 
-    // DX11_V539_SHADER_SIZE_MAP: make an Aftermath crash dump resolvable to a
-    // GAME shader.
-    //
-    // A dump names the faulting shader only as `fragment_NN` - an Aftermath
-    // placeholder, not a DXVK name - plus an opaque hash it computes itself and
-    // a SIZE. The Aftermath SDK headers that would let us reproduce that hash
-    // are not in this tree, and the `.nvdbg` debug info the bridge already
-    // writes is compressed, so neither route identifies the shader.
-    //
-    // The SIZE does: it is simply the SPIR-V byte count. Logging it here, where
-    // the game's own FS_/VS_ identity is still in scope, turns
-    // "Shader size 11776" in a dump into a name by lookup. Emitted once per
-    // unique shader (a few hundred a session), so the cost is irrelevant.
+    // Make an Aftermath crash dump resolvable to a game shader. A dump names the faulting shader only as
+    // `fragment_NN` plus an opaque hash and a size; the size is the SPIR-V byte count, so logging it here,
+    // with the game's FS_/VS_ name in scope, turns "Shader size 11776" into a name by lookup. Once per
+    // unique shader.
     {
       std::ostringstream spirvCounter;
       m_shader->dump(spirvCounter);
@@ -2178,56 +2133,27 @@ namespace dxvk {
         m_texcoordCapture->semanticIndex = semanticIndex;
       }
 
-      // Every graphics VS must produce SV_Position, and it is the only output
-      // guaranteed to include the engine's complete skinning, morphing,
-      // instancing and object/view transforms. Capture its homogeneous xyzw and
-      // unproject it in the RT interleaver. This removes semantic-name/profile
-      // guesses from geometry reconstruction while leaving executable profiles
-      // available for material/camera policy.
-      // Clean-capture-verified Kenshi/OGRE profiles whose VS exports the exact
-      // world-space position as a TEXCOORD output (DXBC disassembly proven,
-      // see analysis/captures/renderdoc-draw-census):
-      //  - 40717da8 / e2ba1ed9: hardware-instanced world meshes; world
-      //    position from per-instance transform rows, exported at TEXCOORD5.
-      //  - ff800353 / 5673e857: ordinary world meshes; world position =
-      //    worldMatrix * POSITION, exported at TEXCOORD5.
-      //  - fe3e9f09: terrain chunks (POSITION+NORMAL layout); world position =
-      //    worldMatrix * POSITION, exported at TEXCOORD4.
+      // Every graphics VS must produce SV_Position, and it is the only output guaranteed to include the
+      // engine's complete skinning, morphing, instancing and object/view transforms. Capture its homogeneous
+      // xyzw and unproject it in the RT interleaver, which removes semantic-name guesses from geometry
+      // reconstruction.
+      // Kenshi/OGRE profiles whose VS exports the exact world-space position as a TEXCOORD (DXBC-verified):
+      //  - 40717da8 / e2ba1ed9: hardware-instanced world meshes; world position from per-instance transform
+      //    rows, exported at TEXCOORD5.
+      //  - ff800353 / 5673e857: ordinary world meshes; world position = worldMatrix * POSITION, TEXCOORD5.
+      //  - fe3e9f09: terrain chunks (POSITION+NORMAL layout); world position = worldMatrix * POSITION,
+      //    TEXCOORD4.
       struct KenshiOgreWorldProfile {
         const char* shaderName;
         uint32_t texcoordIndex;
       };
-      // DISABLED pending repair of the world-space capture path.
-      //
-      // A per-family admission trace settled this empirically. In one frame:
-      //   visible  40717da8/e2ba1ed9/6f30e40a  exactPos=0 (not captured)
-      //   visible  ad6b4ffc/1eaa6ebf           exactPos=1 stride=24 (SV_Position,
-      //                                        objectToWorld = camera position)
-      //   INVISIBLE ff800353/5673e857/fe3e9f09 exactPos=1 stride=20 (world
-      //                                        profile, objectToWorld = identity)
-      // Every family on the world-position profile was invisible; every family
-      // on the default homogeneous SV_Position capture or on ordinary
-      // submission rendered. The defect is the world-space capture path, not
-      // these shaders. Restoring them to SV_Position capture is expected to
-      // bring buildings back at the cost of reintroducing camera-dependent
-      // capture; the world path can be re-enabled per shader once repaired.
+      // Disabled: families captured through the world-space profile rendered invisible, while the same
+      // families on SV_Position capture or ordinary submission rendered. The table is kept for a repaired
+      // world-space capture path.
       static constexpr KenshiOgreWorldProfile kKenshiOgreWorldProfiles[] = {
-        // ff800353 was re-enabled TEMPORARILY to drive the world-capture probe
-        // in d3d11_rtx.cpp, and then never turned back off. The probe has been
-        // dormant since (`s_worldCaptureProbesRemaining = 0`), so for the rest
-        // of the project the largest building family has been running on the
-        // very path the trace above proved makes geometry invisible - while
-        // 5673e857 and fe3e9f09 were correctly restored to SV_Position capture.
-        // A recent family trace shows the damage plainly: 33 draws of ff800353
-        // at exactPos=1 stride=20 (world profile) against 20 draws of 5673e857
-        // at stride=24 (SV_Position), i.e. buildings split across a working and
-        // a broken path at the same time. That is a direct explanation for
-        // "some buildings render unstably while others are never seen at all",
-        // and for flicker that appears group-wise rather than uniformly.
         { "VS_ff800353fcd20376db6c4849be4d0f1504fbe79f", 5u },
       };
-      // Master switch, so the table survives for the eventual repair without
-      // any entry being live by accident. Re-arming a probe must also set this.
+      // Master switch, so no table entry is live by accident.
       static constexpr bool kEnableKenshiOgreWorldProfiles = false;
       bool kenshiOgreWorldPositionProfile = false;
       uint32_t kenshiOgreWorldTexcoordIndex = 0u;

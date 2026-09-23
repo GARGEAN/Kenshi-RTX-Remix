@@ -138,9 +138,8 @@ namespace dxvk {
 
     std::lock_guard<dxvk::mutex> lock(m_mutex);
 
-    // DX11_V614_FREED_RANGE_RING. Record the range before it is gone, so a
-    // later fault inside it can still be attributed. See the note in the
-    // header for why this matters.
+    // Record the range before it is gone, so a later fault inside it can still be attributed (see the
+    // header).
     auto entry = m_entries.find(address);
     if (entry != m_entries.end()) {
       FreedEntry freed;

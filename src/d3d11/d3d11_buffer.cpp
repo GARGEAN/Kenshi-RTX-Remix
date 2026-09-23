@@ -31,18 +31,10 @@ namespace dxvk {
       info.stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
       info.access |= VK_ACCESS_INDEX_READ_BIT;
 
-      // DX11_V329_UNVALIDATED_INDEX_RANGE: Remix's generateTriangleList pass
-      // binds the application's index buffer as a StructuredBuffer<uint16_t>,
-      // i.e. an SSBO, so the VkBuffer must declare storage usage - INDEX_BUFFER
-      // and TRANSFER alone are not enough to bind it. Upstream's D3D9 path
-      // never hits this because it copies indices into a Remix-owned buffer
-      // first; this bridge feeds the game's buffer in directly.
-      //
-      // The stage/access bits matter as much as the usage bit: DXVK derives its
-      // barriers from this declared producer/consumer set, and the same
-      // omission on the geometry cache buffers previously left the BVH build
-      // racing uninitialized index data and losing the device
-      // (rtx_scene_manager.cpp, "Declare the complete producer/consumer set").
+      // Remix's generateTriangleList binds the application's index buffer as a StructuredBuffer (SSBO),
+      // so it needs storage usage; upstream's D3D9 path copies indices into its own buffer first. The
+      // stage/access bits matter too: DXVK derives barriers from them, and without them the BVH build
+      // races uninitialized index data.
       info.usage  |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
       info.stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
       info.access |= VK_ACCESS_SHADER_READ_BIT;

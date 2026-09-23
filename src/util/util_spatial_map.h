@@ -134,8 +134,8 @@ namespace dxvk {
     XXH64_hash_t move(const XXH64_hash_t& oldTransformHash, const Vector3& centroid, const Matrix4& newTransform, const T* data) {
       XXH64_hash_t transformHash = XXH64(&newTransform, sizeof(newTransform), 0);
 
-      // V730: placement can change independently of the transform (Kenshi
-      // stores skinned placement in the bone palette). Both indices must move.
+      // Placement can change independently of the transform (Kenshi stores skinned placement in the bone
+      // palette). Both indices must move.
       auto range = m_cache.equal_range(oldTransformHash);
       for (auto iter = range.first; iter != range.second; ++iter) {
         if (iter->second.data != data)

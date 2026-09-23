@@ -5,8 +5,8 @@
 #include <unordered_map>
 
 namespace dxvk {
-// V779: sample-local identities only, never owning references. Masks: terrain=1,
-// other direct=2, opaque conversion=4. Separate censuses must not be added together.
+// Sample-local identities only, never owning references. Masks: terrain=1, other direct=2, opaque
+// conversion=4. Separate censuses must not be added together.
 struct TextureOwnerCensus {
   struct Image { uint64_t bytes = 0; uint32_t mask = 0; bool recent = false, unknown = false; };
   struct Row { uint64_t bytes = 0, coldBytes = 0, unknownBytes = 0; uint32_t images = 0; };

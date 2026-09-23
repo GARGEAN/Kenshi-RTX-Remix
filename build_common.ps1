@@ -459,8 +459,6 @@ function Repair-FutureFileTimestamps {
     'meson.build',
     'meson_options.txt',
     'build_common.ps1',
-    'build_dxvk_all_ninja.ps1',
-    'build.bat',
     'packman-external.xml'
   )) {
     $candidate = Join-Path $SourceDir $relative
@@ -1042,7 +1040,7 @@ function PerformBuild {
   $BuildDir = [IO.Path]::Combine($SourceDir, $BuildSubDir)
   Set-VisualStudioBuildEnvironment -Architecture $Architecture
   if (-not (Test-Path (Join-Path $SourceDir 'meson.build'))) {
-    Write-Error "meson.build was not found at '$SourceDir'. Put build_common.ps1 and build_dxvk_all_ninja.ps1 in the repository root next to meson.build, then run build_dxvk_all_ninja.ps1 from there." -ErrorAction Stop
+    Write-Error "meson.build was not found at '$SourceDir'. Run build_dxvk.ps1 from the repository root containing meson.build and build_common.ps1." -ErrorAction Stop
   }
   Repair-FutureFileTimestamps -SourceDir $SourceDir -BuildDir $BuildDir
   $env:MESON_FORCE_BACKTRACE = '1'
@@ -1056,6 +1054,9 @@ function PerformBuild {
     [void](Resolve-RequiredCommand -Name 'ninja' -InstallHint 'Install Ninja with: py -m pip install --user ninja')
   }
   Ensure-DxvkDependencies -SourceDir $SourceDir -FetchDependencies $FetchDependencies -TimeoutSeconds $DepsTimeoutSeconds
+  if ($Architecture -eq 'x64') {
+    & (Join-Path $SourceDir 'scripts-common\ensure-fg-runtime.ps1') -VerifyOnly:(-not $FetchDependencies)
+  }
   $availableOptions = Get-MesonOptionNames -SourceDir $SourceDir
   Write-Host "[build] Starting $Architecture build for $BuildFlavour..." -ForegroundColor Cyan
   Write-Host "[build] Source directory: $SourceDir" -ForegroundColor DarkGray
@@ -1111,27 +1112,6 @@ function PerformBuild {
     $tagList = $InstallTags -join ','
     Write-Host "[build] Installing tag(s) '$tagList' to $OutputDir..." -ForegroundColor Cyan
     Invoke-CheckedNative -FilePath $mesonCommand.FilePath -ArgumentsPrefix $mesonCommand.ArgumentsPrefix -Arguments @('install', '-C', $BuildDir, '--tags', $tagList) -FailureMessage 'Failed to run install step' -WorkingDirectory $SourceDir -TimeoutSeconds $InstallTimeoutSeconds -DiagnosticLogPath (Join-Path $BuildDir 'meson-logs\meson-log.txt')
-    # Deploy the NGX runtime DLLs next to every installed/built d3d11.dll.
-    $ngxSource = Join-Path $SourceDir 'nv-private\hdremix\bin\release'
-    if (Test-Path $ngxSource) {
-      $ngxDlls = Get-ChildItem -Path $ngxSource -Filter 'nvngx_*.dll' -File
-      $ngxTargets = @()
-      foreach ($searchRoot in @($OutputDir, $BuildDir)) {
-        if ($searchRoot -and (Test-Path $searchRoot)) {
-          $ngxTargets += Get-ChildItem -Path $searchRoot -Recurse -Filter 'd3d11.dll' -File -ErrorAction SilentlyContinue
-        }
-      }
-      foreach ($t in $ngxTargets) {
-        foreach ($dll in $ngxDlls) {
-          Copy-Item -Path $dll.FullName -Destination $t.DirectoryName -Force
-        }
-      }
-      if ($ngxTargets.Count -gt 0) {
-        Write-Host ("[build] Deployed {0} NGX DLLs next to {1} d3d11.dll location(s)" -f $ngxDlls.Count, $ngxTargets.Count) -ForegroundColor Cyan
-      }
-    } else {
-      Write-Host "[build] WARNING: NGX runtime DLLs not found at $ngxSource - DLSS will be unavailable in deployed builds." -ForegroundColor Yellow
-    }
     Write-Host "[build] Build completed successfully for $Architecture $BuildFlavour" -ForegroundColor Green
   } else {
     Write-Host "[build] Configuration completed for $Architecture $BuildFlavour (no build performed)" -ForegroundColor Green

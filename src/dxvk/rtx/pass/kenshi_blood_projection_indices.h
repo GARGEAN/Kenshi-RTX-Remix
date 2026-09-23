@@ -20,24 +20,14 @@
 * DEALINGS IN THE SOFTWARE.
 */
 #ifndef RTX_PASS_KENSHI_BLOOD_PROJECTION_INDICES_H_DX11V524
-#define RTX_PASS_KENSHI_BLOOD_PROJECTION_INDICES_H_DX11V524 // DX11_V524_GUARD
+#define RTX_PASS_KENSHI_BLOOD_PROJECTION_INDICES_H_DX11V524
 
 #include "rtx/utility/shader_types.h"
 
-// DX11_V524. Bakes Kenshi's bind-pose cylindrical blood projection on the GPU,
-// straight from the vertex buffers the draw itself binds.
-//
-// This replaces a CPU bake that read D3D11Buffer's optional vertex SHADOW. That
-// shadow is a best-effort mirror populated on only three paths, so it is absent
-// for buffers the game fills any other way (measured: Kenshi's partData buffer,
-// partShadowBytes=0 while position/normal shadowed fine) and can be STALE where
-// it exists, because it is written once at creation and never refreshed. Both
-// produced nondeterministic blood - the same mesh working one run and not the
-// next. The vertex buffers themselves have neither problem.
-//
-// All offsets/strides are in ELEMENTS of the bound view, not bytes:
-// position/normal index a StructuredBuffer<float>, partData a
-// StructuredBuffer<uint32_t>.
+// Bakes Kenshi's bind-pose cylindrical blood projection on the GPU, straight from the vertex buffers
+// the draw binds (the CPU vertex shadow is missing for some buffers, e.g. partData, and can be stale).
+// All offsets/strides are in ELEMENTS of the bound view, not bytes: position/normal index a
+// StructuredBuffer<float>, partData a StructuredBuffer<uint32_t>.
 struct KenshiBloodProjectionArgs {
   uint32_t vertexCount;
   uint32_t mode;              // 1 = regional Y-cylinder, 2 = severed-limb X-cylinder

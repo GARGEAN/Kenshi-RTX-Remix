@@ -111,22 +111,17 @@ public:
 
   explicit AccelManager(DxvkDevice* device);
 
-  // DX11_V334_TLAS_STATS: read-and-clear the per-frame tally of instances that
-  // were dropped on the way into the TLAS, plus how many actually landed in it.
-  // Instance count and geometry state are both measured stable, so this is the
-  // last unmeasured stage between "instance exists" and "a ray can hit it".
+  // Read-and-clear the per-frame tally of instances dropped on the way into the TLAS, plus how many
+  // landed in it.
   static void fetchAndResetTlasStats(uint32_t& hidden, uint32_t& gc,
                                      uint32_t& zeroMask, uint32_t& inTlas);
 
-  // DX11_V344_TLAS_CONTENTS: TLAS entries that are present but inert - pointing
-  // at no BLAS, or collapsed by an all-zero transform. Both are invisible to
-  // every count-based measurement and are what traversal actually consumes.
+  // TLAS entries that are present but inert: pointing at no BLAS, or collapsed by an all-zero transform.
   static void fetchTlasContentStats(uint32_t& nullBlas, uint32_t& zeroXform);
 
-  // DX11_V375_BLAS_ROUTE: which BLAS route each non-rejected instance took, and
-  // whether the merged route actually produced a GPU build. `instances` vs
-  // `inTlas` cannot be compared directly - a merged bucket collapses many
-  // instances into one TLAS entry - so the split has to be reported explicitly.
+  // Which BLAS route each non-rejected instance took, and whether the merged route produced a GPU build.
+  // `instances` and `inTlas` cannot be compared directly (a merged bucket collapses many instances into
+  // one TLAS entry).
   struct BlasRouteStats {
     uint32_t mergedBuckets = 0;
     uint32_t mergedBucketInstances = 0;
@@ -138,11 +133,10 @@ public:
   };
   static void fetchAndResetBlasRouteStats(BlasRouteStats& stats);
 
-  // DX11_V380_CACHE_ACCOUNTING: the cached-bucket restore path. `skippedInstances`
-  // took the bucket-cache early `continue`; the rest describe what the restore put
-  // back. One TLAS entry per bucket, so entries << skipped is expected - the point
-  // is whether `skippedInstances` equals `memberInstances`. A shortfall means
-  // instances were skipped that no restored bucket represents.
+  // The cached-bucket restore path. `skippedInstances` took the bucket-cache `continue`; the rest
+  // describe what the restore put back. One TLAS entry per bucket, so entries << skipped is expected;
+  // `skippedInstances` should equal `memberInstances`, and a shortfall means instances were skipped that
+  // no restored bucket represents.
   struct CacheRestoreStats {
     uint32_t skippedInstances = 0;
     uint32_t bucketsRestored = 0;
@@ -157,8 +151,8 @@ public:
 
   // Returns a GPU buffer containing the surface data for active instances
   const Rc<DxvkBuffer> getSurfaceBuffer() const { return m_surfaceBuffer; }
-  // DX11_V519: must never return null - see the definition. Takes a context
-  // because it may have to create and zero the buffer on the spot.
+  // Never returns null (see the definition). Takes a context because it may have to create and zero the
+  // buffer.
   Rc<DxvkBuffer> getKenshiBloodBuffer(Rc<DxvkContext> ctx);
 
   const Rc<DxvkBuffer> getSurfaceMappingBuffer() const { return m_surfaceMappingBuffer; }
@@ -179,7 +173,7 @@ public:
   // Clean up instances which are deemed as no longer required
   void garbageCollection();
 
-  // V777: CPU-only ownership census every five seconds, plus scene-clear boundaries.
+  // CPU-only ownership census every five seconds, plus scene-clear boundaries.
   void logMemoryOwnership(DrawCallCache& drawCalls, const char* reason, bool force = false);
 
   // Prepares instance buffers for rendering by the GPU

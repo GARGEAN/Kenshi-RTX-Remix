@@ -99,22 +99,14 @@ bool isSurfaceClipped(Surface surface, MinimalSurfaceInteraction surfaceInteract
     return false;
   }
 
-  // DX11_V636_KENSHI_INTERIOR_CLIP. Kenshi never sets a D3D9-style user clip
-  // plane - nothing in src/d3d11 writes enableClipPlane, and the only other
-  // writers are the ray-portal clone paths this game never runs - so the flag
-  // is reused to mean "this surface is subject to the building-interior cull".
-  //
-  // Why this function and not a geometry-domain cull: raster hides the
-  // intruding terrain with a per-PIXEL discard, and Kenshi's terrain triangles
-  // are metre-plus and straddle the wall, so removing whole primitives leaves
-  // either a wedge of terrain inside the room or a hole in the ground outside.
-  // Sub-triangle precision is mandatory, and this predicate is evaluated at the
-  // shading point. Every ray type already routes through it - resolve for
-  // primary and indirect, the unordered loops, and visibility for shadows - so
-  // the cull is consistent across reflections and GI, which raster's
-  // screen-space slab never was. See journal chapter 16.
-  // V639 diagnostic: cull every eligible surface, volumes ignored. Isolates
-  // "the flag reached the shader" from "the volume is in the right place".
+  // Kenshi never sets a user clip plane (only ray-portal clones would write enableClipPlane), so the flag
+  // means "this surface is subject to the building-interior cull". Evaluated here, at the shading point,
+  // rather than as a geometry-domain cull: raster hides intruding terrain per pixel, and Kenshi's
+  // terrain triangles straddle the walls, so removing whole primitives leaves wedges or holes. Every ray
+  // type routes through this (resolve, unordered loops, visibility), so the cull is consistent across
+  // reflections and GI.
+  // Debug: cull every eligible surface, ignoring volumes - separates "the flag reached the shader" from
+  // "the volume is in the right place".
   if (cb.kenshiInteriorClipDebugAll != 0)
   {
     return true;
@@ -122,23 +114,12 @@ bool isSurfaceClipped(Surface surface, MinimalSurfaceInteraction surfaceInteract
 
   if (cb.kenshiInteriorClipCount != 0)
   {
-    // DX11_V650_KENSHI_INTERIOR_SHELL. Containment against the shell's OWN
-    // triangles. The oriented box that V636-V649 used is retained only as the
-    // broad-phase reject inside each record.
-    //
-    // Why exact rather than a sampled field: measured across the 32 readable
-    // mask shells, only 2 are convex, one carries 872 distinct planes (a dome),
-    // and the median wall sits 3.6 degrees off vertical with roughly 5% of wall
-    // area actually vertical. Voxels, a height-span field and an SDF all cost
-    // half a cell of error on surfaces that are overwhelmingly tilted, and cost
-    // megabytes per shell; the triangles cost 5-25 KB and have no error and no
-    // resolution parameter.
-    //
-    // The test is a signed vertical crossing count - the winding number of the
-    // point - against only the triangles binned under it, typically about four.
-    // Signed rather than parity because chapter 09 measured 3 boundary and 3
-    // non-manifold edges on a real shell: these are not perfectly watertight,
-    // and a signed count degrades gracefully where parity flips.
+    // Containment against the shell's own triangles; each record's oriented box is only a broad-phase
+    // reject. Exact triangles are small (5-25 KB) and have no resolution error, whereas walls are mostly
+    // tilted and few shells are convex, so a sampled field would be large and inaccurate.
+    // The test is a signed vertical crossing count (winding number) against the triangles binned under the
+    // point, typically about four. Signed rather than parity because real shells are not perfectly
+    // watertight, and a signed count degrades gracefully where parity flips.
     const float3 clipWorldPosition = surfaceInteraction.position;
     const uint clipVolumeCount = min(cb.kenshiInteriorClipCount, 4u);
     const uint4 clipOffsets = kenshiInteriorVolumeBuffer[1];
