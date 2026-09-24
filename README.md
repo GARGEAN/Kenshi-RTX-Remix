@@ -19,6 +19,8 @@ The first start takes longer while shaders are built. Can be significant in time
 
 ## Settings
 
+Standart Kenshi settings: view distance can significantly affect performance, so lowering it is adviced if FPS are low. Shadows should be disabled.
+
 Alt+X opens the settings menu. Saved settings are stored in `user.conf`.
 
 Alt+X > Developer Settings Menu > Game Setup > Step 2: Parameter Tuning > Kenshi opens Kenshi-specific settings set. Contains both visual and performance settings. Some of them, such as anti-culling distance, can significantly affect performance. Tune for better performance/visuals tradeoff and for personal visual preferences.
