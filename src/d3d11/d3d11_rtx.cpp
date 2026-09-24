@@ -11599,8 +11599,7 @@ namespace dxvk {
       const bool declaresConstruction =
            readNamedConstant(ps.constantBuffers[0], commonPs, "constructionState", constructionState, 1u)
         && readNamedConstant(ps.constantBuffers[0], commonPs, "scaffoldTiling", scaffoldTiling, 1u)
-        && scaffoldTiling[0] > 0.0f && scaffoldTiling[0] <= 1024.0f
-        && constructionState[0] >= 0.0f && constructionState[0] <= 1.0f;
+        && scaffoldTiling[0] > 0.0f && scaffoldTiling[0] <= 1024.0f;
 
       if (declaresConstruction) {
         // `upperPos` lives on the VERTEX shader - it is what the height varying
@@ -11637,15 +11636,13 @@ namespace dxvk {
             upperPos[0], scaffoldTiling[0], 0.0f);
           ++s_kenshiConstructionDraws;
 
-          // Report every change in progress (quantised to 1/64, capped), to show whether Kenshi advances this
+          // Report every change in progress (quantised to 1/128, capped), to show whether Kenshi advances this
           // constant progressively or only swaps the material at completion.
           if (kenshi_telemetry::enabled()) {
           static std::mutex sConstructionMutex;
-          static std::unordered_map<std::string, uint32_t> sConstructionLastStep;
+          static std::unordered_map<std::string, float> sConstructionLastStep;
           static uint32_t sConstructionLines = 0;
-          const uint32_t constructionStep = uint32_t(std::lround(
-            std::clamp(constructionState[0], 0.0f, 1.0f)
-              * float(material_reuse::kKenshiConstructionSteps)));
+          const float constructionStep = material_reuse::quantizeConstructionState(constructionState[0]);
           std::lock_guard<std::mutex> lock(sConstructionMutex);
           auto lastStep = sConstructionLastStep.find(commonPs->GetName());
           const bool firstForShader = lastStep == sConstructionLastStep.end();

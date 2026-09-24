@@ -25,8 +25,9 @@ namespace material_reuse {
   // pressure when several buildings are under construction.
   static constexpr uint32_t kKenshiConstructionSteps = 128u;
   static inline float quantizeConstructionState(float progress) {
-    return float(int(std::lround(std::clamp(progress, 0.0f, 1.0f)
-      * float(kKenshiConstructionSteps)))) / float(kKenshiConstructionSteps);
+    const float quantized = float(std::round(double(progress) * double(kKenshiConstructionSteps))
+      / double(kKenshiConstructionSteps));
+    return quantized == 0.0f ? 0.0f : quantized;
   }
   // Every per-draw constant FillMaterialData recovers must be listed here: the whole function is gated
   // behind a cache keyed on exactly these names, so a missing constant freezes at its first-draw value
@@ -109,9 +110,10 @@ namespace material_reuse {
     }
     // Build progress. Without it a building under construction is a permanent cache hit: the entry keeps
     // the progress captured at placement, and other buildings of the same type inherit it. Quantised to
-    // one entry per visible step; 0xFFFFFFFF means "no progress constant", distinct from step 0.
+    // one entry per visible step. Readability is separate: negative progress is valid for walls.
     {
-      uint32_t constructionStep = 0xFFFFFFFFu;
+      bool constructionReadable = false;
+      float constructionProgress = 0.0f;
       if (metadata.construction.used && metadata.construction.size >= sizeof(float)) {
         const auto& cb = s.ps.constantBuffers[0];
         const auto mapped = cb.buffer.ptr() ? cb.buffer->GetMappedSlice() : DxvkBufferSliceHandle {};
@@ -122,12 +124,23 @@ namespace material_reuse {
         if (mapped.mapPtr && base <= end && offset + sizeof(float) <= end) {
           float progress = 0.0f;
           std::memcpy(&progress, static_cast<const uint8_t*>(mapped.mapPtr) + offset, sizeof(float));
-          if (std::isfinite(progress))
-            constructionStep = uint32_t(std::lround(
-              std::clamp(progress, 0.0f, 1.0f) * float(kKenshiConstructionSteps)));
+          if (std::isfinite(progress)) {
+            constructionReadable = true;
+            constructionProgress = quantizeConstructionState(progress);
+          }
         }
       }
-      k.add(constructionStep);
+      k.add(constructionReadable);
+      if (constructionReadable) k.add(constructionProgress);
+      if (metadata.construction.used) {
+        float upperPos[2] {}, scaffoldTiling[1] {};
+        const bool upperReadable = readNamedConstant(s.vs.constantBuffers[0], vs, "upperPos", upperPos, 2u);
+        const bool tilingReadable = readNamedConstant(s.ps.constantBuffers[0], ps, "scaffoldTiling", scaffoldTiling, 1u);
+        k.add(upperReadable);
+        if (upperReadable) k.add(upperPos[0]);
+        k.add(tilingReadable);
+        if (tilingReadable) k.add(scaffoldTiling[0]);
+      }
     }
 
     const auto& alpha = metadata.alpha;

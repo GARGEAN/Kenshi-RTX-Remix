@@ -1808,11 +1808,12 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
   // Likewise the emissive slot, which on a vest material is the clothing recolour mask. The CPU also
   // forces emission off, but the texture read must stop here too - emissiveColorLoaded alone tints the
   // surface.
-  const bool emissiveColorLoaded = !kenshiCharacterVest && surfaceMaterialInteractionTextureReadHelper(opaqueSurfaceMaterial.emissiveColorTextureIndex, opaqueSurfaceMaterial.samplerIndex, surfaceInteraction, emissiveColorSample);
+  const bool emissiveColorLoaded = !kenshiCharacterVest && !surface.kenshiConstruction && surfaceMaterialInteractionTextureReadHelper(opaqueSurfaceMaterial.emissiveColorTextureIndex, opaqueSurfaceMaterial.samplerIndex, surfaceInteraction, emissiveColorSample);
   
   // Load Emissive Color
 
-  vec3 emissiveColor = opaqueSurfaceMaterial.emissiveColorConstant;
+  // Construction stores signed progress here: pow(negative, 2.2) * 0 is still NaN.
+  vec3 emissiveColor = surface.kenshiConstruction ? vec3(0.0f) : opaqueSurfaceMaterial.emissiveColorConstant;
 
   if (emissiveColorLoaded)
   {
@@ -2285,6 +2286,9 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
     albedo = lerp(albedo, surfaceInteraction.kenshiBlood.rgb,
       surfaceInteraction.kenshiBlood.a);
 
+  const float kenshiConstructionBaseOpacity = secondaryOpacityLoaded
+    && uint(surface.alphaTestType) != uint(AlphaTestType::kAlways) ? opacity : 1.0f;
+
   if (opaqueSurfaceMaterial.flags & OPAQUE_SURFACE_MATERIAL_FLAG_IGNORE_ALPHA_CHANNEL)
   {
     opacity = 1.f;
@@ -2295,9 +2299,10 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
   // Power > 0), so a building's opacity would otherwise be its diffuse alpha - gloss - and it would be
   // perforated wherever gloss is low once isFullyOpaque is cleared. Gated on the surface flag, not on the
   // grid having loaded, so a missing lattice texture falls back to a solid building.
+  // Construction_Alpha retains its independent base_normal.a cutout.
   if (surface.kenshiConstruction)
   {
-    opacity = kenshiConstructionCut ? 0.0f : 1.0f;
+    opacity = kenshiConstructionCut ? 0.0f : kenshiConstructionBaseOpacity;
   }
   
   // Note: Gamma correct albedo input (be it from a constant or a texture). Avoid a double gamma
